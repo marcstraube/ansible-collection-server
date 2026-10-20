@@ -54,16 +54,26 @@ jobs:
           sed -i "s/^n8n_version: '.*'/n8n_version: '${{ steps.n8n.outputs.latest }}'/" \
             roles/n8n/defaults/main.yml
 
-      # github.token: pull requests opened with it do not trigger the CI
-      # workflow. Switch to a fine-grained PAT or GitHub App token when the
-      # repository is public so that the bump PR runs the n8n molecule matrix.
+      # Pull requests opened with github.token do not trigger the CI
+      # workflow; the release bot app token lets the bump PR run the n8n
+      # molecule matrix.
+      - name: Generate release bot token
+        if: >-
+          steps.n8n.outputs.latest != steps.n8n.outputs.current
+          && steps.n8n.outputs.image == 'true'
+        uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
       - name: Create Pull Request
         if: >-
           steps.n8n.outputs.latest != steps.n8n.outputs.current
           && steps.n8n.outputs.image == 'true'
         uses: peter-evans/create-pull-request@v8
         with:
-          token: ${{ github.token }}
+          token: ${{ steps.app-token.outputs.token }}
           commit-message: >-
             chore(n8n): update n8n version
             ${{ steps.n8n.outputs.current }} →
