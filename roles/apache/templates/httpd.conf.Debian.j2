@@ -1,0 +1,350 @@
+{{ ansible_managed | comment }}
+
+# This is the main Apache HTTP server configuration file for Debian/Ubuntu.
+# It contains the configuration directives that give the server its instructions.
+# Debian's Apache configuration uses a modular approach with separate directories
+# for modules, sites, and additional configuration.
+
+# Global configuration
+ServerRoot "/etc/apache2"
+
+# Mutex: Allows you to set the mutex mechanism and mutex file directory
+# for individual mutexes, or change the global defaults
+#
+# Uncomment and change the directory if you want to use a different
+# directory for mutex files (default is /var/lock/apache2)
+Mutex file:${APACHE_LOCK_DIR} default
+
+# PidFile: The file in which the server should record its process
+# identification number when it starts.
+PidFile ${APACHE_PID_FILE}
+
+# Timeout: The number of seconds before receives and sends time out.
+Timeout {{ apache_timeout }}
+
+# KeepAlive: Whether or not to allow persistent connections (more than
+# one request per connection). Set to "Off" to deactivate.
+KeepAlive {{ apache_keep_alive }}
+
+# MaxKeepAliveRequests: The maximum number of requests to allow
+# during a persistent connection. Set to 0 to allow an unlimited amount.
+MaxKeepAliveRequests {{ apache_max_keep_alive_requests }}
+
+# KeepAliveTimeout: Number of seconds to wait for the next request from the
+# same client on the same connection.
+KeepAliveTimeout {{ apache_keep_alive_timeout }}
+
+#
+# Listen Configuration
+#
+
+# Listen on configured ports
+{% for port in apache_listen_ports %}
+Listen {{ port }}
+{% endfor %}
+{% if apache_ssl_enabled %}
+{% for port in apache_listen_ssl_ports %}
+Listen {{ port }}
+{% endfor %}
+{% endif %}
+
+#
+# User and Group
+#
+
+# These need to be set in /etc/apache2/envvars
+User ${APACHE_RUN_USER}
+Group ${APACHE_RUN_GROUP}
+
+#
+# Server Identification
+#
+
+ServerAdmin {{ apache_server_admin }}
+{% if apache_server_name %}
+ServerName {{ apache_server_name }}
+{% endif %}
+
+# Security: Reduce information disclosure
+ServerTokens {{ apache_server_tokens }}
+ServerSignature {{ apache_server_signature }}
+TraceEnable {{ apache_trace_enable }}
+
+#
+# Request Limits (DoS Protection)
+#
+
+LimitRequestBody {{ apache_limit_request_body }}
+LimitRequestFields {{ apache_limit_request_fields }}
+LimitRequestFieldSize {{ apache_limit_request_field_size }}
+LimitRequestLine {{ apache_limit_request_line }}
+
+#
+# Dynamic Shared Object (DSO) Support
+#
+
+# Debian/Ubuntu uses a2enmod/a2dismod for module management
+# Modules are configured in /etc/apache2/mods-available/ and
+# enabled via symlinks in /etc/apache2/mods-enabled/
+
+# Include module configuration
+IncludeOptional mods-enabled/*.load
+IncludeOptional mods-enabled/*.conf
+
+#
+# Global Configuration
+#
+
+# AccessFileName: The name of the file to look for in each directory
+# for additional configuration directives.
+AccessFileName .htaccess
+
+# Deny access to .ht* files
+{% if apache_deny_htaccess %}
+<FilesMatch "^\.ht">
+    Require all denied
+</FilesMatch>
+{% endif %}
+
+# Deny access to sensitive files
+{% if apache_deny_sensitive_files %}
+<DirectoryMatch "/({{ apache_deny_patterns | join('|') }})(/|$)">
+    Require all denied
+</DirectoryMatch>
+{% endif %}
+
+#
+# Logging
+#
+
+# ErrorLog: The location of the error log file.
+ErrorLog ${APACHE_LOG_DIR}/error.log
+
+# LogLevel: Control the severity of messages logged to the error_log.
+LogLevel {{ apache_log_level }}
+
+# Include generic snippets of statements
+IncludeOptional conf-enabled/*.conf
+
+#
+# MPM Configuration
+#
+
+{% if apache_mpm_module == 'event' or apache_mpm_module == 'worker' %}
+<IfModule mpm_{{ apache_mpm_module }}_module>
+    StartServers             {{ apache_mpm_start_servers }}
+    MinSpareThreads          {{ apache_mpm_min_spare_threads }}
+    MaxSpareThreads          {{ apache_mpm_max_spare_threads }}
+    ThreadsPerChild          {{ apache_mpm_threads_per_child }}
+    MaxRequestWorkers        {{ apache_mpm_max_request_workers }}
+    MaxConnectionsPerChild   {{ apache_mpm_max_connections_per_child }}
+</IfModule>
+{% elif apache_mpm_module == 'prefork' %}
+<IfModule mpm_prefork_module>
+    StartServers             {{ apache_mpm_prefork_start_servers }}
+    MinSpareServers          {{ apache_mpm_prefork_min_spare_servers }}
+    MaxSpareServers          {{ apache_mpm_prefork_max_spare_servers }}
+    MaxRequestWorkers        {{ apache_mpm_prefork_max_request_workers }}
+    MaxConnectionsPerChild   {{ apache_mpm_prefork_max_connections_per_child }}
+</IfModule>
+{% endif %}
+
+#
+# MIME Types
+#
+
+<IfModule mime_module>
+    TypesConfig /etc/mime.types
+    AddType application/x-compress .Z
+    AddType application/x-gzip .gz .tgz
+    AddType text/html .shtml
+    AddOutputFilter INCLUDES .shtml
+</IfModule>
+
+#
+# Log Format Configuration
+#
+
+<IfModule log_config_module>
+    # Define custom log format if needed
+    LogFormat {{ apache_custom_log_format }} custom
+
+    # Standard Apache log formats
+    LogFormat "%v:%p %h %l %u %t \"%r\" %>s %O \"%{Referer}i\" \"%{User-Agent}i\"" vhost_combined
+    LogFormat "%h %l %u %t \"%r\" %>s %O \"%{Referer}i\" \"%{User-Agent}i\"" combined
+    LogFormat "%h %l %u %t \"%r\" %>s %O" common
+    LogFormat "%{Referer}i -> %U" referer
+    LogFormat "%{User-agent}i" agent
+
+    CustomLog ${APACHE_LOG_DIR}/access.log {{ apache_access_log_format }}
+</IfModule>
+
+#
+# Directory Security
+#
+
+# Deny access to the entirety of your server's filesystem by default.
+# You must explicitly permit access to web content directories in other
+# <Directory> blocks below.
+<Directory />
+    AllowOverride None
+    Require all denied
+</Directory>
+
+# DocumentRoot: The directory out of which you will serve your documents.
+DocumentRoot "{{ __apache_document_root }}"
+
+<Directory "{{ __apache_document_root }}">
+    Options {{ '-Indexes' if not apache_options_indexes else '' }} {{ '+FollowSymLinks' if apache_options_follow_symlinks else '' }}
+    AllowOverride {{ apache_allow_override }}
+    Require all granted
+</Directory>
+
+#
+# SSL/TLS Configuration
+#
+
+{% if apache_ssl_enabled %}
+<IfModule ssl_module>
+    SSLRandomSeed startup builtin
+    SSLRandomSeed connect builtin
+
+    # SSL Protocol support
+    SSLProtocol {{ apache_ssl_protocol }}
+
+    # SSL Cipher Suite (Mozilla Modern compatibility)
+    SSLCipherSuite {{ apache_ssl_cipher_suite }}
+    SSLHonorCipherOrder {{ 'on' if apache_ssl_honor_cipher_order else 'off' }}
+
+    # SSL Session Cache
+    SSLSessionCache {{ apache_ssl_session_cache }}
+    SSLSessionCacheTimeout {{ apache_ssl_session_cache_timeout }}
+
+    {% if apache_ssl_use_stapling %}
+    # OCSP Stapling
+    SSLUseStapling on
+    SSLStaplingResponderTimeout {{ apache_ssl_stapling_responder_timeout }}
+    SSLStaplingReturnResponderErrors {{ 'on' if apache_ssl_stapling_return_responder_errors else 'off' }}
+    SSLStaplingCache {{ apache_ssl_stapling_cache }}
+    {% endif %}
+</IfModule>
+{% endif %}
+
+#
+# HTTP/2 Configuration
+#
+
+{% if apache_http2_enabled %}
+<IfModule http2_module>
+    Protocols h2 http/1.1
+    H2MaxSessionStreams {{ apache_http2_max_session_streams }}
+    H2WindowSize {{ apache_http2_initial_window_size }}
+</IfModule>
+{% endif %}
+
+#
+# Compression (mod_deflate)
+#
+
+{% if apache_compression_enabled %}
+<IfModule deflate_module>
+    SetOutputFilter DEFLATE
+    DeflateCompressionLevel {{ apache_compression_level }}
+
+    # Don't compress images (they're already compressed)
+    SetEnvIfNoCase Request_URI \.(?:gif|jpe?g|png|ico)$ no-gzip
+
+    # Compress these MIME types
+    {% for type in apache_compression_types %}
+    AddOutputFilterByType DEFLATE {{ type }}
+    {% endfor %}
+
+    # Don't compress for old browsers
+    BrowserMatch ^Mozilla/4 gzip-only-text/html
+    BrowserMatch ^Mozilla/4\.0[678] no-gzip
+    BrowserMatch \bMSIE !no-gzip !gzip-only-text/html
+</IfModule>
+{% endif %}
+
+#
+# Caching (mod_expires)
+#
+
+{% if apache_caching_enabled %}
+<IfModule expires_module>
+    ExpiresActive On
+    ExpiresDefault "{{ apache_expires_default }}"
+
+    # Per-type cache expiration
+    {% for item in apache_expires_by_type %}
+    ExpiresByType {{ item.type }} "{{ item.expires }}"
+    {% endfor %}
+</IfModule>
+{% endif %}
+
+# Security headers
+Include {{ __apache_config_dir }}/security.conf
+
+#
+# Directory Indexes
+#
+
+<IfModule dir_module>
+    DirectoryIndex index.html index.htm index.php
+</IfModule>
+
+#
+# Server Status/Info Protection
+#
+# SECURITY: Protect server-status and server-info endpoints
+# CIS Apache Benchmark 2.4 - 5.13, 5.14
+
+{% if apache_status_enabled | bool %}
+<Location "/server-status">
+    SetHandler server-status
+    Require local
+</Location>
+
+{% endif %}
+<Location "/server-info">
+    SetHandler server-info
+    Require all denied
+</Location>
+
+{% if apache_php_fpm_enabled | default(false) and apache_php_fpm_scope | default('vhost') == 'global' %}
+#
+# PHP-FPM
+#
+# One handler for every vhost, including vhosts this role does not write.
+# A vhost overrides it with its own php_fpm_socket -- a vhost-local
+# <FilesMatch> takes precedence over this server-context one.
+
+ProxyTimeout {{ apache_php_fpm_timeout }}
+<FilesMatch "\.php$">
+    SetHandler "proxy:{{ __apache_php_fpm_handler }}"
+</FilesMatch>
+
+{% endif %}
+#
+# Virtual Hosts
+#
+
+# Debian/Ubuntu uses sites-available and sites-enabled directories
+# Enable sites using: a2ensite <sitename>
+# Disable sites using: a2dissite <sitename>
+
+# Include the virtual host configurations
+IncludeOptional sites-enabled/*.conf
+
+#
+# Extra Configuration
+#
+
+{% if apache_extra_config %}
+# Custom configuration
+{{ apache_extra_config }}
+{% endif %}
+
+{% for conf_file in apache_extra_conf_includes %}
+Include {{ conf_file }}
+{% endfor %}

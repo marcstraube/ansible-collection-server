@@ -1,0 +1,107 @@
+---
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __prepare_packages:
+      Archlinux:
+        - systemd
+        - dbus
+        - procps-ng
+        - openssl
+      Debian:
+        - systemd
+        - dbus
+        - procps
+        - openssl
+      RedHat:
+        - systemd
+        - dbus
+        - procps-ng
+        - openssl
+
+  tasks:
+    - name: Prepare | Update package cache (Arch)
+      community.general.pacman:
+        update_cache: true
+        upgrade: true
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Update package cache (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Update package cache (RedHat)
+      ansible.builtin.dnf:
+        update_cache: true
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name: '{{ __prepare_packages[ansible_facts["os_family"]] }}'
+        state: present
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Add fake DNS entry for authentik test
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        line: '127.0.0.1 authentik.example.com'
+        state: present
+        unsafe_writes: true
+
+    - name: Prepare | Create SSL directory
+      ansible.builtin.file:
+        path: /etc/nginx/ssl
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Prepare | Generate test SSL certificate
+      ansible.builtin.command:
+        cmd: >-
+          openssl req -x509 -nodes -days 365 -newkey rsa:2048
+          -keyout /etc/nginx/ssl/test.key
+          -out /etc/nginx/ssl/test.crt
+          -subj "/CN=testsite.local"
+        creates: /etc/nginx/ssl/test.crt
+
+    # Sensitive-path fixtures in the static site's root. verify.yml requests
+    # each one: the denied set must answer 403, the allowed set 200 -- the
+    # latter proves the deny patterns are anchored to whole path components.
+    - name: Prepare | Create sensitive-path fixture directories
+      ansible.builtin.file:
+        path: '/var/www/html/{{ item }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - '.git'
+        - '.hg'
+        - '.github'
+
+    - name: Prepare | Create sensitive-path fixture files
+      ansible.builtin.copy:
+        content: "fixture\n"
+        dest: '/var/www/html/{{ item }}'
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - '.env'
+        - '.env.local'
+        - '.git/config'
+        - '.hg/hgrc'
+        - '.htaccess'
+        - '.DS_Store'
+        - 'dump.sql'
+        - 'dump.sql.gz'
+        - 'index.html.bak'
+        - 'notes.txt~'
+        - '.github/workflow.yml'
+        - '.envrc'
+        - 'allowed.txt'

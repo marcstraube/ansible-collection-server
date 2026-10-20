@@ -1,0 +1,32 @@
+---
+# Archlinux-specific variables for Certbot
+
+__certbot_packages:
+  - 'certbot'
+
+__certbot_plugin_packages:
+  nginx: 'certbot-nginx'
+  apache: 'certbot-apache'
+  dns-cloudflare: 'certbot-dns-cloudflare'
+  dns-route53: 'certbot-dns-route53'
+  dns-google: 'certbot-dns-google'
+  dns-digitalocean: 'certbot-dns-digitalocean'
+  dns-linode: 'certbot-dns-linode'
+  dns-ovh: 'certbot-dns-ovh'
+  dns-rfc2136: 'certbot-dns-rfc2136'
+  dns-nsone: 'certbot-dns-nsone'
+  dns-dnsimple: 'certbot-dns-dnsimple'
+  dns-gehirn: 'certbot-dns-gehirn'
+  dns-sakuracloud: 'certbot-dns-sakuracloud'
+
+__certbot_config_dir: '/etc/letsencrypt'
+__certbot_work_dir: '/var/lib/letsencrypt'
+__certbot_log_dir: '/var/log/letsencrypt'
+
+__certbot_timer_name: 'certbot-renew.timer'
+__certbot_service_name: 'certbot-renew.service'
+
+# Apache service reloaded by the renewal deploy hook (certbot_apache_enabled)
+__certbot_apache_service_name: 'httpd'
+
+__certbot_cron_file: '/etc/cron.d/certbot'

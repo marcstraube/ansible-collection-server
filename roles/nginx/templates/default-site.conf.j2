@@ -1,0 +1,26 @@
+{{ ansible_managed | comment }}
+
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    return {{ nginx_default_site_return }};
+}
+
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+
+{% if nginx_default_site_ssl_certificate | length > 0 %}
+    ssl_certificate {{ nginx_default_site_ssl_certificate }};
+    ssl_certificate_key {{ nginx_default_site_ssl_certificate_key }};
+{% else %}
+    # Auto-generated self-signed certificate
+    ssl_certificate {{ __nginx_config_dir }}/ssl/default.crt;
+    ssl_certificate_key {{ __nginx_config_dir }}/ssl/default.key;
+{% endif %}
+
+    return {{ nginx_default_site_return }};
+}

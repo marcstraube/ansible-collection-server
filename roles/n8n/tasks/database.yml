@@ -1,0 +1,45 @@
+---
+# Creates PostgreSQL database and user for n8n.
+# Requires marcstraube.server.postgresql role to be run first.
+
+- name: Database | Create n8n PostgreSQL user
+  community.postgresql.postgresql_user:
+    name: '{{ n8n_db_user }}'
+    password: '{{ n8n_db_password }}'
+    state: present
+  become: true
+  become_user: postgres
+  no_log: true
+
+- name: Database | Create n8n PostgreSQL database
+  community.postgresql.postgresql_db:
+    name: '{{ n8n_db_name }}'
+    owner: '{{ n8n_db_user }}'
+    encoding: UTF8
+    lc_collate: en_US.UTF-8
+    lc_ctype: en_US.UTF-8
+    template: template0
+    state: present
+  become: true
+  become_user: postgres
+
+- name: Database | Grant schema privileges to n8n user (PostgreSQL 15+)
+  community.postgresql.postgresql_privs:
+    login_db: '{{ n8n_db_name }}'
+    roles: '{{ n8n_db_user }}'
+    privs: ALL
+    type: schema
+    objs: public
+    state: present
+  become: true
+  become_user: postgres
+
+- name: Database | Grant database privileges to n8n user
+  community.postgresql.postgresql_privs:
+    login_db: '{{ n8n_db_name }}'
+    roles: '{{ n8n_db_user }}'
+    privs: ALL
+    type: database
+    state: present
+  become: true
+  become_user: postgres

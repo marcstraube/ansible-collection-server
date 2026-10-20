@@ -1,0 +1,35 @@
+---
+__postgresql_version: "{{ postgresql_version | default('17', true) }}"
+__postgresql_pgdg: "{{ postgresql_repo == 'pgdg' }}"
+
+# Debian's metapackage pulls in the release's PostgreSQL version; PGDG
+# ships one versioned package per major version (contrib included).
+__postgresql_packages: >-
+  {{ __postgresql_pgdg_packages if __postgresql_pgdg | bool
+     else __postgresql_distro_packages }}
+__postgresql_distro_packages:
+  - postgresql
+  - postgresql-contrib
+  - python3-psycopg2
+__postgresql_pgdg_packages:
+  - 'postgresql-{{ __postgresql_version }}'
+  - python3-psycopg2
+
+__postgresql_service_name: postgresql
+__postgresql_config_dir: '/etc/postgresql/{{ __postgresql_version }}/main'
+__postgresql_data_dir: '/var/lib/postgresql/{{ __postgresql_version }}/main'
+__postgresql_bin_dir: '/usr/lib/postgresql/{{ __postgresql_version }}/bin'
+
+# Parent of every cluster data directory, scanned for clusters of other
+# versions before any change is made.
+__postgresql_cluster_root: /var/lib/postgresql
+
+# PGDG apt repository
+__postgresql_pgdg_apt_uri: https://apt.postgresql.org/pub/repos/apt
+__postgresql_pgdg_apt_key_url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+
+# SSL fallback paths — Debian provides a system-wide snakeoil cert via
+# the `ssl-cert` package (post-install hook). Used when
+# postgresql_ssl_cert_file/_key_file are left empty in inventory.
+__postgresql_ssl_cert_file: '/etc/ssl/certs/ssl-cert-snakeoil.pem'
+__postgresql_ssl_key_file: '/etc/ssl/private/ssl-cert-snakeoil.key'

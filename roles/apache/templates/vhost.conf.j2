@@ -1,0 +1,49 @@
+{{ ansible_managed | comment }}
+
+<VirtualHost *:{{ item.listen_port | default(80) }}>
+    ServerName {{ item.server_name }}
+{% if item.server_alias is defined %}
+{% for alias in item.server_alias %}
+    ServerAlias {{ alias }}
+{% endfor %}
+
+{% endif %}
+{% if item.document_root is defined %}
+    DocumentRoot {{ item.document_root }}
+
+    <Directory {{ item.document_root }}>
+        Options {{ item.options | default('-Indexes +FollowSymLinks') }}
+        AllowOverride {{ item.allow_override | default('None') }}
+        Require all granted
+    </Directory>
+
+{% endif %}
+{% if apache_acme_challenge_enabled | bool %}
+    # ACME HTTP-01 challenge (Let's Encrypt)
+    Alias /.well-known/acme-challenge/ {{ apache_acme_webroot }}/.well-known/acme-challenge/
+    <Directory "{{ apache_acme_webroot }}/.well-known/acme-challenge/">
+        Options None
+        AllowOverride None
+        Require all granted
+    </Directory>
+
+{% endif %}
+{% if item.redirect_to_https | default(false) %}
+    # Redirect to HTTPS
+    RewriteEngine On
+{% if apache_acme_challenge_enabled | bool %}
+    RewriteCond %{REQUEST_URI} !^/\.well-known/acme-challenge/
+{% endif %}
+    RewriteCond %{HTTPS} off
+    RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+{% endif %}
+    # Logging
+    ErrorLog {{ __apache_log_dir }}/{{ item.server_name }}-error.log
+    CustomLog {{ __apache_log_dir }}/{{ item.server_name }}-access.log combined
+
+{% if item.custom_config is defined %}
+    # Custom configuration
+    {{ item.custom_config | indent(4) }}
+{% endif %}
+</VirtualHost>

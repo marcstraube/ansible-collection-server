@@ -1,0 +1,46 @@
+---
+- name: Configure | Deploy n8n environment file
+  ansible.builtin.template:
+    src: n8n.env.j2
+    dest: '{{ n8n_env_file }}'
+    owner: '{{ n8n_user }}'
+    group: '{{ n8n_group }}'
+    mode: '0600'
+  notify: Restart n8n
+  no_log: true
+
+- name: Configure | Deploy task runner environment file
+  ansible.builtin.template:
+    src: n8n-runner.env.j2
+    dest: '{{ n8n_runners_env_file }}'
+    owner: '{{ n8n_user }}'
+    group: '{{ n8n_group }}'
+    mode: '0600'
+  notify: Restart n8n runner
+  no_log: true
+
+- name: Configure | Set ownership of n8n data directory
+  ansible.builtin.file:
+    path: '{{ n8n_data_dir }}'
+    state: directory
+    owner: '{{ n8n_user }}'
+    group: '{{ n8n_group }}'
+    mode: '0750'
+
+- name: Configure | Set ownership of log directory
+  ansible.builtin.file:
+    path: '/var/log/n8n'
+    state: directory
+    owner: '{{ n8n_user }}'
+    group: '{{ n8n_group }}'
+    mode: '0750'
+
+- name: Configure | SELinux - Label n8n port as http_port_t
+  community.general.seport:
+    ports: '{{ n8n_port }}'
+    proto: tcp
+    setype: http_port_t
+    state: present
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'

@@ -1,0 +1,66 @@
+---
+- name: Install | Apache packages
+  ansible.builtin.package:
+    name: '{{ __apache_packages }}'
+    state: present
+  retries: 3
+  delay: 5
+
+- name: Install | Apache utilities (Debian)
+  ansible.builtin.package:
+    name: '{{ __apache_utils_packages }}'
+    state: present
+  retries: 3
+  delay: 5
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - __apache_utils_packages is defined
+
+- name: Install | Apache tools (RedHat)
+  ansible.builtin.package:
+    name: '{{ __apache_tools_packages }}'
+    state: present
+  retries: 3
+  delay: 5
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - __apache_tools_packages is defined
+
+- name: Install | SSL module (RedHat)
+  ansible.builtin.package:
+    name: '{{ __apache_ssl_packages }}'
+    state: present
+  retries: 3
+  delay: 5
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - apache_ssl_enabled | bool
+    - __apache_ssl_packages is defined
+
+- name: Install | Create vhosts directory
+  ansible.builtin.file:
+    path: '{{ __apache_vhosts_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Install | Create sites-enabled directory (Debian)
+  ansible.builtin.file:
+    path: '{{ __apache_vhosts_enabled_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - __apache_vhosts_enabled_dir is defined
+
+- name: Install | Create modules directory (Arch)
+  ansible.builtin.file:
+    path: '{{ __apache_modules_available_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: ansible_facts['os_family'] == 'Archlinux'

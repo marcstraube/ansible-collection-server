@@ -1,0 +1,528 @@
+---
+#
+# Role Control
+#
+
+# Enable the nginx role
+nginx_enabled: false
+
+# Enable and start the nginx service
+nginx_service_enabled: true
+
+#
+# Installation
+#
+
+# Install nginx-mainline instead of stable (Arch only)
+nginx_mainline: false
+
+# Additional modules to install
+nginx_modules: []
+#   - 'http_geoip'
+#   - 'http_image_filter'
+#   - 'http_perl'
+#   - 'stream'
+#   - 'mail'
+
+#
+# Worker Configuration
+#
+
+# Number of worker processes (auto = number of CPU cores)
+nginx_worker_processes: 'auto'
+
+# Maximum simultaneous connections per worker
+nginx_worker_connections: 1024
+
+# Use epoll for better performance (Linux)
+nginx_use_epoll: true
+
+# Accept multiple connections at once
+nginx_multi_accept: true
+
+#
+# HTTP Core
+#
+
+# Send files directly from disk
+nginx_sendfile: true
+
+# Optimize sendfile for large files
+nginx_tcp_nopush: true
+
+# Disable Nagle's algorithm for better latency
+nginx_tcp_nodelay: true
+
+# Keep-alive timeout (seconds)
+nginx_keepalive_timeout: 65
+
+# Maximum size of types hash table
+nginx_types_hash_max_size: 2048
+
+# Hide nginx version in headers and error pages
+nginx_server_tokens: false
+
+# Client body size limit
+nginx_client_max_body_size: '64m'
+
+# Client body buffer size
+nginx_client_body_buffer_size: '16k'
+
+# Large client header buffers
+nginx_large_client_header_buffers: '4 16k'
+
+# Client body timeout (seconds)
+nginx_client_body_timeout: 60
+
+# Client header timeout (seconds)
+nginx_client_header_timeout: 60
+
+# Send timeout (seconds)
+nginx_send_timeout: 60
+
+#
+# Logging
+#
+
+# Access log path (false to disable)
+nginx_access_log: '/var/log/nginx/access.log'
+
+# Error log path
+nginx_error_log: '/var/log/nginx/error.log'
+
+# Error log level: debug, info, notice, warn, error, crit, alert, emerg
+nginx_error_log_level: 'warn'
+
+# Access log format
+nginx_log_format: |
+  '$remote_addr - $remote_user [$time_local] "$request" '
+  '$status $body_bytes_sent "$http_referer" '
+  '"$http_user_agent" "$http_x_forwarded_for"'
+
+# Custom log formats (name: format)
+# Example:
+#   json: |
+#     '{"time": "$time_iso8601", "remote_addr": "$remote_addr", ...}'
+nginx_custom_log_formats: {}
+
+#
+# Gzip Compression
+#
+
+# Enable gzip compression
+nginx_gzip: true
+
+# Minimum response length to compress
+nginx_gzip_min_length: 1000
+
+# Compression level (1-9)
+nginx_gzip_comp_level: 6
+
+# Compress responses for proxied requests
+nginx_gzip_proxied: 'any'
+
+# MIME types to compress
+nginx_gzip_types:
+  - 'text/plain'
+  - 'text/css'
+  - 'text/xml'
+  - 'text/javascript'
+  - 'application/json'
+  - 'application/javascript'
+  - 'application/xml'
+  - 'application/xml+rss'
+  - 'application/x-javascript'
+  - 'image/svg+xml'
+
+# Vary header for caching proxies
+nginx_gzip_vary: true
+
+#
+# SSL/TLS Defaults
+#
+
+# Default SSL protocols
+nginx_ssl_protocols:
+  - 'TLSv1.2'
+  - 'TLSv1.3'
+
+# Default SSL ciphers (modern compatibility)
+# yamllint disable-line rule:line-length
+nginx_ssl_ciphers: 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384'
+
+# Prefer server ciphers
+nginx_ssl_prefer_server_ciphers: false
+
+# SSL session cache
+nginx_ssl_session_cache: 'shared:SSL:10m'
+
+# SSL session timeout
+nginx_ssl_session_timeout: '1d'
+
+# SSL session tickets
+nginx_ssl_session_tickets: false
+
+# OCSP stapling
+nginx_ssl_stapling: true
+nginx_ssl_stapling_verify: true
+
+# Diffie-Hellman parameters file (generate with: openssl dhparam -out dhparam.pem 4096)
+nginx_ssl_dhparam: ''
+
+#
+# Security Headers
+#
+
+# Enable security headers globally
+nginx_security_headers_enabled: true
+
+# Security headers to set
+nginx_security_headers:
+  X-Frame-Options: 'SAMEORIGIN'
+  X-Content-Type-Options: 'nosniff'
+  X-XSS-Protection: '1; mode=block'
+  Referrer-Policy: 'strict-origin-when-cross-origin'
+  # Content-Security-Policy: "default-src 'self'"  # Uncomment and customize
+
+# HSTS
+
+# Enable HSTS (only applied when SSL is enabled on a site)
+nginx_hsts_enabled: true
+nginx_hsts_max_age: 31536000  # 1 year
+nginx_hsts_include_subdomains: true
+nginx_hsts_preload: false
+
+# Sensitive paths
+
+# Deny access to version control metadata, environment files and OS clutter that
+# ends up in a document root. Rendered as one regex location per site, above the
+# site-type branch, so static, php and proxy sites are covered alike. A site
+# overrides the list with its own `deny_patterns` key; an empty list disables the
+# block. Keep the patterns explicit -- a generic `/\.` would also match
+# `/.well-known/acme-challenge/`, and a regex location wins over a plain prefix
+# location, which would break certificate renewal. Each pattern must match a
+# whole path component: the role anchors the list as /(...)(/|$), so '\.git'
+# blocks .git and everything below it, but not .github.
+nginx_deny_patterns:
+  # Version control metadata
+  - '\.git'
+  - '\.svn'
+  - '\.hg'
+  # Environment files (.env, .env.local, .env.production, ...)
+  - '\.env'
+  - '\.env\.[^/]+'
+  # Apache access files (.htaccess, .htpasswd)
+  - '\.ht[^/]*'
+  # OS clutter
+  - '\.DS_Store'
+  - 'Thumbs\.db'
+  # Editor backups and swap files
+  - '[^/]+~'
+  - '[^/]+\.(bak|orig|swp|swo)'
+  # Database dumps
+  - '[^/]+\.sql(\.(gz|bz2|xz|zst))?'
+
+#
+# Rate Limiting
+#
+
+# Enable global rate limiting zones
+nginx_rate_limiting_enabled: false
+
+# Rate limiting zones
+# Example:
+#   - name: 'general'
+#     key: '$binary_remote_addr'
+#     size: '10m'
+#     rate: '10r/s'
+#   - name: 'api'
+#     key: '$binary_remote_addr'
+#     size: '10m'
+#     rate: '100r/s'
+nginx_rate_limit_zones: []
+
+#
+# Upstreams
+#
+# Reverse proxy and load balancing backends.
+
+# Upstream definitions
+# Example:
+#   - name: 'backend_app'
+#     strategy: 'least_conn'  # round_robin (default), least_conn, ip_hash, hash
+#     keepalive: 32
+#     servers:
+#       - address: '127.0.0.1:3000'
+#         weight: 1
+#         max_fails: 3
+#         fail_timeout: '30s'
+#       - address: '127.0.0.1:3001'
+#         weight: 1
+#         backup: true
+nginx_upstreams: []
+
+#
+# Map Blocks
+#
+
+# Nginx map block definitions
+# Example:
+#   - name: 'websocket_upgrade'
+#     source: '$http_upgrade'
+#     variable: '$connection_upgrade'
+#     default: 'upgrade'
+#     mappings:
+#       - value: "''"
+#         result: 'close'
+nginx_maps: []
+
+#
+# Default Site
+#
+
+# Enable default catch-all site for unmatched requests
+nginx_default_site_enabled: true
+
+# Return code for default site (444 = close connection)
+nginx_default_site_return: 444
+
+# SSL certificate for default site (empty = auto-generate self-signed)
+nginx_default_site_ssl_certificate: ''
+nginx_default_site_ssl_certificate_key: ''
+
+#
+# Sites (Virtual Hosts)
+#
+
+# Site definitions
+# Example:
+#
+# Static website:
+#   - name: 'example.com'
+#     server_names:
+#       - 'example.com'
+#       - 'www.example.com'
+#     root: '/var/www/example.com'
+#     index: 'index.html index.htm'
+#     ssl:
+#       enabled: true
+#       certificate: '/etc/letsencrypt/live/example.com/fullchain.pem'
+#       certificate_key: '/etc/letsencrypt/live/example.com/privkey.pem'
+#     http_redirect: true  # Redirect HTTP to HTTPS
+#
+# Reverse proxy:
+#   - name: 'app.example.com'
+#     server_names:
+#       - 'app.example.com'
+#     type: 'proxy'
+#     proxy_pass: 'http://127.0.0.1:3000'
+#     # Or use upstream:
+#     # proxy_pass: 'http://backend_app'
+#     websocket: true  # Enable WebSocket support
+#     ssl:
+#       enabled: true
+#       certificate: '/etc/letsencrypt/live/app.example.com/fullchain.pem'
+#       certificate_key: '/etc/letsencrypt/live/app.example.com/privkey.pem'
+#
+# PHP application:
+#   - name: 'php-app'
+#     server_names:
+#       - 'php.example.com'
+#     root: '/var/www/php-app'
+#     index: 'index.php index.html'
+#     php:
+#       enabled: true
+#       socket: '/run/php-fpm/www.sock'  # Or 'socket: 127.0.0.1:9000'
+#
+# Full options:
+#   - name: 'full-example'
+#     enabled: true  # default: true
+#     server_names:
+#       - 'full.example.com'
+#     listen: 80  # default: 80
+#     listen_ssl: 443  # default: 443
+#     root: '/var/www/full'
+#     index: 'index.html'
+#     type: 'static'  # static, proxy, php, custom
+#     access_log: '/var/log/nginx/full-access.log'
+#     error_log: '/var/log/nginx/full-error.log'
+#     ssl:
+#       enabled: true
+#       certificate: '/path/to/cert.pem'
+#       certificate_key: '/path/to/key.pem'
+#       trusted_certificate: '/path/to/chain.pem'  # For OCSP stapling
+#     http_redirect: true
+#     www_redirect: 'non-www'  # 'www', 'non-www', or false
+#     security_headers: true  # Use global security headers
+#     custom_headers:
+#       X-Custom-Header: 'value'
+#     basic_auth:
+#       enabled: true
+#       realm: 'Restricted'
+#       users:
+#         - name: 'admin'
+#           password: '$apr1$...'  # htpasswd format
+#     allow_ips: []  # IP whitelist
+#     deny_ips: []   # IP blacklist
+#     rate_limit:
+#       zone: 'general'
+#       burst: 20
+#       nodelay: true
+#     locations: []  # Additional location blocks
+#     extra_config: ''  # Raw config to add
+nginx_sites: []
+
+#
+# Basic Auth
+#
+
+# Htpasswd file definitions
+# Example:
+#   - name: 'admin'
+#     path: '/etc/nginx/.htpasswd-admin'
+#     users:
+#       - name: 'admin'
+#         password: 'secret'  # Will be hashed
+#       - name: 'user'
+#         password: 'password'
+nginx_htpasswd_files: []
+
+#
+# Global Locations
+#
+
+# Location blocks added to all sites
+# Example:
+#   - path: '/.well-known/acme-challenge/'
+#     config: |
+#       root /var/www/letsencrypt;
+#       allow all;
+nginx_global_locations: []
+
+#
+# Stream (TCP/UDP) Proxying
+#
+
+# Enable stream module
+nginx_stream_enabled: false
+
+# Stream upstream definitions
+# Example:
+#   - name: 'mysql_backend'
+#     servers:
+#       - address: '192.168.1.10:3306'
+#       - address: '192.168.1.11:3306'
+nginx_stream_upstreams: []
+
+# Stream server definitions
+# Example:
+#   - listen: 3306
+#     proxy_pass: 'mysql_backend'
+#     proxy_timeout: '3s'
+#     proxy_connect_timeout: '1s'
+nginx_stream_servers: []
+
+#
+# Stub Status
+#
+
+# Enable stub status endpoint for monitoring
+nginx_stub_status_enabled: false
+
+# Stub status URL path
+nginx_stub_status_path: '/nginx_status'
+
+# Allowed IPs for stub status
+nginx_stub_status_allow:
+  - '127.0.0.1'
+  - '::1'
+
+#
+# Extra Configuration
+#
+
+# Extra configuration for http block
+nginx_http_extra_config: ''
+
+# Extra configuration at main level
+nginx_extra_config: ''
+
+# Include additional config files
+# Example:
+#   - '/etc/nginx/custom/*.conf'
+nginx_extra_includes: []
+
+#
+# Directories
+#
+
+# Directories to create with proper permissions
+# Example:
+#   - path: '/var/www/letsencrypt'
+#     owner: 'www-data'
+#     group: 'www-data'
+#     mode: '0755'
+nginx_create_directories: []
+
+#
+# Proxy Defaults
+#
+
+# Default proxy timeouts (seconds)
+nginx_proxy_connect_timeout: 60
+nginx_proxy_send_timeout: 60
+nginx_proxy_read_timeout: 60
+
+# Default proxy buffer settings
+nginx_proxy_buffer_size: '4k'
+nginx_proxy_buffers: '4 32k'
+nginx_proxy_busy_buffers_size: '64k'
+
+# Headers to pass to backend
+nginx_proxy_headers:
+  Host: '$host'
+  X-Real-IP: '$remote_addr'
+  X-Forwarded-For: '$proxy_add_x_forwarded_for'
+  X-Forwarded-Proto: '$scheme'
+  X-Forwarded-Host: '$host'
+  X-Forwarded-Port: '$server_port'
+
+#
+# WebSocket
+#
+
+# WebSocket proxy timeout
+nginx_websocket_timeout: '3600s'
+
+#
+# Resolver
+#
+
+# DNS resolver for dynamic upstreams
+# Example: '8.8.8.8 8.8.4.4 valid=300s'
+nginx_resolver: ''
+
+# Resolver timeout
+nginx_resolver_timeout: '5s'
+
+#
+# Authentik Forward Auth
+#
+# SSO forward authentication for protected sites.
+# Set per-site with the authentik attribute in nginx_sites items.
+
+# Default Authentik URL
+nginx_authentik_default_url: ''
+
+# Authentik outpost path
+nginx_authentik_outpost_path: '/outpost.goauthentik.io'
+
+#
+# Firewall
+#
+
+# Enable firewalld rule for Nginx ports
+nginx_firewalld_enabled: true
+
+# Firewalld zone for Nginx services
+nginx_firewalld_zone: 'public'

@@ -1,0 +1,22 @@
+---
+- name: Reload PostgreSQL systemd units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: postgresql_enabled | bool
+  failed_when: false
+
+- name: Restart PostgreSQL
+  ansible.builtin.systemd_service:
+    name: '{{ __postgresql_service_name }}'
+    state: restarted
+  when: postgresql_service_enabled | bool
+
+# Also subscribes to the 'Reload cert services' topic of the certbot role and
+# marcstraube.common.pki: PostgreSQL rereads its SSL certificate and key on a
+# configuration reload.
+- name: Reload PostgreSQL configuration
+  ansible.builtin.systemd_service:
+    name: '{{ __postgresql_service_name }}'
+    state: reloaded
+  listen: Reload cert services
+  when: postgresql_service_enabled | bool

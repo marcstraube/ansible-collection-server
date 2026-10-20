@@ -1,0 +1,87 @@
+---
+name: Update n8n Version
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly Monday 6:00 UTC
+  workflow_dispatch:       # Manual trigger
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-n8n:
+    name: Check for new n8n stable release
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      # n8n moves the npm `latest` tag with every weekly release and
+      # `stable` a few weeks later; the role default follows the stable
+      # channel. The role pulls docker.io/n8nio/n8n:<version>, so the bump
+      # waits until the matching image tag is published.
+      - name: Get latest n8n stable release
+        id: n8n
+        run: |
+          LATEST=$(curl -fsSL https://registry.npmjs.org/-/package/n8n/dist-tags \
+            | jq -r '.stable')
+          if ! [[ "$LATEST" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Unexpected stable version from npm: '$LATEST'"
+            exit 1
+          fi
+          CURRENT=$(grep '^n8n_version:' roles/n8n/defaults/main.yml \
+            | sed "s/.*'\(.*\)'/\1/")
+          if curl -fsSL -o /dev/null \
+               "https://hub.docker.com/v2/repositories/n8nio/n8n/tags/${LATEST}"; then
+            IMAGE=true
+          else
+            IMAGE=false
+            echo "::warning::Image tag n8nio/n8n:${LATEST} not published yet"
+          fi
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "Current: $CURRENT, Latest stable: $LATEST, image published: $IMAGE"
+
+      - name: Update defaults/main.yml
+        if: >-
+          steps.n8n.outputs.latest != steps.n8n.outputs.current
+          && steps.n8n.outputs.image == 'true'
+        run: |
+          sed -i "s/^n8n_version: '.*'/n8n_version: '${{ steps.n8n.outputs.latest }}'/" \
+            roles/n8n/defaults/main.yml
+
+      # github.token: pull requests opened with it do not trigger the CI
+      # workflow. Switch to a fine-grained PAT or GitHub App token when the
+      # repository is public so that the bump PR runs the n8n molecule matrix.
+      - name: Create Pull Request
+        if: >-
+          steps.n8n.outputs.latest != steps.n8n.outputs.current
+          && steps.n8n.outputs.image == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ github.token }}
+          commit-message: >-
+            chore(n8n): update n8n version
+            ${{ steps.n8n.outputs.current }} →
+            ${{ steps.n8n.outputs.latest }}
+          branch: chore/update-n8n-${{ steps.n8n.outputs.latest }}
+          title: >-
+            chore(n8n): update n8n version to
+            ${{ steps.n8n.outputs.latest }}
+          body: |
+            Automated update of `n8n_version` in `roles/n8n/defaults/main.yml`.
+
+            **Previous:** `${{ steps.n8n.outputs.current }}`
+            **New:** `${{ steps.n8n.outputs.latest }}`
+
+            Release notes: https://github.com/n8n-io/n8n/releases/tag/n8n%40${{ steps.n8n.outputs.latest }}
+
+            ---
+            This PR was created automatically by the
+            `update-n8n-version` workflow.
+          labels: dependencies
+          delete-branch: true

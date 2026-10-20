@@ -1,0 +1,69 @@
+---
+- name: Configure | Resolve effective SSL cert and key paths
+  ansible.builtin.set_fact:
+    __postgresql_ssl_cert_input: '{{ postgresql_ssl_cert_file or __postgresql_ssl_cert_file }}'
+    __postgresql_ssl_key_input: '{{ postgresql_ssl_key_file or __postgresql_ssl_key_file }}'
+  when: postgresql_ssl_enabled | bool
+
+- name: Configure | Build absolute SSL paths for existence check
+  ansible.builtin.set_fact:
+    __postgresql_ssl_cert_absolute: >-
+      {{ __postgresql_ssl_cert_input
+         if __postgresql_ssl_cert_input.startswith('/')
+         else __postgresql_data_dir ~ '/' ~ __postgresql_ssl_cert_input }}
+    __postgresql_ssl_key_absolute: >-
+      {{ __postgresql_ssl_key_input
+         if __postgresql_ssl_key_input.startswith('/')
+         else __postgresql_data_dir ~ '/' ~ __postgresql_ssl_key_input }}
+  when: postgresql_ssl_enabled | bool
+
+- name: Configure | Stat SSL cert file
+  ansible.builtin.stat:
+    path: '{{ __postgresql_ssl_cert_absolute }}'
+  register: __postgresql_ssl_cert_stat
+  when: postgresql_ssl_enabled | bool
+
+- name: Configure | Stat SSL key file
+  ansible.builtin.stat:
+    path: '{{ __postgresql_ssl_key_absolute }}'
+  register: __postgresql_ssl_key_stat
+  when: postgresql_ssl_enabled | bool
+
+- name: Configure | Assert SSL cert and key files exist when SSL enabled
+  ansible.builtin.assert:
+    that:
+      - __postgresql_ssl_cert_stat.stat.exists
+      - __postgresql_ssl_key_stat.stat.exists
+    fail_msg: |
+      postgresql_ssl_enabled is true but the SSL certificate or key file
+      is missing on this host:
+
+        cert: {{ __postgresql_ssl_cert_absolute }}
+              ({{ 'OK' if __postgresql_ssl_cert_stat.stat.exists else 'MISSING' }})
+        key : {{ __postgresql_ssl_key_absolute }}
+              ({{ 'OK' if __postgresql_ssl_key_stat.stat.exists else 'MISSING' }})
+
+      Either set postgresql_ssl_cert_file / postgresql_ssl_key_file in
+      inventory to an existing file pair, or place the files at the OS
+      default location. On RHEL and Arch the default expects
+      `server.crt` + `server.key` in {{ __postgresql_data_dir }} —
+      these distros do not ship a system-wide snakeoil certificate.
+  when: postgresql_ssl_enabled | bool
+
+- name: Configure | Deploy postgresql.conf
+  ansible.builtin.template:
+    src: postgresql.conf.j2
+    dest: '{{ __postgresql_config_dir }}/postgresql.conf'
+    owner: '{{ __postgresql_user }}'
+    group: '{{ __postgresql_group }}'
+    mode: '0600'
+  notify: Restart PostgreSQL
+
+- name: Configure | Deploy pg_hba.conf
+  ansible.builtin.template:
+    src: pg_hba.conf.j2
+    dest: '{{ __postgresql_config_dir }}/pg_hba.conf'
+    owner: '{{ __postgresql_user }}'
+    group: '{{ __postgresql_group }}'
+    mode: '0600'
+  notify: Reload PostgreSQL configuration

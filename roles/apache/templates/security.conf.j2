@@ -1,0 +1,15 @@
+{{ ansible_managed | comment }}
+
+# Security headers, included server-wide from the main configuration.
+# ServerTokens, TraceEnable and the access restrictions live there.
+{% if apache_security_headers_enabled %}
+<IfModule headers_module>
+{% for header, value in apache_security_headers.items() %}
+    Header always set {{ header }} "{{ value }}"
+{% endfor %}
+{% if apache_hsts_enabled %}
+
+    Header always set Strict-Transport-Security "max-age={{ apache_hsts_max_age }}{{ '; includeSubDomains' if apache_hsts_include_subdomains else '' }}{{ '; preload' if apache_hsts_preload else '' }}"
+{% endif %}
+</IfModule>
+{% endif %}

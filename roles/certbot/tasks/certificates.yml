@@ -1,0 +1,146 @@
+---
+# =============================================================================
+# Mail Certificate (automatic generation)
+# =============================================================================
+
+- name: Certificates | Build mail certificate domain list
+  ansible.builtin.set_fact:
+    __certbot_mail_domains: >-
+      {{
+        (certbot_mail_hostnames |
+          map('regex_replace', '$', '.' ~ certbot_mail_domain) | list) +
+        (['autodiscover.' ~ certbot_mail_domain,
+          'autoconfig.' ~ certbot_mail_domain]
+          if certbot_mail_autodiscover else [])
+      }}
+  when: certbot_mail_certificate_enabled | bool
+
+- name: Certificates | Check existing mail certificate
+  ansible.builtin.stat:
+    path: "{{ certbot_config_dir }}/live/mail.{{ certbot_mail_domain }}/fullchain.pem"
+  register: __certbot_mail_cert_exists
+  when: certbot_mail_certificate_enabled | bool
+
+- name: Certificates | Obtain mail certificate
+  ansible.builtin.command:
+    cmd: >-
+      certbot certonly
+      --non-interactive
+      --agree-tos
+      {% if certbot_email | length > 0 %}
+      --email {{ certbot_email }}
+      {% elif certbot_register_unsafely_without_email | bool %}
+      --register-unsafely-without-email
+      {% endif %}
+      {% if certbot_staging | bool %}
+      --staging
+      {% endif %}
+      --cert-name mail.{{ certbot_mail_domain }}
+      {% for domain in __certbot_mail_domains %}
+      -d {{ domain }}
+      {% endfor %}
+      --authenticator {{ certbot_mail_authenticator }}
+      {% if certbot_mail_authenticator == 'webroot' %}
+      --webroot-path {{ certbot_mail_webroot }}
+      {% endif %}
+      {% if certbot_mail_authenticator == 'dns-cloudflare' %}
+      --dns-cloudflare-credentials {{ certbot_dns_cloudflare_credentials_file }}
+      --dns-cloudflare-propagation-seconds {{ certbot_dns_propagation_seconds }}
+      {% endif %}
+      --key-type {{ certbot_key_type }}
+      {% if certbot_key_type == 'ecdsa' %}
+      --elliptic-curve {{ certbot_elliptic_curve }}
+      {% endif %}
+  register: __certbot_mail_obtain
+  changed_when: "'Successfully received certificate' in __certbot_mail_obtain.stdout | default('')"
+  notify: Reload cert services
+  when:
+    - certbot_mail_certificate_enabled | bool
+    - not __certbot_mail_cert_exists.stat.exists | default(false)
+
+# =============================================================================
+# Standard Certificates
+# =============================================================================
+
+- name: Certificates | Check existing certificates
+  ansible.builtin.stat:
+    path: "{{ certbot_config_dir }}/live/{{ item.name | default(item.domains[0]) }}/fullchain.pem"
+  loop: "{{ certbot_certificates }}"
+  loop_control:
+    label: "{{ item.name | default(item.domains[0]) }}"
+  register: __certbot_existing_certs
+
+- name: Certificates | Obtain certificates
+  ansible.builtin.command:
+    cmd: >-
+      certbot certonly
+      --non-interactive
+      --agree-tos
+      {% if certbot_email | length > 0 %}
+      --email {{ certbot_email }}
+      {% elif certbot_register_unsafely_without_email | bool %}
+      --register-unsafely-without-email
+      {% endif %}
+      {% if item.item.staging | default(certbot_staging) | bool %}
+      --staging
+      {% endif %}
+      --cert-name {{ item.item.name | default(item.item.domains[0]) }}
+      {% for domain in item.item.domains %}
+      -d {{ domain }}
+      {% endfor %}
+      --authenticator {{ item.item.authenticator | default(certbot_authenticator) }}
+      {% if item.item.authenticator | default(certbot_authenticator) == 'webroot' %}
+      --webroot-path {{ item.item.webroot | default(certbot_webroot_path) }}
+      {% endif %}
+      {% if item.item.authenticator | default(certbot_authenticator) == 'dns-cloudflare' %}
+      --dns-cloudflare-credentials {{ certbot_dns_cloudflare_credentials_file }}
+      --dns-cloudflare-propagation-seconds {{ certbot_dns_propagation_seconds }}
+      {% endif %}
+      {% if item.item.authenticator | default(certbot_authenticator) == 'dns-route53' %}
+      --dns-route53-propagation-seconds {{ certbot_dns_propagation_seconds }}
+      {% endif %}
+      {% if item.item.authenticator | default(certbot_authenticator) == 'dns-digitalocean' %}
+      --dns-digitalocean-credentials {{ certbot_dns_digitalocean_credentials_file }}
+      --dns-digitalocean-propagation-seconds {{ certbot_dns_propagation_seconds }}
+      {% endif %}
+      --key-type {{ item.item.key_type | default(certbot_key_type) }}
+      {% if item.item.key_type | default(certbot_key_type) == 'rsa' %}
+      --rsa-key-size {{ item.item.rsa_key_size | default(certbot_rsa_key_size) }}
+      {% endif %}
+      {% if item.item.key_type | default(certbot_key_type) == 'ecdsa' %}
+      --elliptic-curve {{ item.item.elliptic_curve | default(certbot_elliptic_curve) }}
+      {% endif %}
+      {% if item.item.must_staple | default(false) | bool %}
+      --must-staple
+      {% endif %}
+      {% if certbot_preferred_chain | length > 0 %}
+      --preferred-chain "{{ certbot_preferred_chain }}"
+      {% endif %}
+      {% if item.item.pre_hook | default('') | length > 0 %}
+      --pre-hook "{{ item.item.pre_hook }}"
+      {% endif %}
+      {% if item.item.post_hook | default('') | length > 0 %}
+      --post-hook "{{ item.item.post_hook }}"
+      {% endif %}
+      {% if item.item.deploy_hook | default('') | length > 0 %}
+      --deploy-hook "{{ item.item.deploy_hook }}"
+      {% endif %}
+      {% for arg in certbot_extra_args %}
+      {{ arg }}
+      {% endfor %}
+  loop: "{{ __certbot_existing_certs.results }}"
+  loop_control:
+    label: "{{ item.item.name | default(item.item.domains[0]) }}"
+  when:
+    - not item.stat.exists or (item.item.force_renewal | default(false) | bool)
+  register: __certbot_obtain
+  changed_when: "'Successfully received certificate' in __certbot_obtain.stdout | default('')"
+  notify: Reload cert services
+
+- name: Certificates | Remove orphaned certificates
+  ansible.builtin.command:
+    cmd: "certbot delete --non-interactive --cert-name {{ item }}"
+  loop: "{{ certbot_remove_certificates }}"
+  register: __certbot_delete
+  changed_when: "'Deleted all files' in __certbot_delete.stdout | default('')"
+  failed_when: false

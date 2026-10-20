@@ -1,0 +1,75 @@
+---
+# Update scenario: prepare deploys the previous release, converge updates
+# to the role default (stop, backup set, image pull, readiness), verify then
+# exercises the downgrade guard and the restore of the backup set. One
+# platform only — every stage pulls an n8n image.
+driver:
+  name: podman
+platforms:
+  - name: n8n-update-debian-trixie
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: prepare.yml
+    converge: converge.yml
+    verify: verify.yml
+  inventory:
+    group_vars:
+      all:
+        # Shared by prepare, converge and verify
+        n8n_enabled: true
+        n8n_host: '127.0.0.1'
+        n8n_port: 5678
+        n8n_db_type: 'sqlite'
+        n8n_encryption_key: 'test-encryption-key-do-not-use-in-production'
+        n8n_runners_auth_token: 'test-runner-token-do-not-use-in-production'
+        n8n_basic_auth_enabled: true
+        n8n_basic_auth_user: 'admin'
+        n8n_basic_auth_password: 'test-password'
+        n8n_webhook_url: ''
+        n8n_firewalld_enabled: false
+        # The molecule instance is a rootless container itself and maps
+        # 65536 IDs, so the subordinate range of the n8n user has to fit
+        # below that.
+        n8n_subid_start: 10000
+        n8n_subid_count: 50000
+        podman_compose_enabled: false
+        podman_docker_enabled: false
+        podman_docker_alias_enabled: false
+        podman_docker_socket_symlink_enabled: false
+        podman_tools: []
+        # The distroless runner image owns /home/nonroot by UID 65532, which the
+        # reduced subordinate range cannot map; keep such files as root instead
+        # of failing the pull.
+        podman_storage_options:
+          overlay:
+            mountopt: 'nodev,metacopy=on'
+            ignore_chown_errors: 'true'
+        # Release installed by prepare; converge updates to the role default
+        n8n_update_previous_version: '2.42.0'
+    host_vars:
+      n8n-update-debian-trixie:
+        ansible_python_interpreter: /usr/bin/python3
+  config_options:
+    defaults:
+      allow_broken_conditionals: true
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - verify
+    - destroy

@@ -1,0 +1,468 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    #
+    # Load Role Variables
+    #
+
+    - name: Verify | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Verify | Load OS-specific variables
+      ansible.builtin.include_vars: '{{ item }}'
+      with_first_found:
+        - files:
+            - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["distribution"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}.yml'
+          paths:
+            - '../../vars'
+
+    #
+    # Package Verification
+    #
+
+    - name: Verify | Check Apache packages are installed
+      ansible.builtin.package:
+        name: '{{ __apache_packages }}'
+        state: present
+      check_mode: true
+      register: __apache_pkg_check
+      failed_when: __apache_pkg_check.changed
+
+    #
+    # Configuration Verification
+    #
+
+    - name: Verify | Check main config exists
+      ansible.builtin.stat:
+        path: '{{ __apache_config_file }}'
+      register: __apache_config_stat
+
+    - name: Verify | Assert main config exists
+      ansible.builtin.assert:
+        that:
+          - __apache_config_stat.stat.exists
+          - __apache_config_stat.stat.mode == '0644'
+        fail_msg: "Apache main config missing or wrong permissions"
+        success_msg: "Apache main config exists with correct permissions"
+
+    - name: Verify | Read main config content
+      ansible.builtin.slurp:
+        src: '{{ __apache_config_file }}'
+      register: __apache_config_content
+
+    - name: Verify | Assert config contains expected settings
+      ansible.builtin.assert:
+        that:
+          - "'ServerTokens Prod' in (__apache_config_content.content | b64decode)"
+          - "'ServerSignature Off' in (__apache_config_content.content | b64decode)"
+          - "'TraceEnable Off' in (__apache_config_content.content | b64decode)"
+        fail_msg: "Apache config missing expected security settings"
+        success_msg: "Apache config contains expected security settings"
+
+    #
+    # Virtual Host Verification
+    #
+
+    - name: Verify | Check default vhost config exists with 00- prefix
+      ansible.builtin.stat:
+        path: '{{ __apache_vhosts_dir }}/00-testsite.local.conf'
+      register: __apache_vhost_stat
+
+    - name: Verify | Check unprefixed default vhost config is absent
+      ansible.builtin.stat:
+        path: '{{ __apache_vhosts_dir }}/testsite.local.conf'
+      register: __apache_vhost_unprefixed_stat
+
+    - name: Verify | Assert default vhost deployed under prefixed name only
+      ansible.builtin.assert:
+        that:
+          - __apache_vhost_stat.stat.exists
+          - not __apache_vhost_unprefixed_stat.stat.exists
+        fail_msg: "Default vhost config missing or deployed without 00- prefix"
+        success_msg: "Default vhost config deployed as 00-testsite.local.conf"
+
+    - name: Verify | Read vhost config content
+      ansible.builtin.slurp:
+        src: '{{ __apache_vhosts_dir }}/00-testsite.local.conf'
+      register: __apache_vhost_content
+
+    - name: Verify | Assert vhost contains expected settings
+      ansible.builtin.assert:
+        that:
+          - "'ServerName testsite.local' in (__apache_vhost_content.content | b64decode)"
+          - "'DocumentRoot' in (__apache_vhost_content.content | b64decode)"
+        fail_msg: "Virtual host config missing expected settings"
+        success_msg: "Virtual host config contains expected settings"
+
+    #
+    # ACME Challenge Verification
+    #
+
+    - name: Verify | Check ACME challenge webroot exists
+      ansible.builtin.stat:
+        path: '/var/www/letsencrypt/.well-known/acme-challenge'
+      register: __apache_acme_webroot_stat
+
+    - name: Verify | Assert ACME challenge webroot exists
+      ansible.builtin.assert:
+        that:
+          - __apache_acme_webroot_stat.stat.exists
+          - __apache_acme_webroot_stat.stat.isdir
+        fail_msg: "ACME challenge webroot missing"
+        success_msg: "ACME challenge webroot exists"
+
+    - name: Verify | Read HTTP vhost with ACME alias
+      ansible.builtin.slurp:
+        src: '{{ __apache_vhosts_dir }}/00-testsite.local.conf'
+      register: __apache_acme_vhost_content
+
+    - name: Verify | Assert ACME alias present in HTTP vhost
+      ansible.builtin.assert:
+        that:
+          - "'Alias /.well-known/acme-challenge/' in (__apache_acme_vhost_content.content | b64decode)"
+        fail_msg: "ACME alias missing from HTTP vhost"
+        success_msg: "ACME alias present in HTTP vhost"
+
+    - name: Verify | Read redirect vhost content
+      ansible.builtin.slurp:
+        src: '{{ __apache_vhosts_dir }}/zz-redirect-test.local.conf'
+      register: __apache_redirect_vhost_content
+
+    - name: Verify | Assert redirect vhost excludes ACME path from HTTPS redirect
+      ansible.builtin.assert:
+        that:
+          - "'Alias /.well-known/acme-challenge/' in (__apache_redirect_vhost_content.content | b64decode)"
+          - "'RewriteCond %{REQUEST_URI} !^' in (__apache_redirect_vhost_content.content | b64decode)"
+        fail_msg: "Redirect vhost does not exclude ACME challenge from HTTPS redirect"
+        success_msg: "Redirect vhost excludes ACME challenge from HTTPS redirect"
+
+    #
+    # Conditional SSL vhost Verification
+    #
+
+    - name: Verify | Check SSL vhost with present certificate is deployed
+      ansible.builtin.stat:
+        path: '{{ __apache_vhosts_dir }}/present.example.local-ssl.conf'
+      register: __apache_ssl_present_stat
+
+    - name: Verify | Check SSL vhost without certificate is not deployed
+      ansible.builtin.stat:
+        path: '{{ __apache_vhosts_dir }}/pending.example.local-ssl.conf'
+      register: __apache_ssl_pending_stat
+
+    - name: Verify | Assert conditional SSL vhost deployment
+      ansible.builtin.assert:
+        that:
+          - __apache_ssl_present_stat.stat.exists
+          - not __apache_ssl_pending_stat.stat.exists
+        fail_msg: >-
+          Conditional SSL deploy wrong: present={{ __apache_ssl_present_stat.stat.exists }},
+          pending={{ __apache_ssl_pending_stat.stat.exists }}
+        success_msg: "SSL vhost deployed only when its certificate exists"
+
+    #
+    # Exclusive Vhost Pruning Verification
+    #
+
+    - name: Verify | Check pruning fixture states
+      ansible.builtin.stat:
+        path: '{{ __apache_vhosts_dir }}/{{ item }}'
+      loop:
+        - 'zz-orphan.example.local.conf'
+        - 'zz-foreign.example.local.conf'
+        - 'zz-keep.example.local.conf'
+      register: __apache_prune_stats
+
+    - name: Verify | Assert orphan pruned while foreign and keep-listed survive
+      ansible.builtin.assert:
+        that:
+          - not __apache_prune_stats.results[0].stat.exists
+          - __apache_prune_stats.results[1].stat.exists
+          - __apache_prune_stats.results[2].stat.exists
+        fail_msg: >-
+          Exclusive pruning wrong: orphan={{ __apache_prune_stats.results[0].stat.exists }},
+          foreign={{ __apache_prune_stats.results[1].stat.exists }},
+          keep={{ __apache_prune_stats.results[2].stat.exists }}
+        success_msg: "Orphaned config pruned, foreign and keep-listed configs kept"
+
+    - name: Verify | Check orphaned vhost symlink state (Debian)
+      ansible.builtin.stat:
+        path: '{{ __apache_vhosts_enabled_dir }}/zz-orphan.example.local.conf'
+      register: __apache_prune_link_stat
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Verify | Assert orphaned vhost was disabled via a2dissite (Debian)
+      ansible.builtin.assert:
+        that:
+          - not __apache_prune_link_stat.stat.exists
+        fail_msg: "Orphaned vhost symlink still present in sites-enabled"
+        success_msg: "Orphaned vhost symlink removed from sites-enabled"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    #
+    # Configuration Validation
+    #
+
+    - name: Verify | Validate Apache configuration
+      ansible.builtin.command:
+        cmd: apachectl configtest
+      register: __apache_configtest
+      changed_when: false
+      failed_when: __apache_configtest.rc != 0
+
+    - name: Verify | Assert configuration syntax is valid
+      ansible.builtin.assert:
+        that:
+          - "'Syntax OK' in __apache_configtest.stderr or 'Syntax OK' in __apache_configtest.stdout"
+        fail_msg: "Apache configuration test failed"
+        success_msg: "Apache configuration syntax valid"
+
+    #
+    # Service Verification
+    #
+
+    - name: Verify | Check Apache service status
+      ansible.builtin.systemd_service:
+        name: '{{ __apache_service_name }}'
+      register: __apache_svc_check
+
+    - name: Verify | Assert Apache service is active and enabled
+      ansible.builtin.assert:
+        that:
+          - __apache_svc_check.status.ActiveState == 'active'
+          - __apache_svc_check.status.UnitFileState == 'enabled'
+        fail_msg: "Apache service is not active or enabled"
+        success_msg: "Apache service is active and enabled"
+
+    #
+    # Functional Verification
+    #
+
+    - name: Verify | Check port 80 is listening
+      ansible.builtin.wait_for:
+        port: 80
+        timeout: 10
+        state: started
+
+    - name: Verify | Test HTTP response
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        status_code: 200
+        return_content: true
+      register: __apache_http_response
+
+    - name: Verify | Assert HTTP response contains expected content
+      ansible.builtin.assert:
+        that:
+          - "'Apache Test Page' in __apache_http_response.content"
+        fail_msg: "HTTP response does not contain expected content"
+        success_msg: "HTTP response contains expected content"
+
+    #
+    # Version Verification
+    #
+
+    - name: Verify | Get Apache version
+      ansible.builtin.command:
+        cmd: apachectl -v
+      register: __apache_version
+      changed_when: false
+
+    - name: Verify | Assert Apache version output
+      ansible.builtin.assert:
+        that:
+          - "'Apache/' in __apache_version.stdout or 'Server version: Apache/' in __apache_version.stdout"
+        fail_msg: "Apache version output unexpected"
+        success_msg: "Apache version output valid"
+
+    #
+    # MPM Verification
+    #
+
+    # The EL apachectl wrapper rejects -M; Debian's apache2 binary needs the
+    # environment apache2ctl sets up.
+    - name: Verify | Check loaded modules
+      ansible.builtin.command:
+        cmd: "{{ 'apache2ctl' if ansible_facts['os_family'] == 'Debian' else 'httpd' }} -M"
+      register: __apache_modules
+      changed_when: false
+
+    - name: Verify | Assert event MPM is loaded
+      ansible.builtin.assert:
+        that:
+          - "'mpm_event_module' in __apache_modules.stdout"
+        fail_msg: "Event MPM module is not loaded"
+        success_msg: "Event MPM module is loaded"
+
+    # Feature modules follow the converged features; apache_modules_enabled
+    # adds auth_basic. Modules nothing asks for must not be loaded, on Debian
+    # including those the apache2 package enables by default.
+    - name: Verify | Assert exactly the needed modules are loaded
+      ansible.builtin.assert:
+        that:
+          - __apache_loaded is superset(__apache_expected)
+          - __apache_loaded | intersect(__apache_unwanted) | length == 0
+        fail_msg: >-
+          Missing: {{ __apache_expected | difference(__apache_loaded) }}.
+          Unexpectedly loaded: {{ __apache_loaded | intersect(__apache_unwanted) }}.
+      vars:
+        __apache_loaded: >-
+          {{ __apache_modules.stdout_lines | map('trim') | map('split', ' ') | map('first')
+             | select('match', '.*_module$') | map('regex_replace', '_module$', '') | list }}
+        __apache_expected:
+          - 'authz_core'
+          - 'authz_host'
+          - 'dir'
+          - 'mime'
+          - 'reqtimeout'
+          - 'ssl'
+          - 'socache_shmcb'
+          - 'headers'
+          - 'deflate'
+          - 'filter'
+          - 'setenvif'
+          - 'expires'
+          - 'alias'
+          - 'rewrite'
+          - 'proxy'
+          - 'proxy_fcgi'
+          - 'auth_basic'
+        __apache_unwanted:
+          - 'autoindex'
+          - 'access_compat'
+          - 'status'
+          - 'env'
+          - 'negotiation'
+          - 'authn_file'
+          - 'authz_user'
+          - 'authz_groupfile'
+          - 'http2'
+
+    #
+    # Handler Behaviour (recorded by the second converge play)
+    #
+
+    - name: Verify | Read the recorded Apache main PIDs
+      ansible.builtin.slurp:
+        src: /root/apache-handler-test.json
+      register: __apache_handler_test
+
+    - name: Verify | Assert reload keeps the main process and an MPM change restarts it
+      ansible.builtin.assert:
+        that:
+          - __apache_pids.before | int > 0
+          - __apache_pids.reload == __apache_pids.before
+          - __apache_pids.restart != __apache_pids.reload
+        fail_msg: >-
+          A configuration change must reload Apache (same main PID) and an MPM
+          change must restart it (new main PID). Recorded: {{ __apache_pids }}
+      vars:
+        __apache_pids: "{{ __apache_handler_test.content | b64decode | from_json }}"
+
+    #
+    # Sensitive Paths
+    #
+
+    - name: Verify | Request sensitive paths that must be denied
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1/{{ item }}'
+        status_code: 403
+      loop:
+        - '.env'
+        - '.env.local'
+        - '.git/config'
+        - '.hg/hgrc'
+        - '.DS_Store'
+        - 'dump.sql'
+        - 'dump.sql.gz'
+        - 'index.html.bak'
+        - 'notes.txt~'
+
+    # Neighbours of the denied names: the patterns match whole path
+    # components only, so these stay reachable.
+    - name: Verify | Request paths that must stay reachable
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1/{{ item }}'
+        status_code: 200
+      loop:
+        - '.github/workflow.yml'
+        - '.envrc'
+        - 'allowed.txt'
+
+    #
+    # Security Headers Verification
+    #
+
+    # The test vhost has no index page; a 403 still carries the headers,
+    # since they are set with "Header always".
+    - name: Verify | Test security headers
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        return_content: false
+        status_code: [200, 403]
+      register: __apache_headers_response
+
+    - name: Verify | Assert security headers are present
+      ansible.builtin.assert:
+        that:
+          - __apache_headers_response.x_frame_options | default('') == 'SAMEORIGIN'
+          - __apache_headers_response.x_content_type_options | default('') == 'nosniff'
+          - __apache_headers_response.referrer_policy is defined
+          - __apache_headers_response.content_security_policy is defined
+          - __apache_headers_response.permissions_policy is defined
+          - __apache_headers_response.strict_transport_security | default('') is search('max-age=31536000')
+        fail_msg: >-
+          Security headers missing from the response. Received:
+          {{ __apache_headers_response | dict2items | map(attribute='key') | list }}
+
+    #
+    # Ansible Managed Header Verification
+    #
+
+    - name: Verify | Check ansible_managed header in main config
+      ansible.builtin.command:
+        cmd: 'head -3 {{ __apache_config_file }}'
+      register: __apache_config_header
+      changed_when: false
+
+    - name: Verify | Assert ansible_managed header
+      ansible.builtin.assert:
+        that:
+          - "'Ansible managed' in __apache_config_header.stdout"
+        fail_msg: "Main config missing ansible_managed header"
+        success_msg: "Main config has ansible_managed header"
+
+    #
+    # PHP-FPM Handler
+    #
+    # A handler without the backend protocol never takes effect, and Apache
+    # falls through to serving the script as a static file. Checking the
+    # rendered config alone would not catch that, so the script is requested
+    # over HTTPS and the response body decides.
+    #
+
+    - name: Verify | Request a PHP script through the vhost
+      ansible.builtin.uri:
+        url: 'https://127.0.0.1/index.php'
+        headers:
+          Host: 'php.example.local'
+        validate_certs: false
+        return_content: true
+      register: __apache_php_response
+
+    - name: Verify | Assert PHP was executed instead of served as source
+      ansible.builtin.assert:
+        that:
+          - "'PHP-EXECUTED-OK' in __apache_php_response.content"
+          - "'<?php' not in __apache_php_response.content"
+        fail_msg: >-
+          Expected PHP output but got {{ __apache_php_response.content | truncate(80) }}
+          -- the FPM handler did not take effect and the source was served
+        success_msg: "PHP scripts are handed to PHP-FPM"

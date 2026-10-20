@@ -1,0 +1,24 @@
+---
+- name: Firewall | Check if firewalld is running
+  ansible.builtin.systemd_service:
+    name: firewalld
+  register: __apache_firewalld_status
+  failed_when: false
+
+- name: Firewall | Manage Apache HTTP firewall rule
+  ansible.posix.firewalld:
+    service: http
+    zone: '{{ apache_firewalld_zone }}'
+    permanent: true
+    immediate: true
+    state: "{{ apache_firewalld_enabled | bool | ternary('enabled', 'disabled') }}"
+  when: __apache_firewalld_status.status.ActiveState | default('') == 'active'
+
+- name: Firewall | Manage Apache HTTPS firewall rule
+  ansible.posix.firewalld:
+    service: https
+    zone: '{{ apache_firewalld_zone }}'
+    permanent: true
+    immediate: true
+    state: "{{ (apache_firewalld_enabled | bool and apache_ssl_enabled | bool) | ternary('enabled', 'disabled') }}"
+  when: __apache_firewalld_status.status.ActiveState | default('') == 'active'

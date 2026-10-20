@@ -1,0 +1,20 @@
+---
+__postgresql_packages:
+  - postgresql
+  - python-psycopg2
+__postgresql_service_name: postgresql.service
+__postgresql_config_dir: /var/lib/postgres/data
+__postgresql_data_dir: /var/lib/postgres/data
+__postgresql_bin_dir: /usr/bin
+
+# Parent of every cluster data directory, scanned for clusters of other
+# versions before any change is made.
+__postgresql_cluster_root: /var/lib/postgres
+
+# SSL fallback paths — Arch has no system-wide snakeoil. Use
+# PostgreSQL's upstream default (relative paths resolve against
+# data_directory). Operator must provide server.crt + server.key in
+# data_dir if postgresql_ssl_enabled is set true without overriding
+# the inventory paths.
+__postgresql_ssl_cert_file: 'server.crt'
+__postgresql_ssl_key_file: 'server.key'

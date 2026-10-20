@@ -1,0 +1,19 @@
+{{ ansible_managed | comment }}
+
+upstream {{ item.name }} {
+{% if item.strategy | default('round_robin') == 'least_conn' %}
+    least_conn;
+{% elif item.strategy | default('round_robin') == 'ip_hash' %}
+    ip_hash;
+{% elif item.strategy | default('round_robin') == 'hash' %}
+    hash {{ item.hash_key | default('$request_uri') }} consistent;
+{% endif %}
+
+{% if item.keepalive | default(0) > 0 %}
+    keepalive {{ item.keepalive }};
+{% endif %}
+
+{% for server in item.servers %}
+    server {{ server.address }}{% if server.weight | default(1) != 1 %} weight={{ server.weight }}{% endif %}{% if server.max_fails | default(0) > 0 %} max_fails={{ server.max_fails }}{% endif %}{% if server.fail_timeout | default('') | length > 0 %} fail_timeout={{ server.fail_timeout }}{% endif %}{% if server.backup | default(false) %} backup{% endif %}{% if server.down | default(false) %} down{% endif %};
+{% endfor %}
+}

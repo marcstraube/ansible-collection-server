@@ -1,0 +1,45 @@
+#!/bin/bash
+# DO NOT EDIT. Managed by Ansible.
+# Certificate expiry monitoring script
+
+WARNING_DAYS={{ certbot_expiry_warning_days }}
+EXIT_CODE=0
+
+check_cert() {
+    local cert_path="$1"
+    local cert_name=$(basename $(dirname "$cert_path"))
+
+    if [ ! -f "$cert_path" ]; then
+        echo "CRITICAL: Certificate not found: $cert_name"
+        return 2
+    fi
+
+    local expiry_date=$(openssl x509 -enddate -noout -in "$cert_path" 2>/dev/null | cut -d= -f2)
+    local expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null)
+    local now_epoch=$(date +%s)
+    local days_left=$(( (expiry_epoch - now_epoch) / 86400 ))
+
+    if [ $days_left -lt 0 ]; then
+        echo "CRITICAL: $cert_name expired $((days_left * -1)) days ago"
+        return 2
+    elif [ $days_left -lt $WARNING_DAYS ]; then
+        echo "WARNING: $cert_name expires in $days_left days"
+        return 1
+    else
+        echo "OK: $cert_name expires in $days_left days"
+        return 0
+    fi
+}
+
+# Check all certificates
+for cert_dir in {{ certbot_config_dir }}/live/*/; do
+    if [ -d "$cert_dir" ]; then
+        check_cert "${cert_dir}fullchain.pem"
+        result=$?
+        if [ $result -gt $EXIT_CODE ]; then
+            EXIT_CODE=$result
+        fi
+    fi
+done
+
+exit $EXIT_CODE

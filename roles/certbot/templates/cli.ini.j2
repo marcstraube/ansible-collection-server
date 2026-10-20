@@ -1,0 +1,47 @@
+# DO NOT EDIT. Managed by Ansible.
+# Certbot CLI configuration
+
+{% if certbot_email | length > 0 %}
+email = {{ certbot_email }}
+{% endif %}
+
+{% if certbot_agree_tos | bool %}
+agree-tos = true
+{% endif %}
+
+{% if certbot_staging | bool %}
+server = https://acme-staging-v02.api.letsencrypt.org/directory
+{% elif certbot_server | length > 0 %}
+server = {{ certbot_server }}
+{% endif %}
+
+key-type = {{ certbot_key_type }}
+
+{% if certbot_key_type == 'rsa' %}
+rsa-key-size = {{ certbot_rsa_key_size }}
+{% elif certbot_key_type == 'ecdsa' %}
+elliptic-curve = {{ certbot_elliptic_curve }}
+{% endif %}
+
+{% if certbot_preferred_chain | length > 0 %}
+preferred-chain = {{ certbot_preferred_chain }}
+{% endif %}
+
+{% if certbot_quiet | bool %}
+quiet = true
+{% endif %}
+
+{% if certbot_keep_until_expiring | bool %}
+keep-until-expiring = true
+{% endif %}
+
+max-log-backups = {{ certbot_max_log_backups }}
+
+config-dir = {{ certbot_config_dir }}
+work-dir = {{ certbot_work_dir }}
+logs-dir = {{ certbot_log_dir }}
+
+{% if certbot_custom_config | length > 0 %}
+# Custom configuration
+{{ certbot_custom_config }}
+{% endif %}

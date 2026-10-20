@@ -1,0 +1,85 @@
+---
+# PGDG upstream repositories, imported only for postgresql_repo 'pgdg'.
+# Arch Linux has no PGDG repository; its official repo tracks upstream.
+
+#
+# Debian
+#
+
+- name: Repos | Ensure apt prerequisites
+  ansible.builtin.package:
+    name:
+      - 'ca-certificates'
+      - 'python3-debian'
+    state: present
+  retries: 3
+  delay: 5
+  when: ansible_facts['os_family'] == 'Debian'
+
+# signed_by takes the key URL directly — the module downloads it and
+# stores it beside the .sources file, so no separate key task is needed.
+- name: Repos | Add PGDG apt repository
+  ansible.builtin.deb822_repository:
+    name: pgdg
+    types: deb
+    uris: '{{ __postgresql_pgdg_apt_uri }}'
+    suites: "{{ ansible_facts['distribution_release'] }}-pgdg"
+    components: main
+    signed_by: '{{ __postgresql_pgdg_apt_key_url }}'
+    state: present
+  retries: 5
+  delay: 10
+  register: __postgresql_pgdg_apt_repo
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Repos | Update apt cache after repo change
+  ansible.builtin.apt:
+    update_cache: true
+  retries: 3
+  delay: 5
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - __postgresql_pgdg_apt_repo is changed
+
+#
+# RedHat
+#
+# Two repository entries instead of the pgdg-redhat-repo RPM: the RPM
+# enables every supported major version at once, these entries cover the
+# common packages and the requested version only. The URLs follow the
+# layout of that RPM's .repo file. dnf imports the signing key from
+# gpgkey on first use.
+#
+
+- name: Repos | Add PGDG common repository (RedHat)
+  ansible.builtin.yum_repository:
+    name: pgdg-common
+    description: PostgreSQL common RPMs for EL $releasever - $basearch
+    baseurl: '{{ __postgresql_pgdg_yum_base }}/common/redhat/rhel-$releasever-$basearch'
+    gpgkey: '{{ __postgresql_pgdg_rpm_key_url }}'
+    gpgcheck: true
+  retries: 5
+  delay: 10
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Repos | Add PGDG version repository (RedHat)
+  ansible.builtin.yum_repository:
+    name: 'pgdg{{ __postgresql_version }}'
+    description: PostgreSQL {{ __postgresql_version }} for EL $releasever - $basearch
+    baseurl: '{{ __postgresql_pgdg_yum_base }}/{{ __postgresql_version }}/redhat/rhel-$releasever-$basearch'
+    gpgkey: '{{ __postgresql_pgdg_rpm_key_url }}'
+    gpgcheck: true
+  retries: 5
+  delay: 10
+  when: ansible_facts['os_family'] == 'RedHat'
+
+# Check that the version repo file is actually on disk before touching
+# the packages. In check mode the repository task above writes nothing,
+# so without this gate the package install fails with "No package
+# postgresql17-server available".
+- name: Repos | Check PGDG repository file presence (RedHat)
+  ansible.builtin.stat:
+    path: '{{ __postgresql_pgdg_repo_file }}'
+  register: __postgresql_pgdg_repo_stat
+  check_mode: false
+  when: ansible_facts['os_family'] == 'RedHat'

@@ -1,0 +1,105 @@
+---
+# Installs n8n as a rootless Podman container. Podman itself comes from
+# the marcstraube.common.podman role.
+
+- name: Install | Verify podman is available
+  ansible.builtin.command: podman --version
+  register: __n8n_podman_version
+  changed_when: false
+
+- name: Install | Create n8n system group
+  ansible.builtin.group:
+    name: '{{ n8n_group }}'
+    system: true
+    state: present
+
+- name: Install | Create n8n system user
+  ansible.builtin.user:
+    name: '{{ n8n_user }}'
+    group: '{{ n8n_group }}'
+    home: '{{ n8n_user_home }}'
+    shell: '{{ n8n_user_shell }}'
+    system: true
+    create_home: true
+    state: present
+
+- name: Install | Create n8n directories
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    owner: '{{ n8n_user }}'
+    group: '{{ n8n_group }}'
+    mode: '0750'
+  loop:
+    - '{{ n8n_data_dir }}'
+    - '/etc/n8n'
+    - '/var/log/n8n'
+
+# Rootless podman maps the users of the container onto a subordinate ID
+# range of the n8n user.
+- name: Install | Configure subordinate UIDs
+  ansible.builtin.lineinfile:
+    path: /etc/subuid
+    regexp: '^{{ n8n_user }}:'
+    line: '{{ n8n_user }}:{{ n8n_subid_start }}:{{ n8n_subid_count }}'
+    create: true
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Install | Configure subordinate GIDs
+  ansible.builtin.lineinfile:
+    path: /etc/subgid
+    regexp: '^{{ n8n_user }}:'
+    line: '{{ n8n_user }}:{{ n8n_subid_start }}:{{ n8n_subid_count }}'
+    create: true
+    owner: root
+    group: root
+    mode: '0644'
+
+# Rootless podman keeps its runtime state in XDG_RUNTIME_DIR. The service
+# unit has systemd create the directory; the image pull below runs before
+# the unit exists.
+- name: Install | Create the podman runtime directory
+  ansible.builtin.file:
+    path: '{{ __n8n_runtime_dir }}'
+    state: directory
+    owner: '{{ n8n_user }}'
+    group: '{{ n8n_group }}'
+    mode: '0700'
+
+- name: Install | Pull n8n container image
+  containers.podman.podman_image:
+    name: '{{ n8n_podman_image }}'
+    tag: '{{ n8n_version }}'
+    pull: "{{ n8n_podman_pull_policy != 'never' }}"
+    force: "{{ n8n_podman_pull_policy == 'always' }}"
+  retries: 5
+  delay: 10
+  become: true
+  become_user: '{{ n8n_user }}'
+  environment: >-
+    {{ {'XDG_RUNTIME_DIR': __n8n_runtime_dir}
+       | combine({'HTTP_PROXY': n8n_http_proxy,
+                  'HTTPS_PROXY': n8n_https_proxy,
+                  'NO_PROXY': n8n_no_proxy}
+                 if n8n_http_proxy | length > 0 else {}) }}
+  notify: Restart n8n
+
+- name: Install | Pull task runner container image
+  containers.podman.podman_image:
+    name: '{{ n8n_runners_podman_image }}'
+    tag: '{{ n8n_version }}{{ n8n_runners_podman_image_tag_suffix }}'
+    pull: "{{ n8n_podman_pull_policy != 'never' }}"
+    force: "{{ n8n_podman_pull_policy == 'always' }}"
+  retries: 5
+  delay: 10
+  become: true
+  become_user: '{{ n8n_user }}'
+  environment: >-
+    {{ {'XDG_RUNTIME_DIR': __n8n_runtime_dir}
+       | combine({'HTTP_PROXY': n8n_http_proxy,
+                  'HTTPS_PROXY': n8n_https_proxy,
+                  'NO_PROXY': n8n_no_proxy}
+                 if n8n_http_proxy | length > 0 else {}) }}
+  notify: Restart n8n runner

@@ -1,0 +1,7 @@
+---
+- name: Service | Manage PostgreSQL service
+  ansible.builtin.systemd_service:
+    name: '{{ __postgresql_service_name }}'
+    enabled: "{{ postgresql_service_enabled | bool }}"
+    state: "{{ postgresql_service_enabled | bool | ternary('started', 'stopped') }}"
+    daemon_reload: true

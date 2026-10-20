@@ -1,0 +1,255 @@
+{{ ansible_managed | comment }}
+
+{% if item.http_redirect | default(false) and item.ssl is defined and item.ssl.enabled | default(false) %}
+# HTTP to HTTPS redirect
+server {
+    listen {{ item.listen | default(80) }};
+    listen [::]:{{ item.listen | default(80) }};
+    server_name {{ item.server_names | join(' ') }};
+
+{% for location in nginx_global_locations %}
+    location {{ location.path }} {
+{{ location.config | indent(8, first=True) }}
+    }
+{% endfor %}
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+{% endif %}
+
+{% if item.www_redirect | default(false) %}
+# WWW redirect
+server {
+{% if item.ssl is defined and item.ssl.enabled | default(false) %}
+    listen {{ item.listen_ssl | default(443) }} ssl http2;
+    listen [::]:{{ item.listen_ssl | default(443) }} ssl http2;
+    ssl_certificate {{ item.ssl.certificate }};
+    ssl_certificate_key {{ item.ssl.certificate_key }};
+{% else %}
+    listen {{ item.listen | default(80) }};
+    listen [::]:{{ item.listen | default(80) }};
+{% endif %}
+{% if item.www_redirect == 'non-www' %}
+    server_name www.{{ item.server_names[0] }};
+    return 301 $scheme://{{ item.server_names[0] }}$request_uri;
+{% else %}
+    server_name {{ item.server_names[0] }};
+    return 301 $scheme://www.{{ item.server_names[0] }}$request_uri;
+{% endif %}
+}
+{% endif %}
+
+# Main server block
+server {
+{% if item.ssl is defined and item.ssl.enabled | default(false) %}
+    listen {{ item.listen_ssl | default(443) }} ssl http2;
+    listen [::]:{{ item.listen_ssl | default(443) }} ssl http2;
+
+    # SSL configuration
+    ssl_certificate {{ item.ssl.certificate }};
+    ssl_certificate_key {{ item.ssl.certificate_key }};
+{% if item.ssl.trusted_certificate | default('') | length > 0 %}
+    ssl_trusted_certificate {{ item.ssl.trusted_certificate }};
+{% endif %}
+
+{% if nginx_hsts_enabled | bool %}
+    # HSTS
+    add_header Strict-Transport-Security "max-age={{ nginx_hsts_max_age }}{% if nginx_hsts_include_subdomains %}; includeSubDomains{% endif %}{% if nginx_hsts_preload %}; preload{% endif %}" always;
+{% endif %}
+{% else %}
+    listen {{ item.listen | default(80) }};
+    listen [::]:{{ item.listen | default(80) }};
+{% endif %}
+
+    server_name {{ item.server_names | join(' ') }};
+
+{% if item.root is defined %}
+    root {{ item.root }};
+{% endif %}
+{% if item.index is defined %}
+    index {{ item.index }};
+{% endif %}
+
+{% if item.access_log is defined %}
+    access_log {{ item.access_log }};
+{% endif %}
+{% if item.error_log is defined %}
+    error_log {{ item.error_log }};
+{% endif %}
+
+{% if item.client_max_body_size is defined %}
+    client_max_body_size {{ item.client_max_body_size }};
+{% endif %}
+
+{% if item.security_headers | default(nginx_security_headers_enabled) | bool %}
+    # Security headers
+{% for header, value in nginx_security_headers.items() %}
+    add_header {{ header }} "{{ value }}" always;
+{% endfor %}
+{% endif %}
+
+{% if item.custom_headers is defined %}
+    # Custom headers
+{% for header, value in item.custom_headers.items() %}
+    add_header {{ header }} "{{ value }}" always;
+{% endfor %}
+{% endif %}
+
+{% if item.basic_auth is defined and item.basic_auth.enabled | default(false) %}
+    # Basic authentication
+    auth_basic "{{ item.basic_auth.realm | default('Restricted') }}";
+    auth_basic_user_file {{ item.basic_auth.htpasswd_file | default(__nginx_config_dir + '/.htpasswd-' + item.name) }};
+{% endif %}
+
+{% if item.allow_ips is defined and item.allow_ips | length > 0 %}
+    # IP whitelist
+{% for ip in item.allow_ips %}
+    allow {{ ip }};
+{% endfor %}
+    deny all;
+{% endif %}
+
+{% if item.deny_ips is defined and item.deny_ips | length > 0 %}
+    # IP blacklist
+{% for ip in item.deny_ips %}
+    deny {{ ip }};
+{% endfor %}
+{% endif %}
+
+{% for location in nginx_global_locations %}
+    location {{ location.path }} {
+{{ location.config | indent(8, first=True) }}
+    }
+{% endfor %}
+
+{% if item.deny_patterns | default(nginx_deny_patterns) | length > 0 %}
+    # Sensitive files and directories -- applies to every site type
+    location ~ /({{ item.deny_patterns | default(nginx_deny_patterns) | join('|') }})(/|$) {
+        deny all;
+    }
+{% endif %}
+
+{% if item.authentik is defined and item.authentik.enabled | default(false) %}
+    # Authentik outpost
+    location {{ item.authentik.outpost_path | default(nginx_authentik_outpost_path) }} {
+        proxy_pass {{ item.authentik.url | default(nginx_authentik_default_url) }}{{ item.authentik.outpost_path | default(nginx_authentik_outpost_path) }};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Original-URL $scheme://$http_host$request_uri;
+        proxy_set_header Content-Length "";
+        proxy_pass_request_body off;
+    }
+{% endif %}
+
+{% if item.type | default('static') == 'proxy' %}
+    # Reverse proxy configuration
+    location / {
+{% if item.rate_limit is defined %}
+        limit_req zone={{ item.rate_limit.zone }} burst={{ item.rate_limit.burst | default(5) }}{% if item.rate_limit.nodelay | default(false) %} nodelay{% endif %};
+{% endif %}
+
+        proxy_pass {{ item.proxy_pass }};
+        proxy_http_version 1.1;
+
+{% for header, value in nginx_proxy_headers.items() %}
+        proxy_set_header {{ header }} {{ value }};
+{% endfor %}
+
+{% if item.websocket | default(false) %}
+        # WebSocket support
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout {{ nginx_websocket_timeout }};
+{% endif %}
+
+        proxy_connect_timeout {{ nginx_proxy_connect_timeout }};
+        proxy_send_timeout {{ nginx_proxy_send_timeout }};
+{% if not item.websocket | default(false) %}
+        proxy_read_timeout {{ nginx_proxy_read_timeout }};
+{% endif %}
+        proxy_buffer_size {{ nginx_proxy_buffer_size }};
+        proxy_buffers {{ nginx_proxy_buffers }};
+        proxy_busy_buffers_size {{ nginx_proxy_busy_buffers_size }};
+
+{% if item.authentik is defined and item.authentik.enabled | default(false) %}
+        # Authentik forward auth
+        auth_request {{ item.authentik.outpost_path | default(nginx_authentik_outpost_path) }}/auth/nginx;
+        error_page 401 = @goauthentik_proxy_signin;
+
+        # Pass authentik user info to upstream
+        auth_request_set $authentik_username $upstream_http_x_authentik_username;
+        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
+        auth_request_set $authentik_email $upstream_http_x_authentik_email;
+        auth_request_set $authentik_name $upstream_http_x_authentik_name;
+        auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
+        auth_request_set $authentik_jwt $upstream_http_x_authentik_jwt;
+        auth_request_set $authentik_meta_jwks $upstream_http_x_authentik_meta_jwks;
+        auth_request_set $authentik_meta_outpost $upstream_http_x_authentik_meta_outpost;
+        auth_request_set $authentik_meta_provider $upstream_http_x_authentik_meta_provider;
+        auth_request_set $authentik_meta_app $upstream_http_x_authentik_meta_app;
+        auth_request_set $authentik_meta_version $upstream_http_x_authentik_meta_version;
+        auth_request_set $auth_cookie $upstream_http_set_cookie;
+
+        proxy_set_header X-authentik-username $authentik_username;
+        proxy_set_header X-authentik-groups $authentik_groups;
+        proxy_set_header X-authentik-email $authentik_email;
+        proxy_set_header X-authentik-name $authentik_name;
+        proxy_set_header X-authentik-uid $authentik_uid;
+        proxy_set_header X-authentik-jwt $authentik_jwt;
+        proxy_set_header X-authentik-meta-jwks $authentik_meta_jwks;
+        proxy_set_header X-authentik-meta-outpost $authentik_meta_outpost;
+        proxy_set_header X-authentik-meta-provider $authentik_meta_provider;
+        proxy_set_header X-authentik-meta-app $authentik_meta_app;
+        proxy_set_header X-authentik-meta-version $authentik_meta_version;
+{% endif %}
+    }
+{% if item.authentik is defined and item.authentik.enabled | default(false) %}
+
+    # Authentik sign-in redirect
+    location @goauthentik_proxy_signin {
+        internal;
+        add_header Set-Cookie $auth_cookie;
+        return 302 {{ item.authentik.outpost_path | default(nginx_authentik_outpost_path) }}/start?rd=$request_uri;
+    }
+{% endif %}
+{% elif item.type | default('static') == 'php' %}
+    # PHP configuration
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        fastcgi_pass {{ item.php.socket | default('unix:/run/php-fpm/www.sock') }};
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include fastcgi_params;
+    }
+{% elif item.type | default('static') == 'static' %}
+    # Static file serving
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    # Cache static assets
+    location ~* \.(jpg|jpeg|png|gif|ico|css|js|woff|woff2|ttf|svg)$ {
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+{% endif %}
+
+{% if item.locations is defined %}
+    # Additional locations
+{% for location in item.locations %}
+    location {{ location.path }} {
+{{ location.config | indent(8, first=True) }}
+    }
+{% endfor %}
+{% endif %}
+
+{% if item.extra_config is defined %}
+    # Extra configuration
+{{ item.extra_config | indent(4, first=True) }}
+{% endif %}
+}

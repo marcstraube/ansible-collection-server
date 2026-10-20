@@ -1,0 +1,42 @@
+---
+- name: Converge
+  hosts: all
+  gather_facts: true
+
+  vars:
+    # Enable the role (opt-in default is false)
+    certbot_enabled: true
+
+    # Test basic configuration
+    certbot_email: 'test@example.com'
+    certbot_agree_tos: true
+
+    # Use staging for testing
+    certbot_staging: true
+
+    # Test key settings
+    certbot_key_type: 'ecdsa'
+    certbot_elliptic_curve: 'secp384r1'
+
+    # Create webroot directory
+    certbot_create_webroot: true
+    certbot_webroot_path: '/var/www/letsencrypt'
+
+    # Test renewal settings
+    certbot_auto_renew: true
+    certbot_use_systemd_timer: true
+
+    # Test monitoring script
+    certbot_monitoring_script: true
+    certbot_expiry_warning_days: 14
+
+    # Test deploy hook
+    certbot_deploy_hook: 'echo "Certificate renewed"'
+
+    # Don't actually request certificates in test
+    certbot_certificates: []
+
+  tasks:
+    - name: Converge | Include certbot role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'

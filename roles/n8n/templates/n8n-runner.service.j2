@@ -1,0 +1,67 @@
+{{ ansible_managed | comment }}
+
+[Unit]
+Description=n8n task runners
+Documentation=https://docs.n8n.io/hosting/configuration/task-runners/
+BindsTo={{ __n8n_service_name }}
+After={{ __n8n_service_name }}
+
+[Service]
+Type=simple
+User={{ n8n_user }}
+Group={{ n8n_group }}
+
+# Shares the podman runtime directory that n8n.service creates
+Environment="XDG_RUNTIME_DIR={{ __n8n_runtime_dir }}"
+
+# Remove any existing container before starting
+ExecStartPre=-/usr/bin/podman rm -f {{ n8n_runners_podman_container_name }}
+
+# The runners execute the code of Code nodes, so the container is locked
+# down: read-only root filesystem with a tmpfs on /tmp, no capabilities,
+# no privilege escalation, process and resource limits. keep-id maps the
+# n8n user onto container UID 1000 (independent of the userns default in
+# containers.conf), --user runs the launcher as that UID whichever user
+# the image declares. The launcher reaches the task broker on localhost
+# of the host network.
+ExecStart=/usr/bin/podman run \
+  --name={{ n8n_runners_podman_container_name }} \
+  --rm \
+  --replace \
+  --log-driver=passthrough \
+  --userns=keep-id:uid=1000,gid=1000 \
+  --user=1000:1000 \
+  --network={{ n8n_podman_network }} \
+  --env-file={{ n8n_runners_env_file }} \
+  --read-only \
+  --tmpfs=/tmp:rw,nosuid,nodev,size={{ n8n_runners_podman_tmp_size }} \
+  --cap-drop=all \
+  --security-opt=no-new-privileges \
+  --pids-limit={{ n8n_runners_podman_pids_limit }} \
+{% if n8n_runners_podman_memory | length > 0 %}
+  --memory={{ n8n_runners_podman_memory }} \
+{% endif %}
+{% if n8n_runners_podman_cpus | length > 0 %}
+  --cpus={{ n8n_runners_podman_cpus }} \
+{% endif %}
+{% for arg in n8n_runners_podman_extra_args %}
+  {{ arg }} \
+{% endfor %}
+  {{ n8n_runners_podman_image }}:{{ n8n_version }}{{ n8n_runners_podman_image_tag_suffix }}
+
+ExecStop=/usr/bin/podman stop -t 30 {{ n8n_runners_podman_container_name }}
+
+# Resource limits
+LimitNOFILE={{ n8n_systemd_limit_nofile }}
+
+# Restart behavior
+Restart={{ n8n_systemd_restart }}
+RestartSec={{ n8n_systemd_restart_sec }}
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=n8n-runner
+
+[Install]
+WantedBy={{ __n8n_service_name }}

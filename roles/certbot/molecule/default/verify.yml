@@ -1,0 +1,211 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    #
+    # Package Verification
+    #
+
+    - name: Verify | Check certbot package is installed
+      ansible.builtin.package:
+        name: certbot
+        state: present
+      check_mode: true
+      register: __certbot_pkg_check
+      failed_when: __certbot_pkg_check.changed
+
+    #
+    # Directory Structure
+    #
+
+    - name: Verify | Check Let's Encrypt config directory
+      ansible.builtin.stat:
+        path: /etc/letsencrypt
+      register: __certbot_config_dir
+
+    - name: Verify | Assert config directory exists
+      ansible.builtin.assert:
+        that:
+          - __certbot_config_dir.stat.exists
+          - __certbot_config_dir.stat.isdir
+        fail_msg: '/etc/letsencrypt does not exist'
+        success_msg: '/etc/letsencrypt exists'
+
+    - name: Verify | Check webroot directory
+      ansible.builtin.stat:
+        path: /var/www/letsencrypt
+      register: __certbot_webroot_dir
+
+    - name: Verify | Assert webroot directory exists
+      ansible.builtin.assert:
+        that:
+          - __certbot_webroot_dir.stat.exists
+          - __certbot_webroot_dir.stat.isdir
+        fail_msg: '/var/www/letsencrypt does not exist'
+        success_msg: '/var/www/letsencrypt exists'
+
+    - name: Verify | Check ACME challenge directory
+      ansible.builtin.stat:
+        path: /var/www/letsencrypt/.well-known/acme-challenge
+      register: __certbot_acme_dir
+
+    - name: Verify | Assert ACME challenge directory exists
+      ansible.builtin.assert:
+        that:
+          - __certbot_acme_dir.stat.exists
+          - __certbot_acme_dir.stat.isdir
+        fail_msg: 'ACME challenge directory does not exist'
+        success_msg: 'ACME challenge directory exists'
+
+    - name: Verify | Check renewal hooks directories
+      ansible.builtin.stat:
+        path: "/etc/letsencrypt/renewal-hooks/{{ item }}"
+      loop:
+        - 'pre'
+        - 'post'
+        - 'deploy'
+      register: __certbot_hook_dirs
+
+    - name: Verify | Assert renewal hooks directories exist
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isdir
+        fail_msg: "Renewal hooks directory {{ item.item }} does not exist"
+        success_msg: "Renewal hooks directory {{ item.item }} exists"
+      loop: "{{ __certbot_hook_dirs.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    #
+    # Configuration Files
+    #
+
+    - name: Verify | Check cli.ini
+      ansible.builtin.stat:
+        path: /etc/letsencrypt/cli.ini
+      register: __certbot_cli_ini
+
+    - name: Verify | Assert cli.ini exists
+      ansible.builtin.assert:
+        that:
+          - __certbot_cli_ini.stat.exists
+        fail_msg: 'cli.ini does not exist'
+        success_msg: 'cli.ini exists'
+
+    - name: Verify | Read cli.ini content
+      ansible.builtin.slurp:
+        src: /etc/letsencrypt/cli.ini
+      register: __certbot_cli_ini_content
+
+    - name: Verify | Assert cli.ini contains expected settings
+      ansible.builtin.assert:
+        that:
+          - "'email = test@example.com' in (__certbot_cli_ini_content.content | b64decode)"
+          - "'agree-tos = true' in (__certbot_cli_ini_content.content | b64decode)"
+          - "'key-type = ecdsa' in (__certbot_cli_ini_content.content | b64decode)"
+          - "'elliptic-curve = secp384r1' in (__certbot_cli_ini_content.content | b64decode)"
+          - "'staging' in (__certbot_cli_ini_content.content | b64decode)"
+        fail_msg: 'cli.ini does not contain expected settings'
+        success_msg: 'cli.ini contains expected settings'
+
+    #
+    # Deploy Hook
+    #
+
+    - name: Verify | Check deploy hook
+      ansible.builtin.stat:
+        path: /etc/letsencrypt/renewal-hooks/deploy/global-deploy-hook.sh
+      register: __certbot_deploy_hook
+
+    - name: Verify | Assert deploy hook exists
+      ansible.builtin.assert:
+        that:
+          - __certbot_deploy_hook.stat.exists
+          - __certbot_deploy_hook.stat.mode == '0755'
+        fail_msg: 'Deploy hook does not exist or has wrong permissions'
+        success_msg: 'Deploy hook exists with correct permissions'
+
+    #
+    # Monitoring Script
+    #
+
+    - name: Verify | Check monitoring script
+      ansible.builtin.stat:
+        path: /usr/local/bin/check-certs
+      register: __certbot_monitoring_script
+
+    - name: Verify | Assert monitoring script exists
+      ansible.builtin.assert:
+        that:
+          - __certbot_monitoring_script.stat.exists
+          - __certbot_monitoring_script.stat.mode == '0755'
+        fail_msg: 'Monitoring script does not exist or has wrong permissions'
+        success_msg: 'Monitoring script exists with correct permissions'
+
+    #
+    # Functional Tests
+    #
+    # NOTE: Debian 12 certbot 2.1.0 crashes due to pyOpenSSL/OpenSSL
+    # incompatibility (X509_V_FLAG_NOTIFY_POLICY removed in newer OpenSSL).
+    # Skip functional tests on Debian.
+
+    - name: Verify | Test certbot version
+      ansible.builtin.command: certbot --version
+      register: __certbot_version
+      changed_when: false
+      failed_when: __certbot_version.rc != 0
+      when: ansible_facts['os_family'] != 'Debian'
+
+    - name: Verify | Assert certbot is working
+      ansible.builtin.assert:
+        that:
+          - "'certbot' in __certbot_version.stdout | lower"
+        fail_msg: 'Certbot version output unexpected'
+        success_msg: 'Certbot version output valid'
+      when: ansible_facts['os_family'] != 'Debian'
+
+    - name: Verify | Test certbot plugins command
+      ansible.builtin.command: certbot plugins
+      register: __certbot_plugins
+      changed_when: false
+      failed_when: __certbot_plugins.rc != 0
+      when: ansible_facts['os_family'] != 'Debian'
+
+    #
+    # Timer Verification
+    #
+
+    - name: Verify | Set timer name fact
+      ansible.builtin.set_fact:
+        __certbot_timer_name: >-
+          {{ 'certbot-renew.timer' if ansible_facts['os_family'] in ['Archlinux', 'RedHat']
+          else 'certbot.timer' }}
+
+    - name: Verify | Check certbot timer status
+      ansible.builtin.systemd_service:
+        name: "{{ __certbot_timer_name }}"
+      check_mode: true
+      register: __certbot_timer_status
+      failed_when: false
+
+    - name: Verify | Assert certbot timer exists
+      ansible.builtin.assert:
+        that:
+          - __certbot_timer_status.status is defined
+        fail_msg: 'Certbot timer does not exist or is not accessible'
+        success_msg: 'Certbot timer exists'
+      when: __certbot_timer_status is not failed
+
+    #
+    # File Permissions
+    #
+
+    - name: Verify | Assert cli.ini permissions
+      ansible.builtin.assert:
+        that:
+          - __certbot_cli_ini.stat.mode == '0644'
+        fail_msg: 'cli.ini has incorrect permissions'
+        success_msg: 'cli.ini has correct permissions'

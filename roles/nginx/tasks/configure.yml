@@ -1,0 +1,189 @@
+---
+- name: Configure | Allow nginx network connections (SELinux)
+  ansible.posix.seboolean:
+    name: httpd_can_network_connect
+    state: true
+    persistent: true
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+    - nginx_upstreams | length > 0
+
+- name: Configure | Create required directories
+  ansible.builtin.file:
+    path: '{{ item.path }}'
+    state: directory
+    owner: '{{ item.owner | default("root") }}'
+    group: '{{ item.group | default("root") }}'
+    mode: '{{ item.mode | default("0755") }}'
+  loop: '{{ nginx_create_directories }}'
+
+- name: Configure | Create sites-available directory
+  ansible.builtin.file:
+    path: '{{ __nginx_sites_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Configure | Create sites-enabled directory
+  ansible.builtin.file:
+    path: '{{ __nginx_sites_enabled_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Configure | Create conf.d directory
+  ansible.builtin.file:
+    path: '{{ __nginx_conf_d_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Configure | Deploy main nginx.conf
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: '{{ __nginx_config_file }}'
+    owner: root
+    group: root
+    mode: '0644'
+    validate: 'nginx -t -c %s'
+  notify: Reload Nginx
+
+- name: Configure | Create htpasswd files
+  community.general.htpasswd:
+    path: '{{ item.0.path }}'
+    name: '{{ item.1.name }}'
+    password: '{{ item.1.password }}'
+    owner: root
+    group: '{{ __nginx_group }}'
+    mode: '0640'
+  loop: >-
+    {{ nginx_htpasswd_files | subelements('users', skip_missing=True) }}
+  loop_control:
+    label: '{{ item.0.name }}: {{ item.1.name }}'
+  no_log: true
+
+- name: Configure | Deploy upstream configurations
+  ansible.builtin.template:
+    src: upstream.conf.j2
+    dest: '{{ __nginx_conf_d_dir }}/upstream-{{ item.name }}.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  loop: '{{ nginx_upstreams }}'
+  loop_control:
+    label: '{{ item.name }}'
+  notify: Reload Nginx
+
+- name: Configure | Create SSL directory
+  ansible.builtin.file:
+    path: '{{ __nginx_config_dir }}/ssl'
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  when:
+    - nginx_default_site_enabled | bool
+    - nginx_default_site_ssl_certificate | length == 0
+
+- name: Configure | Generate self-signed certificate for default site
+  ansible.builtin.command:
+    cmd: >-
+      openssl req -x509 -nodes -days 3650 -newkey rsa:2048
+      -keyout {{ __nginx_config_dir }}/ssl/default.key
+      -out {{ __nginx_config_dir }}/ssl/default.crt
+      -subj "/CN=localhost"
+    creates: '{{ __nginx_config_dir }}/ssl/default.crt'
+  when:
+    - nginx_default_site_enabled | bool
+    - nginx_default_site_ssl_certificate | length == 0
+
+- name: Configure | Set permissions on self-signed key
+  ansible.builtin.file:
+    path: '{{ __nginx_config_dir }}/ssl/default.key'
+    owner: root
+    group: root
+    mode: '0600'
+  when:
+    - nginx_default_site_enabled | bool
+    - nginx_default_site_ssl_certificate | length == 0
+
+- name: Configure | Deploy default site
+  ansible.builtin.template:
+    src: default-site.conf.j2
+    dest: '{{ __nginx_sites_dir }}/default.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  when: nginx_default_site_enabled | bool
+  notify: Reload Nginx
+
+- name: Configure | Enable default site
+  ansible.builtin.file:
+    src: '{{ __nginx_sites_dir }}/default.conf'
+    dest: '{{ __nginx_sites_enabled_dir }}/default.conf'
+    state: link
+  when: nginx_default_site_enabled | bool
+  notify: Reload Nginx
+
+- name: Configure | Disable default site
+  ansible.builtin.file:
+    path: '{{ __nginx_sites_enabled_dir }}/default.conf'
+    state: absent
+  when: not (nginx_default_site_enabled | bool)
+  notify: Reload Nginx
+
+- name: Configure | Deploy site configurations
+  ansible.builtin.template:
+    src: site.conf.j2
+    dest: '{{ __nginx_sites_dir }}/{{ item.name }}.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  loop: '{{ nginx_sites }}'
+  loop_control:
+    label: '{{ item.name }}'
+  notify: Reload Nginx
+
+- name: Configure | Enable sites
+  ansible.builtin.file:
+    src: '{{ __nginx_sites_dir }}/{{ item.name }}.conf'
+    dest: '{{ __nginx_sites_enabled_dir }}/{{ item.name }}.conf'
+    state: link
+  loop: >-
+    {{
+      nginx_sites | selectattr('enabled', 'undefined') | list +
+      nginx_sites | selectattr('enabled', 'defined') | selectattr('enabled') | list
+    }}
+  loop_control:
+    label: '{{ item.name }}'
+  notify: Reload Nginx
+
+- name: Configure | Disable sites
+  ansible.builtin.file:
+    path: '{{ __nginx_sites_enabled_dir }}/{{ item.name }}.conf'
+    state: absent
+  loop: "{{ nginx_sites | selectattr('enabled', 'defined') | rejectattr('enabled') | list }}"
+  loop_control:
+    label: '{{ item.name }}'
+  notify: Reload Nginx
+
+- name: Configure | Deploy stream configuration
+  ansible.builtin.template:
+    src: stream.conf.j2
+    dest: '{{ __nginx_conf_d_dir }}/stream.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  when: nginx_stream_enabled | bool
+  notify: Reload Nginx
+
+- name: Configure | Remove stream config if disabled
+  ansible.builtin.file:
+    path: '{{ __nginx_conf_d_dir }}/stream.conf'
+    state: absent
+  when: not (nginx_stream_enabled | bool)
+  notify: Reload Nginx

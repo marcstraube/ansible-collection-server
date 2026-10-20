@@ -1,0 +1,124 @@
+{{ ansible_managed | comment }}
+
+user {{ __nginx_user }};
+worker_processes {{ nginx_worker_processes }};
+pid {{ __nginx_pid_file }};
+
+{% if nginx_extra_config | length > 0 %}
+{{ nginx_extra_config }}
+{% endif %}
+
+events {
+    worker_connections {{ nginx_worker_connections }};
+{% if nginx_use_epoll | bool %}
+    use epoll;
+{% endif %}
+{% if nginx_multi_accept | bool %}
+    multi_accept on;
+{% endif %}
+}
+
+http {
+    # Basic settings
+    include {{ __nginx_mime_types_file }};
+    default_type application/octet-stream;
+
+    sendfile {{ nginx_sendfile | ternary('on', 'off') }};
+    tcp_nopush {{ nginx_tcp_nopush | ternary('on', 'off') }};
+    tcp_nodelay {{ nginx_tcp_nodelay | ternary('on', 'off') }};
+    keepalive_timeout {{ nginx_keepalive_timeout }};
+    types_hash_max_size {{ nginx_types_hash_max_size }};
+    server_tokens {{ nginx_server_tokens | ternary('on', 'off') }};
+
+    # Client settings
+    client_max_body_size {{ nginx_client_max_body_size }};
+    client_body_buffer_size {{ nginx_client_body_buffer_size }};
+    large_client_header_buffers {{ nginx_large_client_header_buffers }};
+    client_body_timeout {{ nginx_client_body_timeout }};
+    client_header_timeout {{ nginx_client_header_timeout }};
+    send_timeout {{ nginx_send_timeout }};
+
+    # Logging
+    log_format main {{ nginx_log_format }};
+{% for name, format in nginx_custom_log_formats.items() %}
+    log_format {{ name }} {{ format }};
+{% endfor %}
+{% if nginx_access_log %}
+    access_log {{ nginx_access_log }} main;
+{% else %}
+    access_log off;
+{% endif %}
+    error_log {{ nginx_error_log }} {{ nginx_error_log_level }};
+
+{% if nginx_gzip | bool %}
+    # Gzip compression
+    gzip on;
+    gzip_min_length {{ nginx_gzip_min_length }};
+    gzip_comp_level {{ nginx_gzip_comp_level }};
+    gzip_proxied {{ nginx_gzip_proxied }};
+    gzip_types {{ nginx_gzip_types | join(' ') }};
+    gzip_vary {{ nginx_gzip_vary | ternary('on', 'off') }};
+{% endif %}
+
+    # SSL defaults
+    ssl_protocols {{ nginx_ssl_protocols | join(' ') }};
+    ssl_ciphers {{ nginx_ssl_ciphers }};
+    ssl_prefer_server_ciphers {{ nginx_ssl_prefer_server_ciphers | ternary('on', 'off') }};
+    ssl_session_cache {{ nginx_ssl_session_cache }};
+    ssl_session_timeout {{ nginx_ssl_session_timeout }};
+    ssl_session_tickets {{ nginx_ssl_session_tickets | ternary('on', 'off') }};
+{% if nginx_ssl_stapling | bool %}
+    ssl_stapling on;
+    ssl_stapling_verify {{ nginx_ssl_stapling_verify | ternary('on', 'off') }};
+{% endif %}
+{% if nginx_ssl_dhparam | length > 0 %}
+    ssl_dhparam {{ nginx_ssl_dhparam }};
+{% endif %}
+
+{% if nginx_resolver | length > 0 %}
+    # Resolver
+    resolver {{ nginx_resolver }};
+    resolver_timeout {{ nginx_resolver_timeout }};
+{% endif %}
+
+{% if nginx_rate_limiting_enabled | bool %}
+    # Rate limiting zones
+{% for zone in nginx_rate_limit_zones %}
+    limit_req_zone {{ zone.key }} zone={{ zone.name }}:{{ zone.size }} rate={{ zone.rate }};
+{% endfor %}
+{% endif %}
+
+{% for map in nginx_maps %}
+    # Map: {{ map.name }}
+    map {{ map.source }} {{ map.variable }} {
+        default {{ map.default }};
+{% for mapping in map.mappings %}
+        {{ mapping.value }} {{ mapping.result }};
+{% endfor %}
+    }
+{% endfor %}
+
+    # WebSocket upgrade map
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        '' close;
+    }
+
+{% if nginx_http_extra_config | length > 0 %}
+    # Extra HTTP configuration
+{{ nginx_http_extra_config | indent(4, first=True) }}
+{% endif %}
+
+    # Include additional configurations
+    include {{ __nginx_conf_d_dir }}/*.conf;
+    include {{ __nginx_sites_enabled_dir }}/*.conf;
+{% for include in nginx_extra_includes %}
+    include {{ include }};
+{% endfor %}
+}
+
+{% if nginx_stream_enabled | bool %}
+stream {
+    include {{ __nginx_conf_d_dir }}/stream.conf;
+}
+{% endif %}

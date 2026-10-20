@@ -1,0 +1,97 @@
+---
+# =============================================================================
+# Web Server Tasks
+# =============================================================================
+# Task file for web server deployment — single source of truth.
+# Import it from a play with `ansible.builtin.import_tasks`.
+#
+# Roles are imported statically (import_role) so their internal sub-tags are
+# exposed to --tags / --list-tags. Run `ansible-playbook … --list-tags` to see
+# the full set. Dynamic include_role would hide sub-tags behind the include.
+#
+# Order matters for the Let's Encrypt webroot bootstrap (no self-signed):
+#   1. apache      — deploy HTTP vhosts + ACME webroot; SSL vhosts are skipped
+#                    while their certificate is still missing (stat guard in the
+#                    role). Port 80 now serves /.well-known/acme-challenge/.
+#   2. flush       — force the apache reload handler NOW, so the new HTTP vhosts
+#                    (with the ACME challenge alias) are actually loaded before
+#                    certbot runs. Without this, notify handlers only fire at the
+#                    end of the play (or never, if certbot fails first), so
+#                    certbot would hit the OLD config and the challenge 404s.
+#   3. certbot     — obtain certificates via the webroot authenticator.
+#   4. apache vhosts — re-run the role's vhost tasks so the now-present
+#                    certificates get their SSL vhosts deployed. Only when
+#                    certbot obtained a certificate in this run; otherwise the
+#                    first pass already deployed everything. This pass is a
+#                    dynamic include_role: a second static import would define
+#                    the role's handlers again, carrying its certbot condition,
+#                    and that later definition would skip every apache reload
+#                    and restart in runs without a new certificate.
+# This avoids ever serving a self-signed placeholder certificate.
+#
+# Certificates deployed by marcstraube.common.pki in an earlier play (the base
+# play) cannot notify handlers here, as notifications do not cross plays. pki
+# records the change as pki_cert_material_changed; the forward task below
+# notifies 'Reload cert services' again, so apache, nginx and certbot's deploy
+# hooks pick up the new material in this run.
+# =============================================================================
+
+- name: Web | Import apache role (HTTP + ACME challenge bootstrap)
+  ansible.builtin.import_role:
+    name: marcstraube.server.apache
+  tags:
+    - web
+    - apache
+  when: apache_enabled | bool
+
+- name: Web | Import nginx role
+  ansible.builtin.import_role:
+    name: marcstraube.server.nginx
+  tags:
+    - web
+    - nginx
+  when: nginx_enabled | bool
+
+- name: Web | Apply pending web-server config before certbot
+  ansible.builtin.meta: flush_handlers
+  tags:
+    - web
+    - certbot
+
+- name: Web | Import certbot role
+  ansible.builtin.import_role:
+    name: marcstraube.server.certbot
+  tags:
+    - web
+    - certbot
+  when: certbot_enabled | bool
+
+# __certbot_obtain is registered by the certbot role's "Obtain certificates"
+# task. It is undefined when certbot did not run (disabled, or excluded by
+# tags) and unchanged when every certificate already existed.
+- name: Web | Re-run apache vhosts (deploy SSL vhosts after certbot issuance)
+  ansible.builtin.include_role:
+    name: marcstraube.server.apache
+    tasks_from: vhosts.yml
+    apply:
+      tags:
+        - web
+        - apache
+        - apache:vhosts
+  tags:
+    - web
+    - apache
+    - apache:vhosts
+  when:
+    - apache_enabled | bool
+    - __certbot_obtain | default({}) is changed
+
+- name: Web | Forward certificate changes from an earlier play
+  ansible.builtin.debug:
+    msg: 'Certificate material changed earlier in this run'
+  changed_when: true
+  when: pki_cert_material_changed | default(false) | bool
+  notify: Reload cert services
+  tags:
+    - web
+    - pki

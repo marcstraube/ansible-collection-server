@@ -1,0 +1,56 @@
+---
+- name: Converge
+  hosts: all
+  gather_facts: true
+
+  vars:
+    nginx_enabled: true
+    nginx_service_enabled: true
+    nginx_worker_processes: 2
+    nginx_worker_connections: 512
+    nginx_client_max_body_size: '100m'
+    nginx_gzip: true
+    nginx_gzip_comp_level: 5
+    nginx_rate_limiting_enabled: true
+    nginx_rate_limit_zones:
+      - name: 'test_zone'
+        key: '$binary_remote_addr'
+        size: '10m'
+        rate: '10r/s'
+    nginx_upstreams:
+      - name: 'test_backend'
+        strategy: 'round_robin'
+        keepalive: 16
+        servers:
+          - address: '127.0.0.1:8080'
+            weight: 1
+          - address: '127.0.0.1:8081'
+            weight: 1
+            backup: true
+    nginx_sites:
+      - name: 'test-static'
+        server_names:
+          - 'static.example.com'
+        root: '/var/www/html'
+        index: 'index.html'
+      - name: 'test-proxy'
+        server_names:
+          - 'proxy.example.com'
+        type: 'proxy'
+        proxy_pass: 'http://127.0.0.1:8080'
+        websocket: true
+      - name: 'test-authentik-proxy'
+        server_names:
+          - 'auth.example.com'
+        type: 'proxy'
+        proxy_pass: 'http://127.0.0.1:9090'
+        authentik:
+          enabled: true
+          url: 'https://authentik.example.com'
+    nginx_stub_status_enabled: true
+    nginx_stub_status_path: '/nginx_status'
+
+  tasks:
+    - name: Converge | Include nginx role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'

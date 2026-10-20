@@ -1,0 +1,32 @@
+#!/bin/bash
+{{ ansible_managed | comment }}
+
+set -euo pipefail
+
+BACKUP_DIR="{{ postgresql_backup_dir }}"
+RETENTION_DAYS="{{ postgresql_backup_retention }}"
+DATE=$(date +%Y%m%d_%H%M%S)
+
+{% if postgresql_backup_databases | length > 0 %}
+DATABASES="{{ postgresql_backup_databases | join(' ') }}"
+{% else %}
+DATABASES=$(psql -At -c "SELECT datname FROM pg_database WHERE datistemplate = false AND datname != 'postgres'" postgres)
+{% endif %}
+
+# Create backup directory if needed
+mkdir -p "$BACKUP_DIR"
+
+# Backup each database
+for DB in $DATABASES; do
+    BACKUP_FILE="${BACKUP_DIR}/${DB}_${DATE}.sql.gz"
+    echo "Backing up $DB to $BACKUP_FILE"
+    pg_dump "$DB" | gzip > "$BACKUP_FILE"
+done
+
+# Backup globals (roles, tablespaces)
+pg_dumpall --globals-only | gzip > "${BACKUP_DIR}/globals_${DATE}.sql.gz"
+
+# Remove old backups
+find "$BACKUP_DIR" -name "*.sql.gz" -mtime +"${RETENTION_DAYS}" -delete
+
+echo "Backup completed: $(date)"

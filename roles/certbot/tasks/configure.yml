@@ -1,0 +1,88 @@
+---
+- name: Configure | Create Let's Encrypt directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: 'root'
+    group: 'root'
+    mode: '0755'
+  loop:
+    - "{{ certbot_config_dir }}"
+    - "{{ certbot_work_dir }}"
+    - "{{ certbot_log_dir }}"
+
+- name: Configure | Create webroot directory
+  ansible.builtin.file:
+    path: "{{ certbot_webroot_path }}"
+    state: directory
+    owner: "{{ certbot_webroot_owner }}"
+    group: "{{ certbot_webroot_group }}"
+    mode: "{{ certbot_webroot_mode }}"
+  when: certbot_create_webroot | bool
+
+- name: Configure | Create ACME challenge directory
+  ansible.builtin.file:
+    path: "{{ certbot_webroot_path }}/.well-known/acme-challenge"
+    state: directory
+    owner: "{{ certbot_webroot_owner }}"
+    group: "{{ certbot_webroot_group }}"
+    mode: "{{ certbot_webroot_mode }}"
+  when: certbot_create_webroot | bool
+
+- name: Configure | Configure Cloudflare credentials
+  ansible.builtin.template:
+    src: cloudflare.ini.j2
+    dest: "{{ certbot_dns_cloudflare_credentials_file }}"
+    owner: 'root'
+    group: 'root'
+    mode: '0600'
+  when: >
+    certbot_dns_cloudflare_api_key | length > 0 or
+    certbot_dns_cloudflare_api_token | length > 0
+  no_log: true
+
+- name: Configure | Configure Route53 credentials
+  ansible.builtin.template:
+    src: route53.ini.j2
+    dest: "{{ certbot_dns_route53_credentials_file }}"
+    owner: 'root'
+    group: 'root'
+    mode: '0600'
+  when: certbot_dns_route53_access_key_id | length > 0
+  no_log: true
+
+- name: Configure | Configure DigitalOcean credentials
+  ansible.builtin.template:
+    src: digitalocean.ini.j2
+    dest: "{{ certbot_dns_digitalocean_credentials_file }}"
+    owner: 'root'
+    group: 'root'
+    mode: '0600'
+  when: certbot_dns_digitalocean_token | length > 0
+  no_log: true
+
+- name: Configure | Create combined PEM directory
+  ansible.builtin.file:
+    path: "{{ certbot_combined_pem_path }}"
+    state: directory
+    owner: 'root'
+    group: 'root'
+    mode: '0700'
+  when: certbot_create_combined_pem | bool
+
+- name: Configure | Create PKCS12 directory
+  ansible.builtin.file:
+    path: "{{ certbot_pkcs12_path }}"
+    state: directory
+    owner: 'root'
+    group: 'root'
+    mode: '0700'
+  when: certbot_create_pkcs12 | bool
+
+- name: Configure | Create certbot CLI config
+  ansible.builtin.template:
+    src: cli.ini.j2
+    dest: "{{ certbot_config_dir }}/cli.ini"
+    owner: 'root'
+    group: 'root'
+    mode: '0644'

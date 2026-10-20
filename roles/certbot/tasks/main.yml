@@ -1,0 +1,42 @@
+---
+- name: Main | Load OS-specific variables
+  ansible.builtin.include_vars: '{{ item }}'
+  with_first_found:
+    - files:
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}.yml'
+      paths:
+        - 'vars'
+  tags:
+    - always
+
+- name: Main | Import installation tasks
+  ansible.builtin.import_tasks: install.yml
+  when: certbot_enabled | bool
+  tags:
+    - certbot
+    - certbot:install
+
+- name: Main | Import configuration tasks
+  ansible.builtin.import_tasks: configure.yml
+  when: certbot_enabled | bool
+  tags:
+    - certbot
+    - certbot:configure
+
+- name: Main | Import certificate tasks
+  ansible.builtin.import_tasks: certificates.yml
+  when: certbot_enabled | bool
+  tags:
+    - certbot
+    - certbot:certificates
+
+- name: Main | Import renewal tasks
+  ansible.builtin.import_tasks: renewal.yml
+  when: certbot_enabled | bool
+  tags:
+    - certbot
+    - certbot:renewal

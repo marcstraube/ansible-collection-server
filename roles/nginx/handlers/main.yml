@@ -1,0 +1,16 @@
+---
+- name: Restart Nginx
+  ansible.builtin.systemd_service:
+    name: '{{ __nginx_service_name }}'
+    state: restarted
+  when: nginx_service_enabled | bool
+
+# Also subscribes to the 'Reload cert services' topic of the certbot role and
+# marcstraube.common.pki, so a new or renewed certificate takes effect in the
+# same run.
+- name: Reload Nginx
+  ansible.builtin.systemd_service:
+    name: '{{ __nginx_service_name }}'
+    state: reloaded
+  listen: Reload cert services
+  when: nginx_service_enabled | bool

@@ -1,0 +1,51 @@
+---
+__postgresql_version: "{{ postgresql_version | default('17', true) }}"
+__postgresql_pgdg: "{{ postgresql_repo == 'pgdg' }}"
+
+# The AppStream module installs unversioned packages into the classic
+# locations; PGDG installs one versioned set per major version into
+# parallel-installable locations (/usr/pgsql-NN, /var/lib/pgsql/NN).
+__postgresql_packages: >-
+  {{ __postgresql_pgdg_packages if __postgresql_pgdg | bool
+     else __postgresql_distro_packages }}
+__postgresql_distro_packages:
+  - postgresql-server
+  - postgresql-contrib
+  - python3-psycopg2
+__postgresql_pgdg_packages:
+  - 'postgresql{{ __postgresql_version }}-server'
+  - 'postgresql{{ __postgresql_version }}-contrib'
+  - python3-psycopg2
+
+__postgresql_service_name: >-
+  {{ 'postgresql-' ~ __postgresql_version if __postgresql_pgdg | bool
+     else 'postgresql' }}
+__postgresql_data_dir: >-
+  {{ '/var/lib/pgsql/' ~ __postgresql_version ~ '/data' if __postgresql_pgdg | bool
+     else '/var/lib/pgsql/data' }}
+__postgresql_config_dir: '{{ __postgresql_data_dir }}'
+__postgresql_bin_dir: >-
+  {{ '/usr/pgsql-' ~ __postgresql_version ~ '/bin' if __postgresql_pgdg | bool
+     else '/usr/bin' }}
+
+# Cluster initialization wrapper (the PGDG one is versioned and not on PATH)
+__postgresql_setup_command: >-
+  {{ __postgresql_bin_dir ~ '/postgresql-' ~ __postgresql_version ~ '-setup initdb'
+     if __postgresql_pgdg | bool else 'postgresql-setup --initdb' }}
+
+# Parent of every cluster data directory, scanned for clusters of other
+# versions before any change is made.
+__postgresql_cluster_root: /var/lib/pgsql
+
+# PGDG yum repositories (layout of the pgdg-redhat-repo .repo file)
+__postgresql_pgdg_yum_base: https://download.postgresql.org/pub/repos/yum
+__postgresql_pgdg_rpm_key_url: https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-RHEL
+__postgresql_pgdg_repo_file: '/etc/yum.repos.d/pgdg{{ __postgresql_version }}.repo'
+
+# SSL fallback paths — RHEL has no system-wide snakeoil. Use
+# PostgreSQL's upstream default (relative paths resolve against
+# data_directory). Operator must provide server.crt + server.key in
+# data_dir if postgresql_ssl_enabled is set true without overriding
+# the inventory paths.
+__postgresql_ssl_cert_file: 'server.crt'
+__postgresql_ssl_key_file: 'server.key'

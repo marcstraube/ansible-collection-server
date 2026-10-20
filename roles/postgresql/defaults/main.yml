@@ -1,0 +1,326 @@
+---
+#
+# Role Control
+#
+
+# Enable the postgresql role
+postgresql_enabled: false
+
+# Enable and start the PostgreSQL service
+postgresql_service_enabled: true
+
+#
+# Version
+#
+
+# PostgreSQL major version to install. Selects the versioned package set
+# and paths on Debian and, with postgresql_repo 'pgdg', on EL. Ignored on
+# Arch Linux (single rolling version) and on EL with postgresql_repo
+# 'distro' (the active AppStream module stream decides).
+postgresql_version: '17'
+
+# Package source:
+#   'distro' - Distribution packages: Debian main, the EL AppStream module
+#              stream, the Arch official repo. Versions follow the distro
+#              lifecycle.
+#   'pgdg'   - PostgreSQL Global Development Group upstream repository
+#              (apt.postgresql.org / download.postgresql.org). Every
+#              supported major version is available, pinned through
+#              postgresql_version. On EL the packages, service name and
+#              data directory carry the major version
+#              (postgresql17-server, postgresql-17, /var/lib/pgsql/17).
+#
+# Switching an installed host between the two sources, or changing
+# postgresql_version, is a major-version upgrade the role does not perform;
+# it stops when a cluster of another version is found (see README).
+# Ignored on Arch Linux (no PGDG repository).
+postgresql_repo: 'distro'
+
+#
+# Network
+#
+
+# Listen addresses (* = all, localhost = local only)
+postgresql_listen_addresses: 'localhost'
+
+# Port
+postgresql_port: 5432
+
+# Unix socket directory
+postgresql_unix_socket_directories: '/var/run/postgresql'
+
+# Maximum connections
+postgresql_max_connections: 100
+
+#
+# Authentication
+#
+
+# Password encryption method
+postgresql_password_encryption: 'scram-sha-256'
+
+# pg_hba.conf entries
+postgresql_hba_entries:
+  - type: 'local'
+    database: 'all'
+    user: 'postgres'
+    method: 'peer'
+  - type: 'local'
+    database: 'all'
+    user: 'all'
+    method: 'peer'
+  - type: 'host'
+    database: 'all'
+    user: 'all'
+    address: '127.0.0.1/32'
+    method: 'scram-sha-256'
+  - type: 'host'
+    database: 'all'
+    user: 'all'
+    address: '::1/128'
+    method: 'scram-sha-256'
+
+# Additional HBA entries (for remote access)
+postgresql_hba_additional: []
+# Example:
+#   - type: 'host'
+#     database: 'myapp'
+#     user: 'myapp'
+#     address: '192.168.1.0/24'
+#     method: 'scram-sha-256'
+
+#
+# Memory
+#
+
+# Shared buffers (typically 25% of RAM)
+postgresql_shared_buffers: '256MB'
+
+# Effective cache size (typically 50-75% of RAM)
+postgresql_effective_cache_size: '1GB'
+
+# Work memory (per operation)
+postgresql_work_mem: '4MB'
+
+# Maintenance work memory
+postgresql_maintenance_work_mem: '64MB'
+
+# Huge pages (try = use if available, on = require, off = disable)
+postgresql_huge_pages: 'try'
+
+#
+# WAL / Checkpoint
+#
+
+# WAL level: minimal, replica, logical
+postgresql_wal_level: 'replica'
+
+# Checkpoint completion target
+postgresql_checkpoint_completion_target: 0.9
+
+# WAL buffers
+postgresql_wal_buffers: '16MB'
+
+# Maximum WAL size
+postgresql_max_wal_size: '1GB'
+
+# Minimum WAL size
+postgresql_min_wal_size: '80MB'
+
+# Synchronous commit (on = safe, off = faster writes)
+postgresql_synchronous_commit: 'on'
+
+#
+# Replication
+#
+
+# Maximum WAL senders (for replication and pg_basebackup)
+postgresql_max_wal_senders: 10
+
+# Maximum replication slots
+postgresql_max_replication_slots: 10
+
+#
+# Query Planner
+#
+
+# Random page cost (lower for SSDs, typically 1.1-1.5)
+postgresql_random_page_cost: 1.1
+
+# Effective I/O concurrency (higher for SSDs)
+postgresql_effective_io_concurrency: 200
+
+# Default statistics target (higher = better plans, slower ANALYZE)
+postgresql_default_statistics_target: 100
+
+#
+# Logging
+#
+
+# Log destination: stderr, csvlog, syslog
+postgresql_log_destination: 'stderr'
+
+# Logging collector
+postgresql_logging_collector: true
+
+# Log directory
+postgresql_log_directory: 'log'
+
+# Log filename pattern
+postgresql_log_filename: 'postgresql-%Y-%m-%d.log'
+
+# Log rotation
+postgresql_log_rotation_age: '1d'
+postgresql_log_rotation_size: 0
+
+# Log line prefix (timestamp, pid, user, database)
+postgresql_log_line_prefix: '%t [%p]: user=%u,db=%d,app=%a,client=%h '
+
+# Log statement level (none, ddl, mod, all)
+postgresql_log_statement: 'none'
+
+# Minimum duration to log a statement (-1 = disabled, 0 = all, N = ms)
+postgresql_log_min_duration_statement: -1
+
+# Log checkpoints
+postgresql_log_checkpoints: true
+
+# Log connections and disconnections
+postgresql_log_connections: false
+postgresql_log_disconnections: false
+
+# Log lock waits
+postgresql_log_lock_waits: true
+
+# Log temporary files (0 = all, -1 = none)
+postgresql_log_temp_files: 0
+
+#
+# Shared Libraries
+#
+
+# Shared preload libraries (e.g. pg_stat_statements)
+postgresql_shared_preload_libraries: ''
+
+#
+# Timeouts
+#
+
+# Idle in transaction session timeout in ms (0 = disabled)
+postgresql_idle_in_transaction_session_timeout: 0
+
+#
+# Locale
+#
+
+# Default timezone
+postgresql_timezone: 'Europe/Berlin'
+
+# Locale settings
+postgresql_lc_messages: 'en_US.UTF-8'
+postgresql_lc_monetary: 'de_DE.UTF-8'
+postgresql_lc_numeric: 'de_DE.UTF-8'
+postgresql_lc_time: 'de_DE.UTF-8'
+
+#
+# SSL/TLS
+#
+
+# Enable SSL — disabled by default. Loopback connections do not need
+# TLS, and a wrong cert/key path causes postgres to fail to start.
+# Operators enable explicitly when needed (network-exposed DB,
+# compliance requirements).
+postgresql_ssl_enabled: false
+
+# SSL certificate file — empty string falls back to the OS-specific
+# default in vars/ (Debian: snakeoil; RHEL/Arch: PostgreSQL upstream
+# default `server.crt` relative to data_directory).
+postgresql_ssl_cert_file: ''
+
+# SSL key file — same fallback semantics as postgresql_ssl_cert_file.
+postgresql_ssl_key_file: ''
+
+# SSL CA file (empty = no CA verification)
+postgresql_ssl_ca_file: ''
+
+# SSL minimum protocol version
+postgresql_ssl_min_protocol_version: 'TLSv1.2'
+
+# Prefer server ciphers
+postgresql_ssl_prefer_server_ciphers: true
+
+# SSL cipher list
+postgresql_ssl_ciphers: 'HIGH:MEDIUM:+3DES:!aNULL:!MD5'
+
+#
+# Databases
+#
+
+# Databases to create
+postgresql_databases: []
+# Example:
+#   - name: 'myapp'
+#     owner: 'myapp'
+#     encoding: 'UTF8'
+#     lc_collate: 'en_US.UTF-8'
+#     lc_ctype: 'en_US.UTF-8'
+
+#
+# Users
+#
+
+# Users to create
+postgresql_users: []
+# Example:
+#   - name: 'myapp'
+#     password: 'secret'
+#     role_attr_flags: 'NOSUPERUSER,NOCREATEDB'
+
+#
+# Extensions
+#
+
+# Extensions to install per database
+postgresql_extensions: []
+# Example:
+#   - name: 'pg_stat_statements'
+#     database: 'postgres'
+
+#
+# Backup
+#
+
+# Enable automated backup via cron
+postgresql_backup_enabled: false
+
+# Backup directory
+postgresql_backup_dir: '/var/backups/postgresql'
+
+# Backup schedule (cron format)
+postgresql_backup_schedule: '0 3 * * *'
+
+# Backup retention days
+postgresql_backup_retention: 7
+
+# Databases to backup (empty = all)
+postgresql_backup_databases: []
+
+#
+# Firewall
+#
+
+# Enable firewalld management
+postgresql_firewalld_enabled: true
+
+# Firewalld zone
+postgresql_firewalld_zone: 'public'
+
+#
+# Extra Configuration
+#
+
+# Extra postgresql.conf options (key-value pairs)
+postgresql_extra_config: {}
+# Example:
+#   autovacuum_max_workers: 4
+#   scram_iterations: 4096

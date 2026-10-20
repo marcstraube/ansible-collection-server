@@ -1,0 +1,11 @@
+# DO NOT EDIT. Managed by Ansible.
+# Cloudflare API credentials for certbot-dns-cloudflare
+
+{% if certbot_dns_cloudflare_api_token | length > 0 %}
+# API Token (recommended)
+dns_cloudflare_api_token = {{ certbot_dns_cloudflare_api_token }}
+{% else %}
+# Global API Key (legacy)
+dns_cloudflare_email = {{ certbot_dns_cloudflare_email }}
+dns_cloudflare_api_key = {{ certbot_dns_cloudflare_api_key }}
+{% endif %}

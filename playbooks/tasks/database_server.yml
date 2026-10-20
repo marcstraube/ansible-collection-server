@@ -1,0 +1,51 @@
+---
+# =============================================================================
+# Database Server Tasks
+# =============================================================================
+# Task file for database server deployment — single source of truth.
+# Import it from a play with `ansible.builtin.import_tasks`.
+#
+# Stack: pki, postgresql.
+#
+# pki runs first so a certificate from pki_server_certs exists before the
+# postgresql role asserts postgresql_ssl_cert_file and postgresql_ssl_key_file.
+# PostgreSQL rereads cert and key on a configuration reload, and its reload
+# handler listens on the `Reload cert services` topic that pki notifies, so a
+# certificate issued in this play takes effect in the same run. A certificate
+# deployed by an earlier play (the base play) cannot notify across plays; pki
+# records it as pki_cert_material_changed and the forward task at the end
+# notifies the topic again within this play.
+#
+# Roles are imported statically (import_role) so their internal sub-tags are
+# exposed to --tags / --list-tags. Run `ansible-playbook … --list-tags` to see
+# the full set. Dynamic include_role would hide sub-tags behind the include.
+# =============================================================================
+
+- name: Database | Import pki role
+  ansible.builtin.import_role:
+    name: marcstraube.common.pki
+  tags:
+    - database
+    - db
+    - pki
+  when: postgresql_enabled | bool
+
+- name: Database | Import postgresql role
+  ansible.builtin.import_role:
+    name: marcstraube.server.postgresql
+  tags:
+    - database
+    - db
+    - postgresql
+  when: postgresql_enabled | bool
+
+- name: Database | Forward certificate changes from an earlier play
+  ansible.builtin.debug:
+    msg: 'Certificate material changed earlier in this run'
+  changed_when: true
+  when: pki_cert_material_changed | default(false) | bool
+  notify: Reload cert services
+  tags:
+    - database
+    - db
+    - pki

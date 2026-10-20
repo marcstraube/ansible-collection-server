@@ -1,0 +1,28 @@
+---
+#
+# Shared Variables
+#
+
+# Packages (same on all OSes)
+__nginx_packages:
+  - nginx
+
+# Default mainline package (Arch overrides with nginx-mainline)
+__nginx_mainline_package: 'nginx'
+
+# Service name
+__nginx_service_name: 'nginx'
+
+# Configuration paths
+__nginx_config_dir: '/etc/nginx'
+__nginx_config_file: '/etc/nginx/nginx.conf'
+__nginx_sites_dir: '/etc/nginx/sites-available'
+__nginx_sites_enabled_dir: '/etc/nginx/sites-enabled'
+__nginx_conf_d_dir: '/etc/nginx/conf.d'
+
+# Log and run directories
+__nginx_log_dir: '/var/log/nginx'
+
+# MIME types and PID file
+__nginx_mime_types_file: '/etc/nginx/mime.types'
+__nginx_pid_file: '/run/nginx.pid'

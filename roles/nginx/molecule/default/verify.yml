@@ -1,0 +1,251 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    #
+    # Load Role Variables
+    #
+
+    - name: Verify | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Verify | Load OS-specific variables
+      ansible.builtin.include_vars: '{{ item }}'
+      with_first_found:
+        - files:
+            - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["distribution"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}.yml'
+          paths:
+            - '../../vars'
+
+    #
+    # Package Verification
+    #
+
+    - name: Verify | Check Nginx packages are installed
+      ansible.builtin.package:
+        name: '{{ __nginx_packages }}'
+        state: present
+      check_mode: true
+      register: __nginx_pkg_check
+      failed_when: __nginx_pkg_check.changed
+
+    #
+    # Configuration Verification
+    #
+
+    - name: Verify | Check nginx.conf exists
+      ansible.builtin.stat:
+        path: '{{ __nginx_config_file }}'
+      register: __nginx_conf_stat
+
+    - name: Verify | Assert nginx.conf exists
+      ansible.builtin.assert:
+        that:
+          - __nginx_conf_stat.stat.exists
+          - __nginx_conf_stat.stat.mode == '0644'
+        fail_msg: "nginx.conf missing or wrong permissions"
+        success_msg: "nginx.conf exists with correct permissions"
+
+    - name: Verify | Read nginx.conf content
+      ansible.builtin.slurp:
+        src: '{{ __nginx_config_file }}'
+      register: __nginx_conf_content
+
+    - name: Verify | Assert nginx.conf contains expected settings
+      ansible.builtin.assert:
+        that:
+          - "'worker_processes 2' in (__nginx_conf_content.content | b64decode)"
+          - "'worker_connections 512' in (__nginx_conf_content.content | b64decode)"
+          - "'client_max_body_size 100m' in (__nginx_conf_content.content | b64decode)"
+          - "'gzip on' in (__nginx_conf_content.content | b64decode)"
+          - "'gzip_comp_level 5' in (__nginx_conf_content.content | b64decode)"
+          - "'limit_req_zone' in (__nginx_conf_content.content | b64decode)"
+        fail_msg: "nginx.conf missing expected settings"
+        success_msg: "nginx.conf contains expected settings"
+
+    #
+    # Site Verification
+    #
+
+    - name: Verify | Check sites-enabled directory exists
+      ansible.builtin.stat:
+        path: '{{ __nginx_sites_enabled_dir }}'
+      register: __nginx_sites_enabled_stat
+
+    - name: Verify | Assert sites-enabled directory
+      ansible.builtin.assert:
+        that:
+          - __nginx_sites_enabled_stat.stat.exists
+          - __nginx_sites_enabled_stat.stat.isdir
+        fail_msg: "sites-enabled directory missing"
+        success_msg: "sites-enabled directory exists"
+
+    - name: Verify | Check test-static site exists
+      ansible.builtin.stat:
+        path: '{{ __nginx_sites_dir }}/test-static.conf'
+      register: __nginx_test_static
+
+    - name: Verify | Assert test-static site
+      ansible.builtin.assert:
+        that:
+          - __nginx_test_static.stat.exists
+        fail_msg: "test-static.conf missing"
+        success_msg: "test-static.conf exists"
+
+    - name: Verify | Check test-proxy site exists
+      ansible.builtin.stat:
+        path: '{{ __nginx_sites_dir }}/test-proxy.conf'
+      register: __nginx_test_proxy
+
+    - name: Verify | Assert test-proxy site
+      ansible.builtin.assert:
+        that:
+          - __nginx_test_proxy.stat.exists
+        fail_msg: "test-proxy.conf missing"
+        success_msg: "test-proxy.conf exists"
+
+    #
+    # Proxy and WebSocket Verification
+    #
+
+    - name: Verify | Read test-proxy.conf content
+      ansible.builtin.slurp:
+        src: '{{ __nginx_sites_dir }}/test-proxy.conf'
+      register: __nginx_proxy_content
+
+    - name: Verify | Assert proxy site contains WebSocket support
+      ansible.builtin.assert:
+        that:
+          - "'proxy_pass http://127.0.0.1:8080' in (__nginx_proxy_content.content | b64decode)"
+          - "'Upgrade $http_upgrade' in (__nginx_proxy_content.content | b64decode)"
+          - "'$connection_upgrade' in (__nginx_proxy_content.content | b64decode)"
+        fail_msg: "test-proxy.conf missing WebSocket configuration"
+        success_msg: "test-proxy.conf contains WebSocket configuration"
+
+    #
+    # Upstream Verification
+    #
+
+    - name: Verify | Check upstream config exists
+      ansible.builtin.stat:
+        path: '{{ __nginx_conf_d_dir }}/upstream-test_backend.conf'
+      register: __nginx_upstream_stat
+
+    - name: Verify | Assert upstream config
+      ansible.builtin.assert:
+        that:
+          - __nginx_upstream_stat.stat.exists
+        fail_msg: "upstream-test_backend.conf missing"
+        success_msg: "upstream-test_backend.conf exists"
+
+    #
+    # Authentik Forward Auth Verification
+    #
+
+    - name: Verify | Read test-authentik-proxy.conf content
+      ansible.builtin.slurp:
+        src: '{{ __nginx_sites_dir }}/test-authentik-proxy.conf'
+      register: __nginx_authentik_content
+
+    - name: Verify | Assert authentik forward auth directives
+      ansible.builtin.assert:
+        that:
+          - "'auth_request' in (__nginx_authentik_content.content | b64decode)"
+          - "'outpost.goauthentik.io' in (__nginx_authentik_content.content | b64decode)"
+          - "'X-authentik-username' in (__nginx_authentik_content.content | b64decode)"
+        fail_msg: "Authentik forward auth directives missing"
+        success_msg: "Authentik forward auth directives present"
+
+    #
+    # Configuration Validation
+    #
+
+    - name: Verify | Validate Nginx configuration
+      ansible.builtin.command:
+        cmd: nginx -t
+      register: __nginx_test
+      changed_when: false
+      failed_when: __nginx_test.rc != 0
+
+    - name: Verify | Assert configuration syntax is valid
+      ansible.builtin.assert:
+        that:
+          - "'syntax is ok' in __nginx_test.stderr"
+          - "'test is successful' in __nginx_test.stderr"
+        fail_msg: "Nginx configuration test failed"
+        success_msg: "Nginx configuration syntax valid"
+
+    #
+    # Service Verification
+    #
+
+    - name: Verify | Check Nginx service status
+      ansible.builtin.systemd_service:
+        name: '{{ __nginx_service_name }}'
+      register: __nginx_svc_check
+
+    - name: Verify | Assert Nginx service is active and enabled
+      ansible.builtin.assert:
+        that:
+          - __nginx_svc_check.status.ActiveState == 'active'
+          - __nginx_svc_check.status.UnitFileState == 'enabled'
+        fail_msg: "Nginx service is not active or enabled"
+        success_msg: "Nginx service is active and enabled"
+
+    #
+    # Ansible Managed Header Verification
+    #
+
+    - name: Verify | Check ansible_managed header in nginx.conf
+      ansible.builtin.command:
+        cmd: 'head -3 {{ __nginx_config_file }}'
+      register: __nginx_config_header
+      changed_when: false
+
+    - name: Verify | Assert ansible_managed header
+      ansible.builtin.assert:
+        that:
+          - "'Ansible managed' in __nginx_config_header.stdout"
+        fail_msg: "nginx.conf missing ansible_managed header"
+        success_msg: "nginx.conf has ansible_managed header"
+
+    #
+    # Sensitive Paths
+    #
+
+    - name: Verify | Request sensitive paths that must be denied
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1/{{ item }}'
+        headers:
+          Host: 'static.example.com'
+        status_code: 403
+      loop:
+        - '.env'
+        - '.env.local'
+        - '.git/config'
+        - '.hg/hgrc'
+        - '.htaccess'
+        - '.DS_Store'
+        - 'dump.sql'
+        - 'dump.sql.gz'
+        - 'index.html.bak'
+        - 'notes.txt~'
+
+    # Neighbours of the denied names: the patterns match whole path
+    # components only, so these stay reachable.
+    - name: Verify | Request paths that must stay reachable
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1/{{ item }}'
+        headers:
+          Host: 'static.example.com'
+        status_code: 200
+      loop:
+        - '.github/workflow.yml'
+        - '.envrc'
+        - 'allowed.txt'

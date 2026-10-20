@@ -1,0 +1,134 @@
+---
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: Create Release PR
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          target-branch: main
+
+      # Date the persistent `## Unreleased` heading in MIGRATION.md and
+      # insert a fresh empty `## Unreleased` block above it on the open
+      # release PR. The Keep-a-Changelog-style persistent heading lets
+      # multiple breaking-change PRs in the same cycle append entries
+      # without each having to detect or create the heading, and removes
+      # the version guessing the previous (`## vX.Y.Z (unreleased)`)
+      # convention required.
+      #
+      # The step locates the release PR by the `autorelease: pending`
+      # label that release-please applies, rather than via the action's
+      # `pr` output. The action only populates that output when it
+      # creates or updates the PR in *this* run — when the PR already
+      # exists and release-please reports "PR remained the same", the
+      # output is empty and any gating on it would silently skip this
+      # step.
+      #
+      # No-op when no release PR is open, MIGRATION.md is absent, or the
+      # `## Unreleased` heading is missing (already dated). Commit goes
+      # through the contents API so it is attributed to and verified as
+      # the release bot.
+      - name: Date Unreleased section in MIGRATION.md
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          PR_BRANCH=$(gh pr list -R "$REPO" \
+            --label 'autorelease: pending' --state open \
+            --json headRefName --jq '.[0].headRefName // empty')
+
+          if [ -z "$PR_BRANCH" ]; then
+            echo "No open 'autorelease: pending' PR — nothing to do."
+            exit 0
+          fi
+
+          NEW_VERSION=$(gh api "repos/${REPO}/contents/.release-please-manifest.json?ref=${PR_BRANCH}" \
+            --jq '.content' | base64 -d | jq -r '.["."]')
+          DATE=$(date -u +%Y-%m-%d)
+
+          echo "Release PR branch: ${PR_BRANCH}"
+          echo "Release version:   v${NEW_VERSION}"
+          echo "Date stamp:        ${DATE}"
+
+          # Pull MIGRATION.md from the PR branch (404 here means no
+          # MIGRATION.md at this revision — treat as a no-op).
+          if ! RESP=$(gh api "repos/${REPO}/contents/MIGRATION.md?ref=${PR_BRANCH}" 2>/dev/null); then
+            echo "MIGRATION.md not present on ${PR_BRANCH} — nothing to do."
+            exit 0
+          fi
+
+          OLD_CONTENT=$(jq -r '.content' <<< "$RESP" | base64 -d)
+          FILE_SHA=$(jq -r '.sha' <<< "$RESP")
+
+          PATTERN="## Unreleased"
+          REPLACEMENT="## v${NEW_VERSION} - ${DATE}"
+
+          if ! grep -Fxq "$PATTERN" <<< "$OLD_CONTENT"; then
+            echo "No '${PATTERN}' heading in MIGRATION.md — already dated or section missing."
+            exit 0
+          fi
+
+          # Idempotency guard: if the dated heading for this version
+          # already exists in the file, the rewrite has run before.
+          # Skip to avoid stacking duplicate headings on subsequent
+          # main-pushes within the same release cycle (MD024).
+          if grep -Fxq "$REPLACEMENT" <<< "$OLD_CONTENT"; then
+            echo "MIGRATION.md already contains '${REPLACEMENT}' heading — no-op."
+            exit 0
+          fi
+
+          # Rewrite the first `## Unreleased` to two stacked headings:
+          # a fresh empty `## Unreleased` block (for the next cycle) on
+          # top, followed by the dated heading for this release. Any
+          # entries that lived under the original `## Unreleased` now
+          # sit under the dated heading where they belong.
+          NEW_CONTENT=$(awk -v p="$PATTERN" -v r="$REPLACEMENT" '
+            BEGIN { done = 0 }
+            {
+              if ($0 == p && !done) {
+                print p
+                print ""
+                print r
+                done = 1
+              } else {
+                print
+              }
+            }
+          ' <<< "$OLD_CONTENT")
+
+          if [ "$OLD_CONTENT" = "$NEW_CONTENT" ]; then
+            echo "Rewrite produced identical content — nothing to commit."
+            exit 0
+          fi
+
+          NEW_B64=$(printf '%s\n' "$NEW_CONTENT" | base64 -w 0)
+
+          gh api -X PUT "repos/${REPO}/contents/MIGRATION.md" \
+            -f message="docs: date v${NEW_VERSION} migration section" \
+            -f content="${NEW_B64}" \
+            -f sha="${FILE_SHA}" \
+            -f branch="${PR_BRANCH}"

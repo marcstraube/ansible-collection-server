@@ -1,0 +1,58 @@
+---
+__apache_packages:
+  - apache2
+
+__apache_service_name: 'apache2'
+__apache_config_file: '/etc/apache2/apache2.conf'
+__apache_config_dir: '/etc/apache2'
+__apache_vhosts_dir: '/etc/apache2/sites-available'
+__apache_vhosts_enabled_dir: '/etc/apache2/sites-enabled'
+__apache_modules_dir: '/usr/lib/apache2/modules'
+__apache_log_dir: '/var/log/apache2'
+__apache_run_dir: '/var/run/apache2'
+__apache_document_root: '/var/www/html'
+__apache_user: 'www-data'
+__apache_group: 'www-data'
+__apache_ssl_session_cache: 'shmcb:/var/run/apache2/ssl_scache(512000)'
+__apache_ssl_stapling_cache: 'shmcb:/var/run/apache2/ocsp(128000)'
+
+# Module configuration
+__apache_modules_available_dir: '/etc/apache2/mods-available'
+__apache_modules_enabled_dir: '/etc/apache2/mods-enabled'
+__apache_use_mods_enabled: true
+__apache_enmod_command: 'a2enmod'
+__apache_dismod_command: 'a2dismod'
+__apache_ensite_command: 'a2ensite'
+__apache_dissite_command: 'a2dissite'
+
+# Compiled into Debian's apache2 binary; a2enmod knows no such modules.
+__apache_modules_static:
+  - 'log_config'
+  - 'unixd'
+
+# Modules the apache2 package enables on installation (Debian 13). The role
+# disables those it does not need; modules enabled by other packages (php,
+# security2, ...) are left alone.
+__apache_modules_package_defaults:
+  - 'access_compat'
+  - 'alias'
+  - 'auth_basic'
+  - 'authn_core'
+  - 'authn_file'
+  - 'authz_core'
+  - 'authz_host'
+  - 'authz_user'
+  - 'autoindex'
+  - 'deflate'
+  - 'dir'
+  - 'env'
+  - 'filter'
+  - 'mime'
+  - 'negotiation'
+  - 'reqtimeout'
+  - 'setenvif'
+  - 'status'
+
+# Additional packages
+__apache_utils_packages:
+  - apache2-utils

@@ -1,0 +1,35 @@
+{{ ansible_managed | comment }}
+# The Prefork MPM implements a non-threaded, pre-forking web server that handles
+# requests in a manner similar to Apache 1.3. Each request is handled by a
+# separate child process. This MPM is appropriate for sites that need to avoid
+# threading for compatibility with non-thread-safe libraries (e.g., mod_php).
+
+<IfModule mpm_prefork_module>
+    # StartServers: Number of server processes to start initially
+    # Recommendation: 5-10 for most sites, increase for high-traffic sites
+    StartServers             {{ apache_mpm_prefork_start_servers }}
+
+    # MinSpareServers: Minimum number of idle server processes
+    # Apache will create new processes to maintain at least this many idle servers
+    # Recommendation: 5-10 for most sites
+    MinSpareServers          {{ apache_mpm_prefork_min_spare_servers }}
+
+    # MaxSpareServers: Maximum number of idle server processes
+    # Apache will kill excess processes when idle count exceeds this value
+    # Should be larger than MinSpareServers to handle traffic fluctuations
+    # Recommendation: 10-20 for most sites
+    MaxSpareServers          {{ apache_mpm_prefork_max_spare_servers }}
+
+    # MaxRequestWorkers: Maximum number of server processes allowed to start
+    # This limits the number of simultaneous requests that will be served
+    # Note: In Apache 2.4+, this was renamed from MaxClients
+    # Recommendation: 150-256 for medium sites, adjust based on available RAM
+    # Each process consumes memory, so calculate: (Available RAM / Average Process Size)
+    MaxRequestWorkers        {{ apache_mpm_prefork_max_request_workers }}
+
+    # MaxConnectionsPerChild: Maximum number of connections a server process will handle
+    # before being gracefully restarted (helps prevent memory leaks)
+    # Set to 0 for unlimited (not recommended in production)
+    # Recommendation: 1000-10000 connections
+    MaxConnectionsPerChild   {{ apache_mpm_prefork_max_connections_per_child }}
+</IfModule>

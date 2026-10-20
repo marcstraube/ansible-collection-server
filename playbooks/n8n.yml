@@ -1,0 +1,30 @@
+---
+# =============================================================================
+# N8N Workflow Automation Playbook
+# =============================================================================
+# n8n stack: podman, optional postgresql, pki-issued certificates, n8n and
+# nginx as TLS frontend. The stack and its order live in tasks/n8n.yml; this
+# play adds the Arch Linux system update in front of it.
+#
+# Usage:
+#   ansible-playbook marcstraube.server.n8n -i inventory/
+#   ansible-playbook marcstraube.server.n8n -i inventory/ --tags n8n
+#
+# Configure roles via inventory variables (group_vars/host_vars).
+# See each role's defaults/main.yml for available variables.
+# =============================================================================
+
+- name: N8N Workflow Automation
+  hosts: n8n_servers
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: N8N | Import system update tasks
+      ansible.builtin.import_tasks:
+        file: tasks/system_update.yml
+
+  tasks:
+    - name: N8N | Import n8n tasks
+      ansible.builtin.import_tasks:
+        file: tasks/n8n.yml

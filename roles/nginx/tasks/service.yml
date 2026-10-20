@@ -1,0 +1,7 @@
+---
+- name: Service | Manage Nginx service
+  ansible.builtin.systemd_service:
+    name: '{{ __nginx_service_name }}'
+    enabled: "{{ nginx_service_enabled | bool }}"
+    state: "{{ nginx_service_enabled | bool | ternary('started', 'stopped') }}"
+    daemon_reload: true

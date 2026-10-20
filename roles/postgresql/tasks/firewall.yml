@@ -1,0 +1,15 @@
+---
+- name: Firewall | Check if firewalld is running
+  ansible.builtin.systemd_service:
+    name: firewalld
+  register: __postgresql_firewalld_status
+  failed_when: false
+
+- name: Firewall | Manage PostgreSQL firewall rule
+  ansible.posix.firewalld:
+    port: '{{ postgresql_port }}/tcp'
+    zone: '{{ postgresql_firewalld_zone }}'
+    permanent: true
+    immediate: true
+    state: "{{ postgresql_firewalld_enabled | bool | ternary('enabled', 'disabled') }}"
+  when: __postgresql_firewalld_status.status.ActiveState | default('') == 'active'

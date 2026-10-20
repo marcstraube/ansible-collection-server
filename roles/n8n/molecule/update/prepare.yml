@@ -1,0 +1,78 @@
+---
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    # Sudo PAM bypass — required for tasks using `become_user` on
+    # geerlingguy Rocky containers under GitHub-hosted runners
+    # (test container only).
+
+    - name: Prepare | Bypass sudo PAM stack (RedHat container)
+      ansible.builtin.copy:
+        content: |
+          #%PAM-1.0
+          auth       sufficient   pam_permit.so
+          account    sufficient   pam_permit.so
+          password   sufficient   pam_permit.so
+          session    sufficient   pam_permit.so
+        dest: /etc/pam.d/sudo
+        owner: root
+        group: root
+        mode: '0644'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Disable sudoers authentication (RedHat container)
+      ansible.builtin.copy:
+        content: 'Defaults !authenticate'
+        dest: /etc/sudoers.d/molecule-no-auth
+        owner: root
+        group: root
+        mode: '0440'
+        validate: 'visudo -cf %s'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    # The Arch Linux and Rocky 10 test images ship newuidmap/newgidmap
+    # without the file capabilities the shadow package sets on a real host;
+    # rootless podman as the n8n user cannot create its user namespace
+    # without them (test container only).
+
+    - name: Prepare | Restore the ID map helper capabilities (Arch and Rocky 10 containers)
+      community.general.capabilities:
+        path: '/usr/bin/{{ item.helper }}'
+        capability: '{{ item.capability }}'
+        state: present
+      loop:
+        - { helper: newuidmap, capability: cap_setuid+ep }
+        - { helper: newgidmap, capability: cap_setgid+ep }
+      when: >-
+        ansible_facts['os_family'] == 'Archlinux'
+        or (ansible_facts['os_family'] == 'RedHat'
+            and ansible_facts['distribution_major_version'] == '10')
+
+    - name: Prepare | Update package cache
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name:
+          - systemd
+          - dbus
+          - procps
+          - gnupg
+          - ca-certificates
+        state: present
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Include podman role
+      ansible.builtin.include_role:
+        name: marcstraube.common.podman
+
+    # The release the converge run updates from.
+    - name: Prepare | Deploy the previous n8n release  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        n8n_version: '{{ n8n_update_previous_version }}'

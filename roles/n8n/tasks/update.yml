@@ -1,0 +1,222 @@
+---
+# Runs before the install tasks: resolves the installed and the target
+# version, refuses downgrades, and on a version change stops the service
+# and backs up the data. A backup set named in n8n_update_restore is
+# restored here as well. The install tasks then pull the target image, and
+# service.yml starts n8n and waits for readiness.
+
+- name: Update | Set target version fact
+  ansible.builtin.set_fact:
+    __n8n_target_version: '{{ n8n_version }}'
+
+#
+# Installed version
+#
+
+- name: Update | Check for the service unit
+  ansible.builtin.stat:
+    path: '/etc/systemd/system/{{ __n8n_service_name }}'
+  register: __n8n_unit_stat
+
+# The deployed unit carries the image reference of the running container.
+- name: Update | Read the installed image tag
+  ansible.builtin.slurp:
+    src: '/etc/systemd/system/{{ __n8n_service_name }}'
+  register: __n8n_unit_file
+  when: __n8n_unit_stat.stat.exists
+
+- name: Update | Set installed version fact
+  ansible.builtin.set_fact:
+    __n8n_installed_version: >-
+      {{ __n8n_unit_file.content | default('') | b64decode
+         | regex_findall(n8n_podman_image | regex_escape ~ ':(\S+)') | default([''], true) | first }}
+
+- name: Update | Set version change facts
+  ansible.builtin.set_fact:
+    __n8n_version_changed: >-
+      {{ __n8n_installed_version | length > 0 and __n8n_installed_version != __n8n_target_version }}
+    __n8n_downgrade: >-
+      {{ __n8n_installed_version is match(__n8n_semver)
+         and __n8n_target_version is match(__n8n_semver)
+         and __n8n_installed_version is version(__n8n_target_version, '>') }}
+  vars:
+    __n8n_semver: '^[0-9]+\.[0-9]+\.[0-9]+$'
+
+#
+# Backup sets and guards
+#
+
+- name: Update | List backup sets
+  ansible.builtin.find:
+    paths: '{{ n8n_update_backup_dir }}'
+    file_type: directory
+    patterns: 'n8n-*'
+  register: __n8n_backup_sets
+  failed_when: false
+
+- name: Update | Refuse a downgrade without a backup set to restore
+  ansible.builtin.assert:
+    that:
+      - not __n8n_downgrade | bool or n8n_update_restore | length > 0
+    fail_msg: |
+      Refusing to downgrade n8n from {{ __n8n_installed_version }} to
+      {{ __n8n_target_version }}: database migrations are forward-only, the
+      older release does not start on the migrated database.
+
+      Restore the backup set taken before the upgrade by setting
+      n8n_update_restore to its name together with the lower version.
+      Backup sets in {{ n8n_update_backup_dir }}:
+      {% for set in __n8n_backup_sets.files | default([]) | map(attribute='path') | map('basename') | sort %}
+        - {{ set }}
+      {% else %}
+        (none)
+      {% endfor %}
+
+- name: Update | Validate the backup set to restore
+  ansible.builtin.assert:
+    that:
+      - n8n_update_restore in (__n8n_backup_sets.files | default([]) | map(attribute='path') | map('basename'))
+      - n8n_update_restore | regex_replace(__n8n_set_pattern, '\\1') == __n8n_target_version
+    fail_msg: |
+      n8n_update_restore '{{ n8n_update_restore }}' is not a backup set in
+      {{ n8n_update_backup_dir }}, or its version does not match the
+      requested n8n version {{ __n8n_target_version }}. A set restores the
+      data of the version in its name (n8n-<version>-<timestamp>); pin that
+      version alongside.
+  vars:
+    __n8n_set_pattern: '^n8n-(.+)-[0-9]{8}T[0-9]{6}$'
+  when: n8n_update_restore | length > 0
+
+#
+# Stop and back up before a version change or a restore
+#
+
+- name: Update | Stop n8n before the version change
+  ansible.builtin.systemd_service:
+    name: '{{ __n8n_service_name }}'
+    state: stopped
+  when:
+    - __n8n_unit_stat.stat.exists
+    - __n8n_version_changed | bool or n8n_update_restore | length > 0
+
+- name: Update | Set backup set name
+  ansible.builtin.set_fact:
+    __n8n_backup_set: >-
+      {{ n8n_update_backup_dir }}/n8n-{{ __n8n_installed_version
+         }}-{{ ansible_facts['date_time']['iso8601_basic_short'] }}
+  when:
+    - n8n_update_backup_enabled | bool
+    - __n8n_installed_version | length > 0
+    - __n8n_version_changed | bool or n8n_update_restore | length > 0
+
+- name: Update | Create backup set directory
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  loop:
+    - '{{ n8n_update_backup_dir }}'
+    - '{{ __n8n_backup_set }}'
+  when: __n8n_backup_set is defined
+
+# Entries are relative to n8n_user_home (.n8n/...), ownership is kept.
+- name: Update | Back up the data directory
+  community.general.archive:
+    path: '{{ n8n_data_dir }}'
+    dest: '{{ __n8n_backup_set }}/data.tar.gz'
+    format: gz
+    owner: root
+    group: root
+    mode: '0600'
+  when: __n8n_backup_set is defined
+
+# pg_dump runs as the postgres user over the local socket (peer auth, as
+# in database.yml); the redirect keeps the dump root-owned in the set.
+- name: Update | Back up the PostgreSQL database
+  ansible.builtin.shell:
+    cmd: 'runuser -u postgres -- pg_dump -Fc {{ n8n_db_name }} > {{ __n8n_backup_set }}/db.dump'
+    creates: '{{ __n8n_backup_set }}/db.dump'
+  when:
+    - __n8n_backup_set is defined
+    - n8n_db_type == 'postgresdb'
+
+# Oldest first; the set just written counts toward the retention, and the
+# set named for a restore is never removed.
+- name: Update | Remove backup sets beyond the retention
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: absent
+  loop: >-
+    {{ __n8n_old_sets[: ([0, __n8n_old_sets | length + 1 - (n8n_update_backup_keep | int)] | max)] }}
+  vars:
+    __n8n_old_sets: >-
+      {{ __n8n_backup_sets.files | default([]) | sort(attribute='mtime')
+         | map(attribute='path') | reject('search', '/' ~ n8n_update_restore ~ '$')
+         | list }}
+  when: __n8n_backup_set is defined
+
+#
+# Restore
+#
+
+- name: Update | Remove the data directory before the restore
+  ansible.builtin.file:
+    path: '{{ n8n_data_dir }}'
+    state: absent
+  when: n8n_update_restore | length > 0
+
+- name: Update | Restore the data directory
+  ansible.builtin.unarchive:
+    src: '{{ n8n_update_backup_dir }}/{{ n8n_update_restore }}/data.tar.gz'
+    dest: '{{ n8n_user_home }}'
+    remote_src: true
+    owner: '{{ n8n_user }}'
+    group: '{{ n8n_group }}'
+  when: n8n_update_restore | length > 0
+
+# The database is recreated rather than restored in place: pg_restore
+# --clean only drops objects contained in the dump, tables of newer
+# migrations would survive.
+- name: Update | Drop the PostgreSQL database before the restore
+  community.postgresql.postgresql_db:
+    name: '{{ n8n_db_name }}'
+    state: absent
+  become: true
+  become_user: postgres
+  when:
+    - n8n_update_restore | length > 0
+    - n8n_db_type == 'postgresdb'
+
+- name: Update | Recreate the PostgreSQL database
+  community.postgresql.postgresql_db:
+    name: '{{ n8n_db_name }}'
+    owner: '{{ n8n_db_user }}'
+    encoding: UTF8
+    lc_collate: en_US.UTF-8
+    lc_ctype: en_US.UTF-8
+    template: template0
+    state: present
+  become: true
+  become_user: postgres
+  when:
+    - n8n_update_restore | length > 0
+    - n8n_db_type == 'postgresdb'
+
+- name: Update | Restore the PostgreSQL database
+  ansible.builtin.shell:
+    cmd: >-
+      runuser -u postgres -- pg_restore -d {{ n8n_db_name }}
+      < {{ n8n_update_backup_dir }}/{{ n8n_update_restore }}/db.dump
+  changed_when: true
+  when:
+    - n8n_update_restore | length > 0
+    - n8n_db_type == 'postgresdb'
+
+- name: Update | Remind to unset n8n_update_restore
+  ansible.builtin.debug:
+    msg: >-
+      Backup set {{ n8n_update_restore }} restored. Remove n8n_update_restore
+      from the inventory, otherwise the next run restores it again.
+  when: n8n_update_restore | length > 0

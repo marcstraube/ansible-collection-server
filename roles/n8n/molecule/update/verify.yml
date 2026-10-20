@@ -1,0 +1,148 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __verify_backup_dir: '/var/backups/n8n'
+    __verify_ready_url: 'http://127.0.0.1:5678/healthz/readiness'
+
+  tasks:
+    - name: Verify | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Verify | Load role defaults
+      ansible.builtin.include_vars:
+        file: '../../defaults/main.yml'
+        name: __verify_defaults
+
+    #
+    # After the update: default version installed, one backup set of the
+    # previous release, service ready.
+    #
+
+    - name: Verify | Read the running image
+      ansible.builtin.command:
+        cmd: podman ps --filter name=^n8n$ --format '{{ "{{" }}.Image{{ "}}" }}'
+      register: __verify_version
+      changed_when: false
+      become: true
+      become_user: n8n
+      environment:
+        XDG_RUNTIME_DIR: '{{ __n8n_runtime_dir }}'
+
+    - name: Verify | Assert the role default is running
+      ansible.builtin.assert:
+        that:
+          - __verify_version.stdout | trim == __verify_image ~ ':' ~ __verify_defaults.n8n_version
+        fail_msg: >-
+          Running {{ __verify_version.stdout | trim }},
+          expected {{ __verify_image }}:{{ __verify_defaults.n8n_version }}
+      vars:
+        __verify_image: '{{ __verify_defaults.n8n_podman_image }}'
+
+    - name: Verify | List backup sets
+      ansible.builtin.find:
+        paths: '{{ __verify_backup_dir }}'
+        file_type: directory
+        patterns: 'n8n-*'
+      register: __verify_sets
+
+    - name: Verify | Assert one backup set of the previous release exists
+      ansible.builtin.assert:
+        that:
+          - __verify_sets.files | length == 1
+          - >-
+            __verify_sets.files[0].path | basename
+            is match('^n8n-' ~ n8n_update_previous_version ~ '-[0-9]{8}T[0-9]{6}$')
+        fail_msg: 'Backup sets: {{ __verify_sets.files | map(attribute="path") | list }}'
+
+    # Listing an archive has no module equivalent.
+    - name: Verify | Assert the backup archive contains the SQLite database  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        cmd: 'tar -tzf {{ __verify_sets.files[0].path }}/data.tar.gz .n8n/database.sqlite'
+      changed_when: false
+
+    - name: Verify | Assert n8n reports ready
+      ansible.builtin.uri:
+        url: '{{ __verify_ready_url }}'
+        status_code: 200
+
+    #
+    # Downgrade guard: pinning the previous release without a backup set
+    # to restore fails at the assert in update.yml.
+    #
+
+    - name: Verify | Run the role with the previous release pinned
+      block:
+        - name: Verify | Include n8n role (downgrade)  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            n8n_version: '{{ n8n_update_previous_version }}'
+      rescue:
+        - name: Verify | Record the downgrade failure
+          ansible.builtin.set_fact:
+            __verify_downgrade_msg: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Assert the downgrade was refused
+      ansible.builtin.assert:
+        that:
+          - __verify_downgrade_msg is defined
+          - "'Refusing to downgrade n8n' in __verify_downgrade_msg"
+        fail_msg: 'Downgrade result: {{ __verify_downgrade_msg | default("role run succeeded") }}'
+
+    - name: Verify | Assert the default version is still installed and running
+      ansible.builtin.uri:
+        url: '{{ __verify_ready_url }}'
+        status_code: 200
+
+    #
+    # Restore: the backup set together with the matching pin brings the
+    # previous release back; the current state is backed up first.
+    #
+
+    - name: Verify | Include n8n role (restore)  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        n8n_version: '{{ n8n_update_previous_version }}'
+        n8n_update_restore: '{{ __verify_sets.files[0].path | basename }}'
+
+    - name: Verify | Read the running image after the restore
+      ansible.builtin.command:
+        cmd: podman ps --filter name=^n8n$ --format '{{ "{{" }}.Image{{ "}}" }}'
+      register: __verify_restored_version
+      changed_when: false
+      become: true
+      become_user: n8n
+      environment:
+        XDG_RUNTIME_DIR: '{{ __n8n_runtime_dir }}'
+
+    - name: Verify | Assert the previous release is running again
+      ansible.builtin.assert:
+        that:
+          - >-
+            __verify_restored_version.stdout | trim
+            == __verify_defaults.n8n_podman_image ~ ':' ~ n8n_update_previous_version
+
+    - name: Verify | List backup sets after the restore
+      ansible.builtin.find:
+        paths: '{{ __verify_backup_dir }}'
+        file_type: directory
+        patterns: 'n8n-*'
+      register: __verify_sets_after
+
+    - name: Verify | Assert the state before the restore was backed up
+      ansible.builtin.assert:
+        that:
+          - __verify_sets_after.files | length == 2
+          - __verify_sets_after.files | map(attribute='path') | map('basename')
+            | select('match', '^n8n-' ~ __verify_defaults.n8n_version ~ '-') | list | length == 1
+        fail_msg: 'Backup sets: {{ __verify_sets_after.files | map(attribute="path") | list }}'
+
+    - name: Verify | Assert n8n reports ready after the restore
+      ansible.builtin.uri:
+        url: '{{ __verify_ready_url }}'
+        status_code: 200

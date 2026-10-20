@@ -1,0 +1,60 @@
+{{ ansible_managed | comment }}
+
+<VirtualHost *:{{ item.listen_port | default(80) }}>
+    ServerName {{ item.server_name }}
+{% if item.server_alias is defined %}
+{% for alias in item.server_alias %}
+    ServerAlias {{ alias }}
+{% endfor %}
+
+{% endif %}
+{% if apache_acme_challenge_enabled | bool %}
+    # ACME HTTP-01 challenge (Let's Encrypt) — served locally, not proxied
+    Alias /.well-known/acme-challenge/ {{ apache_acme_webroot }}/.well-known/acme-challenge/
+    <Directory "{{ apache_acme_webroot }}/.well-known/acme-challenge/">
+        Options None
+        AllowOverride None
+        Require all granted
+    </Directory>
+
+{% endif %}
+{% if item.redirect_to_https | default(false) %}
+    # Redirect to HTTPS
+    RewriteEngine On
+{% if apache_acme_challenge_enabled | bool %}
+    RewriteCond %{REQUEST_URI} !^/\.well-known/acme-challenge/
+{% endif %}
+    RewriteCond %{HTTPS} off
+    RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+{% endif %}
+    # Proxy configuration
+    ProxyPreserveHost {{ item.proxy_preserve_host | default(true) | ternary('On', 'Off') }}
+    ProxyRequests Off
+{% if apache_acme_challenge_enabled | bool %}
+    ProxyPass /.well-known/acme-challenge/ !
+{% endif %}
+    ProxyPass / {{ item.proxy_pass }}/
+    ProxyPassReverse / {{ item.proxy_pass }}/
+
+{% if item.proxy_timeout is defined %}
+    ProxyTimeout {{ item.proxy_timeout }}
+
+{% endif %}
+{% if item.websocket_enabled | default(false) %}
+    # WebSocket proxy
+    RewriteEngine On
+    RewriteCond %{HTTP:Upgrade} websocket [NC]
+    RewriteCond %{HTTP:Connection} upgrade [NC]
+    RewriteRule ^/?(.*) ws://{{ item.proxy_pass | regex_replace('^https?://', '') }}/$1 [P,L]
+
+{% endif %}
+    # Logging
+    ErrorLog {{ __apache_log_dir }}/proxy-{{ item.server_name }}-error.log
+    CustomLog {{ __apache_log_dir }}/proxy-{{ item.server_name }}-access.log combined
+
+{% if item.custom_config is defined %}
+    # Custom configuration
+    {{ item.custom_config | indent(4) }}
+{% endif %}
+</VirtualHost>

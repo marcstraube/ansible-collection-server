@@ -1,0 +1,29 @@
+---
+__apache_packages:
+  - httpd
+
+__apache_service_name: 'httpd'
+__apache_config_file: '/etc/httpd/conf/httpd.conf'
+__apache_config_dir: '/etc/httpd/conf'
+__apache_vhosts_dir: '/etc/httpd/conf.d'
+__apache_modules_dir: '/usr/lib64/httpd/modules'
+__apache_log_dir: '/var/log/httpd'
+__apache_run_dir: '/run/httpd'
+__apache_document_root: '/var/www/html'
+__apache_user: 'apache'
+__apache_group: 'apache'
+__apache_ssl_session_cache: 'shmcb:/run/httpd/ssl_scache(512000)'
+__apache_ssl_stapling_cache: 'shmcb:/run/httpd/ocsp(128000)'
+
+# Module configuration
+__apache_modules_available_dir: '/etc/httpd/conf.modules.d'
+__apache_modules_enabled_dir: '/etc/httpd/conf.modules.d'
+__apache_use_mods_enabled: false
+
+# Additional packages
+__apache_tools_packages:
+  - httpd-tools
+
+# SSL package
+__apache_ssl_packages:
+  - mod_ssl

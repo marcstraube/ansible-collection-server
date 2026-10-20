@@ -1,0 +1,16 @@
+{{ ansible_managed | comment }}
+#
+# PostgreSQL Client Authentication Configuration
+#
+# TYPE  DATABASE        USER            ADDRESS                 METHOD
+
+{% for entry in postgresql_hba_entries %}
+{{ "%-7s %-15s %-15s %-23s %s" | format(entry.type, entry.database, entry.user, entry.address | default(''), entry.method) }}
+{% endfor %}
+{% if postgresql_hba_additional | length > 0 %}
+
+# Additional entries
+{% for entry in postgresql_hba_additional %}
+{{ "%-7s %-15s %-15s %-23s %s" | format(entry.type, entry.database, entry.user, entry.address | default(''), entry.method) }}
+{% endfor %}
+{% endif %}

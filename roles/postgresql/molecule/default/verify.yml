@@ -1,0 +1,89 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Verify | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Verify | Load OS-specific variables
+      ansible.builtin.include_vars: '{{ item }}'
+      with_first_found:
+        - files:
+            - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["distribution"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}.yml'
+          paths:
+            - '../../vars'
+
+    - name: Verify | Assert PostgreSQL service is running
+      ansible.builtin.systemd_service:
+        name: '{{ __postgresql_service_name }}'
+      register: __verify_service_status
+      failed_when: __verify_service_status.status.ActiveState != 'active'
+
+    - name: Verify | Assert PostgreSQL is listening on configured port
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 5432
+        timeout: 10
+        state: started
+
+    - name: Verify | Assert postgresql.conf exists with correct permissions
+      ansible.builtin.stat:
+        path: '{{ __postgresql_config_dir }}/postgresql.conf'
+      register: __verify_config_file
+      failed_when:
+        - not __verify_config_file.stat.exists or
+          __verify_config_file.stat.mode != '0600' or
+          __verify_config_file.stat.pw_name != __postgresql_user
+
+    - name: Verify | Assert pg_hba.conf exists with correct permissions
+      ansible.builtin.stat:
+        path: '{{ __postgresql_config_dir }}/pg_hba.conf'
+      register: __verify_hba_file
+      failed_when:
+        - not __verify_hba_file.stat.exists or
+          __verify_hba_file.stat.mode != '0600' or
+          __verify_hba_file.stat.pw_name != __postgresql_user
+
+    - name: Verify | Assert pg_hba.conf contains scram-sha-256
+      ansible.builtin.command:
+        cmd: grep -c 'scram-sha-256' {{ __postgresql_config_dir }}/pg_hba.conf
+      register: __verify_hba_scram
+      changed_when: false
+      failed_when: __verify_hba_scram.rc != 0
+
+    - name: Verify | Assert test database exists
+      community.postgresql.postgresql_db:
+        name: testdb
+        state: present
+      become: true
+      become_user: '{{ __postgresql_user }}'
+      check_mode: true
+      register: __verify_db_check
+      failed_when: __verify_db_check.changed
+
+    - name: Verify | Assert test user exists
+      community.postgresql.postgresql_user:
+        name: testuser
+        state: present
+      become: true
+      become_user: '{{ __postgresql_user }}'
+      check_mode: true
+      register: __verify_user_check
+      failed_when: __verify_user_check.changed
+
+    - name: Verify | Assert test extension exists
+      community.postgresql.postgresql_ext:
+        name: pgcrypto
+        login_db: testdb
+        state: present
+      become: true
+      become_user: '{{ __postgresql_user }}'
+      check_mode: true
+      register: __verify_ext_check
+      failed_when: __verify_ext_check.changed

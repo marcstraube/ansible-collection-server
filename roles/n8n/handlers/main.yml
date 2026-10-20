@@ -1,0 +1,28 @@
+---
+- name: Reload n8n systemd units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: n8n_enabled | bool
+  failed_when: false
+
+# A check run cannot restart a unit the run has not deployed yet; report
+# the failure and continue so the remaining diffs show
+- name: Restart n8n
+  ansible.builtin.systemd_service:
+    name: '{{ __n8n_service_name }}'
+    state: restarted
+  when: n8n_service_enabled | bool
+  ignore_errors: '{{ ansible_check_mode }}'
+
+- name: Reload n8n
+  ansible.builtin.systemd_service:
+    name: '{{ __n8n_service_name }}'
+    state: reloaded
+  when: n8n_service_enabled | bool
+
+- name: Restart n8n runner
+  ansible.builtin.systemd_service:
+    name: '{{ __n8n_runner_service_name }}'
+    state: restarted
+  when: n8n_service_enabled | bool
+  ignore_errors: '{{ ansible_check_mode }}'

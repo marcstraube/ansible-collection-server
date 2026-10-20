@@ -1,0 +1,148 @@
+---
+- name: Main | Load OS-specific variables
+  ansible.builtin.include_vars: '{{ item }}'
+  with_first_found:
+    - files:
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}.yml'
+      paths:
+        - 'vars'
+  tags:
+    - always
+
+- name: Main | Validate package source
+  ansible.builtin.assert:
+    that:
+      - postgresql_repo in ['distro', 'pgdg']
+    fail_msg: >-
+      postgresql_repo must be 'distro' or 'pgdg'.
+      Got: {{ postgresql_repo }}
+  when: postgresql_enabled | bool
+  tags:
+    - always
+
+# Guard against an unintended major-version upgrade: a cluster of another
+# version at a different path (a change of postgresql_repo or
+# postgresql_version on an installed host) would get a second, empty
+# cluster next to it, and both would claim the same port.
+- name: Main | Check for the cluster root directory
+  ansible.builtin.stat:
+    path: '{{ __postgresql_cluster_root }}'
+  register: __postgresql_cluster_root_stat
+  when: postgresql_enabled | bool
+  tags:
+    - always
+
+- name: Main | Find clusters below the cluster root
+  ansible.builtin.find:
+    paths: '{{ __postgresql_cluster_root }}'
+    patterns: PG_VERSION
+    recurse: true
+    depth: 3
+  register: __postgresql_cluster_scan
+  when:
+    - postgresql_enabled | bool
+    - __postgresql_cluster_root_stat.stat.exists
+  tags:
+    - always
+
+- name: Main | Assert no cluster exists outside the managed data directory
+  ansible.builtin.assert:
+    that:
+      - __postgresql_foreign_clusters | length == 0
+    fail_msg: |
+      Found PostgreSQL cluster(s) outside the managed data directory
+      {{ __postgresql_data_dir }}:
+
+      {% for cluster in __postgresql_foreign_clusters %}
+        - {{ cluster }}
+      {% endfor %}
+
+      This happens when postgresql_repo or postgresql_version changes on a
+      host with an existing cluster. The role does not perform major
+      version upgrades. Either restore the previous values, or upgrade the
+      cluster by hand (pg_upgrade / pg_upgradecluster) and remove the old
+      data directory afterwards.
+  vars:
+    __postgresql_foreign_clusters: >-
+      {{ __postgresql_cluster_scan.files | default([])
+         | map(attribute='path') | map('dirname')
+         | reject('equalto', __postgresql_data_dir) | list }}
+  when: postgresql_enabled | bool
+  tags:
+    - always
+
+- name: Main | Import repository tasks
+  ansible.builtin.import_tasks: repos.yml
+  when:
+    - postgresql_enabled | bool
+    - postgresql_repo == 'pgdg'
+  tags:
+    - postgresql
+    - postgresql:install
+
+- name: Main | Import install tasks
+  ansible.builtin.import_tasks: install.yml
+  when: postgresql_enabled | bool
+  tags:
+    - postgresql
+    - postgresql:install
+
+- name: Main | Import configure tasks
+  ansible.builtin.import_tasks: configure.yml
+  when: postgresql_enabled | bool
+  tags:
+    - postgresql
+    - postgresql:configure
+
+- name: Main | Import service tasks
+  ansible.builtin.import_tasks: service.yml
+  when: postgresql_enabled | bool
+  tags:
+    - postgresql
+    - postgresql:service
+
+- name: Main | Import users tasks
+  ansible.builtin.import_tasks: users.yml
+  when: postgresql_enabled | bool
+  tags:
+    - postgresql
+    - postgresql:users
+
+- name: Main | Import databases tasks
+  ansible.builtin.import_tasks: databases.yml
+  when: postgresql_enabled | bool
+  tags:
+    - postgresql
+    - postgresql:databases
+
+- name: Main | Include backup tasks
+  ansible.builtin.include_tasks:
+    file: backup.yml
+    apply:
+      tags:
+        - postgresql
+        - postgresql:backup
+  when:
+    - postgresql_enabled | bool
+    - postgresql_backup_enabled | bool
+  tags:
+    - postgresql
+    - postgresql:backup
+
+- name: Main | Include firewall tasks
+  ansible.builtin.include_tasks:
+    file: firewall.yml
+    apply:
+      tags:
+        - postgresql
+        - postgresql:firewall
+  when:
+    - postgresql_enabled | bool
+    - postgresql_firewalld_enabled | bool
+  tags:
+    - postgresql
+    - postgresql:firewall

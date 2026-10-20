@@ -1,0 +1,251 @@
+---
+# Configuration changes go through a graceful reload ("Reload Apache"):
+# workers finish their in-flight requests, the new configuration applies to
+# the next ones. Only a change of the MPM needs a full restart, which drops
+# open connections. The loaded MPM is read from the configuration as it is
+# before this run (apachectl -V) and compared with apache_mpm_module.
+- name: Configure | Detect the currently configured MPM
+  ansible.builtin.command:
+    cmd: 'apachectl -V'
+  register: __apache_mpm_current
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Configure | Read the currently configured MPM
+  ansible.builtin.set_fact:
+    __apache_mpm_loaded: >-
+      {{ (__apache_mpm_current.stdout | default('')
+          | regex_search('Server MPM:\s+(\w+)', '\1') or ['']) | first | lower }}
+
+- name: Configure | Restart Apache for an MPM change
+  ansible.builtin.debug:
+    msg: >-
+      MPM changes from {{ __apache_mpm_loaded }} to {{ apache_mpm_module }};
+      Apache restarts instead of reloading.
+  changed_when: true
+  notify: Restart Apache
+  when:
+    - __apache_mpm_loaded | length > 0
+    - __apache_mpm_loaded != apache_mpm_module
+
+- name: Configure | Remove default SSL config (RedHat)
+  ansible.builtin.file:
+    path: '{{ __apache_vhosts_dir }}/ssl.conf'
+    state: absent
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - apache_ssl_enabled | bool
+  notify: Reload Apache
+
+# Proxy modules are not in apache_modules_enabled by default, yet both the
+# PHP-FPM handler and reverse proxy vhosts emit directives that need them.
+# Distributions that load them out of the box (RedHat ships 00-proxy.conf) hide
+# the omission; on Debian Apache refuses to start with an "Invalid command
+# 'ProxyTimeout'" instead.
+#
+# On Debian the module tasks run before the main configuration is deployed:
+# apache2_module runs apache2ctl configtest before each change, and a new
+# apache2.conf that already uses ProxyTimeout would fail that test while the
+# proxy modules are still disabled.
+- name: Configure | Enable required modules (Debian)
+  community.general.apache2_module:
+    name: '{{ item }}'
+    state: present
+  loop: '{{ __apache_modules }}'
+  loop_control:
+    label: '{{ item }}'
+  when: ansible_facts['os_family'] == 'Debian'
+  notify: Reload Apache
+
+# Debian modules declare what they need ("# Depends:" in the .load file),
+# e.g. ssl needs setenvif and mime. Those must stay enabled even when no
+# feature of this role asks for them, or a2dismod refuses to continue.
+- name: Configure | Read module dependencies (Debian)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      deps() {
+        for m in "$@"; do
+          f="{{ __apache_modules_available_dir }}/$m.load"
+          [ -f "$f" ] || continue
+          for d in $(sed -n 's/^# Depends: *//p' "$f" | tr ',' ' '); do
+            echo "$d"
+            deps "$d"
+          done
+        done
+      }
+      deps {{ __apache_modules | join(' ') }} | sort -u
+    executable: /bin/bash
+  register: __apache_module_deps
+  changed_when: false
+  check_mode: false
+  when: ansible_facts['os_family'] == 'Debian'
+
+# Modules the apache2 package enables that this configuration does not need
+# (autoindex, access_compat, Basic Auth, ...), plus apache_modules_disabled.
+# force: a2dismod asks for confirmation before disabling modules Debian marks
+# as essential (authn_file, authz_user, autoindex); this list never contains
+# one the configuration needs.
+- name: Configure | Disable unneeded modules (Debian)
+  community.general.apache2_module:
+    name: '{{ item }}'
+    state: absent
+    force: true
+  loop: >-
+    {{ (__apache_modules_package_defaults + apache_modules_disabled) | unique
+       | reject('in', __apache_modules + __apache_module_deps.stdout_lines | default([]))
+       | list }}
+  loop_control:
+    label: '{{ item }}'
+  when: ansible_facts['os_family'] == 'Debian'
+  notify: Reload Apache
+
+# a2enmod refuses to enable an MPM while another one is enabled, so the
+# others go first. Both tasks skip apache2_module's configtest: between them
+# no MPM is loaded, which apache2ctl rejects by design. The configuration is
+# validated as a whole further down.
+- name: Configure | Disable other MPM modules (Debian)
+  community.general.apache2_module:
+    name: 'mpm_{{ item }}'
+    state: absent
+    ignore_configcheck: true
+  loop:
+    - prefork
+    - worker
+    - event
+  loop_control:
+    label: 'mpm_{{ item }}'
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - item != apache_mpm_module
+  notify: Restart Apache
+
+- name: Configure | Enable MPM module (Debian)
+  community.general.apache2_module:
+    name: 'mpm_{{ apache_mpm_module }}'
+    state: present
+    ignore_configcheck: true
+  when: ansible_facts['os_family'] == 'Debian'
+  notify: Restart Apache
+
+- name: Configure | Deploy main configuration file
+  ansible.builtin.template:
+    src: "httpd.conf.{{ ansible_facts['os_family'] }}.j2"
+    dest: '{{ __apache_config_file }}'
+    owner: root
+    group: root
+    mode: '0644'
+    backup: true
+  notify: Reload Apache
+
+- name: Configure | Deploy security configuration
+  ansible.builtin.template:
+    src: 'security.conf.j2'
+    dest: '{{ __apache_config_dir }}/security.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload Apache
+
+- name: Configure | Remove default virtual host (Debian)
+  ansible.builtin.file:
+    path: '{{ __apache_vhosts_enabled_dir }}/000-default.conf'
+    state: absent
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - apache_remove_default_vhost | bool
+  notify: Reload Apache
+
+- name: Configure | Remove default SSL virtual host (Debian)
+  ansible.builtin.file:
+    path: '{{ __apache_vhosts_enabled_dir }}/default-ssl.conf'
+    state: absent
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - apache_remove_default_vhost | bool
+  notify: Reload Apache
+
+# httpd ships conf.d/autoindex.conf with IndexOptions and icon directives
+# outside <IfModule>, so Apache refuses to start without mod_autoindex.
+# Deleting the file is not enough: an httpd update restores it and the
+# package's restart then fails. The file is %config(noreplace), so a
+# replaced one survives updates (rpm writes autoindex.conf.rpmnew instead,
+# which is not included).
+- name: Configure | Neutralize the package autoindex.conf (RedHat)
+  ansible.builtin.template:
+    src: 'autoindex.conf.j2'
+    dest: '{{ __apache_vhosts_dir }}/autoindex.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - "'autoindex' not in __apache_modules"
+  notify: Reload Apache
+
+- name: Configure | Remove default welcome page (RedHat/Arch)
+  ansible.builtin.file:
+    path: '{{ __apache_vhosts_dir }}/welcome.conf'
+    state: absent
+  when:
+    - ansible_facts['os_family'] in ['RedHat', 'Archlinux']
+    - apache_remove_default_vhost | bool
+  notify: Reload Apache
+
+- name: Configure | Ensure SSL session cache directory exists
+  ansible.builtin.file:
+    path: '{{ __apache_run_dir }}'
+    state: directory
+    owner: root
+    group: '{{ __apache_group }}'
+    mode: '0710'
+  when: apache_ssl_enabled | bool
+
+- name: Configure | Assert reverse proxies keep outbound connections allowed
+  ansible.builtin.assert:
+    that:
+      - apache_selinux_network_connect is not sameas false
+    fail_msg: >-
+      apache_selinux_network_connect is false, but reverse proxy vhosts need
+      httpd_can_network_connect. Set it to true or null.
+    success_msg: 'SELinux network setting is consistent with reverse proxies.'
+  when: apache_reverse_proxies | default([]) | length > 0
+
+# Without these, httpd and its PHP-FPM workers cannot open outbound
+# connections or submit mail. The symptom is a bare "Permission denied" from the
+# application with nothing in the Apache or PHP logs pointing at SELinux.
+# A null value leaves the boolean untouched.
+- name: Configure | Set SELinux booleans
+  ansible.posix.seboolean:
+    name: '{{ item.name }}'
+    state: '{{ item.state | bool }}'
+    persistent: true
+  loop:
+    - name: httpd_can_network_connect
+      state: >-
+        {{ true if apache_reverse_proxies | default([]) | length > 0
+           else apache_selinux_network_connect | default(none) }}
+    - name: httpd_can_network_connect_db
+      state: '{{ apache_selinux_connect_db | default(none) }}'
+    - name: httpd_can_sendmail
+      state: '{{ apache_selinux_sendmail | default(none) }}'
+  loop_control:
+    label: '{{ item.name }}'
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+    - item.state is not none
+
+- name: Configure | Validate Apache configuration
+  ansible.builtin.command:
+    cmd: 'apachectl configtest'
+  changed_when: false
+  failed_when: false
+  register: __apache_configtest
+
+- name: Configure | Display configuration test result
+  ansible.builtin.debug:
+    msg: '{{ __apache_configtest.stderr_lines }}'
+  when: __apache_configtest.rc != 0
+  failed_when: __apache_configtest.rc != 0

@@ -1,0 +1,78 @@
+---
+# =============================================================================
+# N8N Workflow Automation Tasks
+# =============================================================================
+# Task file for n8n deployment — single source of truth.
+# Import it from a play with `ansible.builtin.import_tasks`.
+#
+# Stack: podman, optional postgresql, pki, n8n, nginx.
+#
+# n8n listens on localhost over plain HTTP; nginx terminates TLS in front of
+# it. The nginx vhost comes from the inventory (nginx_vhosts), the
+# certificate from marcstraube.common.pki (pki_server_certs): an internal CA
+# or a certificate issued elsewhere and deployed through pki. There is no
+# ACME step, so this file targets internal hosts. A public host that needs
+# Let's Encrypt certificates has to add the certbot role between nginx and
+# the vhost rollout, as web_server.yml does for the web stack.
+#
+# pki runs again in this play, but finds the certificates an earlier play (the
+# base play) already deployed and changes nothing, so nginx would never hear of
+# them: notifications do not cross plays. pki records the change as
+# pki_cert_material_changed; the forward task at the end notifies
+# 'Reload cert services' again within this play.
+#
+# Roles are imported statically (import_role) so their internal sub-tags are
+# exposed to --tags / --list-tags. Run `ansible-playbook … --list-tags` to see
+# the full set. Dynamic include_role would hide sub-tags behind the include.
+# =============================================================================
+
+- name: N8N | Import podman role
+  ansible.builtin.import_role:
+    name: marcstraube.common.podman
+  tags:
+    - n8n
+    - podman
+  when: n8n_enabled | bool
+
+- name: N8N | Import postgresql role
+  ansible.builtin.import_role:
+    name: marcstraube.server.postgresql
+  tags:
+    - n8n
+    - postgresql
+  when:
+    - n8n_enabled | bool
+    - n8n_db_type | default('sqlite') == 'postgresdb'
+
+- name: N8N | Import pki role
+  ansible.builtin.import_role:
+    name: marcstraube.common.pki
+  tags:
+    - n8n
+    - pki
+  when: n8n_enabled | bool
+
+- name: N8N | Import n8n role
+  ansible.builtin.import_role:
+    name: marcstraube.server.n8n
+  tags:
+    - n8n
+  when: n8n_enabled | bool
+
+- name: N8N | Import nginx role
+  ansible.builtin.import_role:
+    name: marcstraube.server.nginx
+  tags:
+    - n8n
+    - nginx
+  when: n8n_enabled | bool
+
+- name: N8N | Forward certificate changes from an earlier play
+  ansible.builtin.debug:
+    msg: 'Certificate material changed earlier in this run'
+  changed_when: true
+  when: pki_cert_material_changed | default(false) | bool
+  notify: Reload cert services
+  tags:
+    - n8n
+    - pki

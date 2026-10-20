@@ -1,0 +1,15 @@
+---
+- name: Firewall | Check if firewalld is running
+  ansible.builtin.systemd_service:
+    name: firewalld
+  register: __n8n_firewalld_status
+  failed_when: false
+
+- name: Firewall | Manage n8n firewall rule
+  ansible.posix.firewalld:
+    port: '{{ n8n_port }}/tcp'
+    zone: '{{ n8n_firewalld_zone }}'
+    permanent: true
+    immediate: true
+    state: "{{ n8n_firewalld_enabled | bool | ternary('enabled', 'disabled') }}"
+  when: __n8n_firewalld_status.status.ActiveState | default('') == 'active'

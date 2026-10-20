@@ -1,0 +1,32 @@
+---
+- name: Install | Set Nginx package list
+  ansible.builtin.set_fact:
+    __nginx_install_packages: >-
+      {{ [__nginx_mainline_package]
+         if (ansible_facts['os_family'] == 'Archlinux' and nginx_mainline | bool)
+         else __nginx_packages }}
+
+- name: Install | Nginx packages
+  ansible.builtin.package:
+    name: '{{ __nginx_install_packages }}'
+    state: present
+  retries: 3
+  delay: 5
+
+- name: Install | Nginx module packages
+  ansible.builtin.package:
+    name: '{{ __nginx_module_packages[item] }}'
+    state: present
+  retries: 3
+  delay: 5
+  loop: '{{ nginx_modules }}'
+  when: item in (__nginx_module_packages | default({}))
+  notify: Restart Nginx
+
+- name: Install | Htpasswd utility
+  ansible.builtin.package:
+    name: '{{ __nginx_htpasswd_package }}'
+    state: present
+  retries: 3
+  delay: 5
+  when: nginx_htpasswd_files | length > 0

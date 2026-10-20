@@ -1,0 +1,11 @@
+---
+# ansible-lint configuration for marcstraube.server collection
+
+# Skip var-naming for roles where semantic prefixes make more sense than role prefixes
+# Examples: nginx_*, certbot_*, postgresql_* in the server roles
+skip_list:
+  - var-naming[no-role-prefix]
+
+# Warn about these rules but don't fail
+warn_list:
+  - experimental

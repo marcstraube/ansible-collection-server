@@ -1,0 +1,72 @@
+---
+# PGDG repository scenario: installs from apt.postgresql.org and
+# download.postgresql.org with postgresql_repo 'pgdg'. Debian and EL only —
+# Arch Linux has no PGDG repository. On EL this exercises the versioned
+# package set, service name and data directory.
+driver:
+  name: podman
+platforms:
+  - name: postgresql-pgdg-debian-trixie
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: postgresql-pgdg-rocky-9
+    image: docker.io/geerlingguy/docker-rockylinux9-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: postgresql-pgdg-rocky-10
+    image: docker.io/geerlingguy/docker-rockylinux10-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: prepare.yml
+    converge: converge.yml
+    verify: verify.yml
+  inventory:
+    group_vars:
+      all:
+        # Shared by converge and verify: the OS vars derive package names,
+        # service name and paths from it.
+        postgresql_repo: 'pgdg'
+        postgresql_version: '17'
+    host_vars:
+      postgresql-pgdg-debian-trixie:
+        ansible_python_interpreter: /usr/bin/python3
+      postgresql-pgdg-rocky-9:
+        ansible_python_interpreter: /usr/bin/python3
+      postgresql-pgdg-rocky-10:
+        ansible_python_interpreter: /usr/bin/python3
+  config_options:
+    defaults:
+      allow_broken_conditionals: true
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - verify
+    - destroy

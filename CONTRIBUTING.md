@@ -1,0 +1,160 @@
+# Contributing to marcstraube.server
+
+Thank you for your interest in contributing! This document provides guidelines
+and instructions for contributing to this collection.
+
+## Development Setup
+
+### Prerequisites
+
+- Python 3.13+
+- ansible-core >= 2.19
+- Podman (for Molecule tests)
+- Git
+- pre-commit
+
+### Clone and Setup
+
+```bash
+git clone https://github.com/marcstraube/ansible-collection-server.git
+cd ansible-collection-server
+
+pip install ansible-core ansible-lint molecule molecule-plugins[podman] yamllint pre-commit
+
+ansible-galaxy collection install marcstraube.common community.general community.postgresql containers.podman ansible.posix
+
+pre-commit install
+```
+
+## Pre-commit Hooks
+
+```bash
+# Run all hooks
+pre-commit run --all-files
+
+# Run specific hook
+pre-commit run ansible-lint --all-files
+pre-commit run yamllint --all-files
+```
+
+### Configured Hooks
+
+- **ansible-lint** - Ansible best practices and syntax
+- **yamllint** - YAML syntax and formatting
+- **markdownlint** - Markdown formatting
+- **trailing-whitespace** - Remove trailing whitespace
+- **end-of-file-fixer** - Ensure files end with newline
+- **check-yaml** - Validate YAML syntax
+- **detect-secrets** - Prevent accidental secret commits
+
+## Running Tests
+
+### Linting
+
+```bash
+ansible-lint
+yamllint -c .yamllint .
+```
+
+### Molecule Tests
+
+```bash
+# Test a specific role
+cd roles/nginx
+molecule test
+
+# Step by step (for debugging)
+molecule create
+molecule converge
+molecule verify
+molecule destroy
+
+# Login to container
+molecule login
+```
+
+## Code Style
+
+### Ansible Conventions
+
+- FQCN for all modules: `ansible.builtin.*`, `community.general.*`
+- Facts syntax: `ansible_facts['key']` (never `ansible_key`)
+- `include_tasks` for conditional dispatch, `import_tasks` for static includes
+- Tag propagation: `apply: tags:` on `include_tasks`
+- Variables: `<role>_<setting>`, internal: `__<role>_<setting>`
+- Boolean toggles: `<role>_enabled | default(true) | bool`
+- Templates: `{{ ansible_managed | comment }}` header
+- Comments: English only
+
+### Role Structure
+
+```text
+roles/<role>/
+├── defaults/main.yml       # All variables with defaults
+├── handlers/main.yml       # Service handlers
+├── meta/main.yml           # Galaxy metadata
+├── tasks/
+│   ├── main.yml            # Dispatcher: load vars, include tasks
+│   ├── install.yml         # Installation
+│   └── configure.yml       # Configuration
+├── templates/*.j2          # Jinja2 templates
+├── vars/
+│   ├── Archlinux.yml       # OS-specific package names, paths
+│   ├── Debian.yml
+│   └── RedHat.yml
+└── molecule/default/       # Tests
+    ├── molecule.yml
+    ├── converge.yml
+    └── verify.yml
+```
+
+### Variable Naming
+
+```yaml
+# Role variables (defaults/main.yml)
+nginx_worker_processes: 'auto'
+nginx_enabled: true
+
+# Internal/OS-specific (vars/*.yml)
+__nginx_package: 'nginx'
+__nginx_service: 'nginx'
+```
+
+### Examples in defaults/main.yml
+
+Always use generic placeholder data in commented examples:
+
+```yaml
+# Good
+#   - server_name: 'example.com'
+#     email: 'admin@example.com'
+
+# Bad — never use real hostnames/emails
+#   - server_name: 'shop.mycompany.de'
+```
+
+## Pull Request Process
+
+1. Run pre-commit hooks: `pre-commit run --all-files`
+2. Test changes: `molecule test` on at least one platform
+3. Update documentation if needed
+4. Use conventional commit format:
+   - `feat(nginx): add HTTP/3 support`
+   - `fix(certbot): correct renewal hook permissions`
+   - `refactor(apache): simplify vhost templating`
+5. **Breaking changes** — the `!` marker (`<type>!:` headline or
+   `BREAKING CHANGE:` footer) is reserved strictly for actual inventory
+   contract violations. Additive features, no-op removals of dead code,
+   and changes that merely implement documented intent are **not**
+   breaking — they use plain `feat:` / `refactor:` / `fix:`.
+
+   Any PR that does carry the `!` marker must add a sub-section under
+   the persistent `## Unreleased` heading in `MIGRATION.md` describing
+   the change and the required inventory action. CI enforces this; if
+   the marker was set incorrectly, rewrite the commit message rather
+   than working around the gate.
+
+## License
+
+By contributing, you agree that your contributions will be licensed under
+the MIT License.

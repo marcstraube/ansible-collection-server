@@ -1,0 +1,14 @@
+---
+__nginx_module_packages:
+  http_geoip: 'libnginx-mod-http-geoip'
+  http_image_filter: 'libnginx-mod-http-image-filter'
+  http_perl: 'libnginx-mod-http-perl'
+  http_xslt_filter: 'libnginx-mod-http-xslt-filter'
+  stream: 'libnginx-mod-stream'
+  mail: 'libnginx-mod-mail'
+
+__nginx_run_dir: '/run'
+__nginx_user: 'www-data'
+__nginx_group: 'www-data'
+__nginx_default_root: '/var/www/html'
+__nginx_htpasswd_package: 'apache2-utils'

@@ -1,0 +1,14 @@
+---
+__nginx_mainline_package: 'nginx-mainline'
+
+__nginx_module_packages:
+  http_geoip: 'nginx-mod-geoip'
+  http_image_filter: 'nginx-mod-image-filter'
+  stream: 'nginx-mod-stream'
+  mail: 'nginx-mod-mail'
+
+__nginx_run_dir: '/run/nginx'
+__nginx_user: 'http'
+__nginx_group: 'http'
+__nginx_default_root: '/usr/share/nginx/html'
+__nginx_htpasswd_package: 'apache'

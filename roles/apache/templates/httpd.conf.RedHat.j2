@@ -1,0 +1,268 @@
+{{ ansible_managed | comment }}
+
+ServerRoot "/etc/httpd"
+
+# Listen on configured ports
+{% for port in apache_listen_ports %}
+Listen {{ port }}
+{% endfor %}
+{% if apache_ssl_enabled %}
+{% for port in apache_listen_ssl_ports %}
+Listen {{ port }}
+{% endfor %}
+{% endif %}
+
+#
+# Modules
+#
+
+# Only the modules this configuration needs: a base set plus the modules
+# of the enabled features and apache_modules_enabled (see vars/main.yml).
+LoadModule mpm_{{ apache_mpm_module }}_module modules/mod_mpm_{{ apache_mpm_module }}.so
+
+# mod_systemd: lets httpd.service (Type=notify) signal readiness to systemd.
+# The stock httpd.conf loads this via conf.modules.d/00-systemd.conf, but this
+# role replaces httpd.conf without that include — omitting it makes
+# `systemctl start httpd` hang until the 90s start timeout.
+LoadModule systemd_module modules/mod_systemd.so
+
+{% for module in __apache_modules %}
+LoadModule {{ module }}_module modules/mod_{{ module }}.so
+{% endfor %}
+
+#
+# Global Configuration
+#
+
+User {{ __apache_user }}
+Group {{ __apache_group }}
+
+ServerAdmin {{ apache_server_admin }}
+{% if apache_server_name %}
+ServerName {{ apache_server_name }}
+{% endif %}
+
+# Security
+ServerTokens {{ apache_server_tokens }}
+ServerSignature {{ apache_server_signature }}
+TraceEnable {{ apache_trace_enable }}
+
+# Timeout
+Timeout {{ apache_timeout }}
+
+# KeepAlive
+KeepAlive {{ apache_keep_alive }}
+MaxKeepAliveRequests {{ apache_max_keep_alive_requests }}
+KeepAliveTimeout {{ apache_keep_alive_timeout }}
+
+# Request limits
+LimitRequestBody {{ apache_limit_request_body }}
+LimitRequestFields {{ apache_limit_request_fields }}
+LimitRequestFieldSize {{ apache_limit_request_field_size }}
+LimitRequestLine {{ apache_limit_request_line }}
+
+#
+# MPM Configuration
+#
+
+{% if apache_mpm_module == 'event' or apache_mpm_module == 'worker' %}
+<IfModule mpm_{{ apache_mpm_module }}_module>
+    StartServers             {{ apache_mpm_start_servers }}
+    MinSpareThreads          {{ apache_mpm_min_spare_threads }}
+    MaxSpareThreads          {{ apache_mpm_max_spare_threads }}
+    ThreadsPerChild          {{ apache_mpm_threads_per_child }}
+    MaxRequestWorkers        {{ apache_mpm_max_request_workers }}
+    MaxConnectionsPerChild   {{ apache_mpm_max_connections_per_child }}
+</IfModule>
+{% elif apache_mpm_module == 'prefork' %}
+<IfModule mpm_prefork_module>
+    StartServers             {{ apache_mpm_prefork_start_servers }}
+    MinSpareServers          {{ apache_mpm_prefork_min_spare_servers }}
+    MaxSpareServers          {{ apache_mpm_prefork_max_spare_servers }}
+    MaxRequestWorkers        {{ apache_mpm_prefork_max_request_workers }}
+    MaxConnectionsPerChild   {{ apache_mpm_prefork_max_connections_per_child }}
+</IfModule>
+{% endif %}
+
+#
+# Logging
+#
+
+LogLevel {{ apache_log_level }}
+
+<IfModule log_config_module>
+    LogFormat {{ apache_custom_log_format }} custom
+    LogFormat "%h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\"" combined
+    LogFormat "%h %l %u %t \"%r\" %>s %b" common
+
+    CustomLog "{{ __apache_log_dir }}/access_log" {{ apache_access_log_format }}
+</IfModule>
+
+ErrorLog "{{ __apache_log_dir }}/error_log"
+
+#
+# MIME Types
+#
+
+<IfModule mime_module>
+    TypesConfig /etc/mime.types
+    AddType application/x-compress .Z
+    AddType application/x-gzip .gz .tgz
+    AddType text/html .shtml
+    AddOutputFilter INCLUDES .shtml
+</IfModule>
+
+#
+# Directory Defaults
+#
+
+<Directory />
+    AllowOverride None
+    Require all denied
+</Directory>
+
+DocumentRoot "{{ __apache_document_root }}"
+
+<Directory "{{ __apache_document_root }}">
+    Options {{ '-Indexes' if not apache_options_indexes else '' }} {{ '+FollowSymLinks' if apache_options_follow_symlinks else '' }}
+    AllowOverride {{ apache_allow_override }}
+    Require all granted
+</Directory>
+
+# Deny access to .ht* files
+{% if apache_deny_htaccess %}
+<FilesMatch "^\.ht">
+    Require all denied
+</FilesMatch>
+{% endif %}
+
+# Deny access to sensitive files
+{% if apache_deny_sensitive_files %}
+<DirectoryMatch "/({{ apache_deny_patterns | join('|') }})(/|$)">
+    Require all denied
+</DirectoryMatch>
+{% endif %}
+
+#
+# SSL/TLS Configuration
+#
+
+{% if apache_ssl_enabled %}
+<IfModule ssl_module>
+    SSLRandomSeed startup builtin
+    SSLRandomSeed connect builtin
+
+    SSLProtocol {{ apache_ssl_protocol }}
+    SSLCipherSuite {{ apache_ssl_cipher_suite }}
+    SSLHonorCipherOrder {{ 'on' if apache_ssl_honor_cipher_order else 'off' }}
+
+    SSLSessionCache {{ apache_ssl_session_cache }}
+    SSLSessionCacheTimeout {{ apache_ssl_session_cache_timeout }}
+
+    {% if apache_ssl_use_stapling %}
+    SSLUseStapling on
+    SSLStaplingResponderTimeout {{ apache_ssl_stapling_responder_timeout }}
+    SSLStaplingReturnResponderErrors {{ 'on' if apache_ssl_stapling_return_responder_errors else 'off' }}
+    SSLStaplingCache {{ apache_ssl_stapling_cache }}
+    {% endif %}
+</IfModule>
+{% endif %}
+
+#
+# HTTP/2 Configuration
+#
+
+{% if apache_http2_enabled %}
+<IfModule http2_module>
+    Protocols h2 http/1.1
+    H2MaxSessionStreams {{ apache_http2_max_session_streams }}
+    H2WindowSize {{ apache_http2_initial_window_size }}
+</IfModule>
+{% endif %}
+
+#
+# Compression
+#
+
+{% if apache_compression_enabled %}
+<IfModule deflate_module>
+    SetOutputFilter DEFLATE
+    DeflateCompressionLevel {{ apache_compression_level }}
+
+    # Don't compress images
+    SetEnvIfNoCase Request_URI \.(?:gif|jpe?g|png|ico)$ no-gzip
+
+    # Compress these types
+    {% for type in apache_compression_types %}
+    AddOutputFilterByType DEFLATE {{ type }}
+    {% endfor %}
+</IfModule>
+{% endif %}
+
+#
+# Caching
+#
+
+{% if apache_caching_enabled %}
+<IfModule expires_module>
+    ExpiresActive On
+    ExpiresDefault "{{ apache_expires_default }}"
+
+    {% for item in apache_expires_by_type %}
+    ExpiresByType {{ item.type }} "{{ item.expires }}"
+    {% endfor %}
+</IfModule>
+{% endif %}
+
+# Security headers
+Include {{ __apache_config_dir }}/security.conf
+
+#
+# Server Status/Info Protection
+#
+# SECURITY: Protect server-status and server-info endpoints
+# CIS Apache Benchmark 2.4 - 5.13, 5.14
+
+{% if apache_status_enabled | bool %}
+<Location "/server-status">
+    SetHandler server-status
+    Require local
+</Location>
+
+{% endif %}
+<Location "/server-info">
+    SetHandler server-info
+    Require all denied
+</Location>
+
+{% if apache_php_fpm_enabled | default(false) and apache_php_fpm_scope | default('vhost') == 'global' %}
+#
+# PHP-FPM
+#
+# One handler for every vhost, including vhosts this role does not write.
+# A vhost overrides it with its own php_fpm_socket -- a vhost-local
+# <FilesMatch> takes precedence over this server-context one.
+
+ProxyTimeout {{ apache_php_fpm_timeout }}
+<FilesMatch "\.php$">
+    SetHandler "proxy:{{ __apache_php_fpm_handler }}"
+</FilesMatch>
+
+{% endif %}
+#
+# Virtual Hosts
+#
+
+IncludeOptional {{ __apache_vhosts_dir }}/*.conf
+
+#
+# Extra Configuration
+#
+
+{% if apache_extra_config %}
+{{ apache_extra_config }}
+{% endif %}
+
+{% for conf_file in apache_extra_conf_includes %}
+Include {{ conf_file }}
+{% endfor %}

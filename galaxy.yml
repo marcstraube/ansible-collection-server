@@ -1,0 +1,55 @@
+---
+namespace: marcstraube
+name: server
+version: 1.0.0 # x-release-please-version
+readme: README.md
+authors:
+  - Marc Straube <email@marcstraube.de>
+description: >-
+  Ansible roles for self-hosted server infrastructure: nginx, Apache, Let's
+  Encrypt certificates, PostgreSQL, and n8n workflow automation. Supports
+  Arch Linux, Debian Trixie, and Rocky Linux 9/10. Built for ansible-core
+  2.19+ on top of marcstraube.common.
+license_file: LICENSE
+tags:
+  - linux
+  - server
+  - archlinux
+  - debian
+  - rocky
+  - webserver
+  - nginx
+  - apache
+  - letsencrypt
+  - certbot
+  - postgresql
+  - n8n
+  - podman
+repository: https://github.com/marcstraube/ansible-collection-server
+documentation: https://github.com/marcstraube/ansible-collection-server
+homepage: https://github.com/marcstraube/ansible-collection-server
+issues: https://github.com/marcstraube/ansible-collection-server/issues
+build_ignore:
+  - '*.tar.gz'
+  - .ansible
+  - .ansible-lint
+  - .claude
+  - .git
+  - .github
+  - .gitignore
+  - .markdownlint-cli2.yaml
+  - .markdownlint.yml
+  - .pre-commit-config.yaml
+  - .release-please-manifest.json
+  - .secrets.baseline
+  - .venv
+  - .yamllint
+  - '*.pyc'
+  - __pycache__
+  - roles/*/molecule
+dependencies:
+  marcstraube.common: '>=3.0.0'
+  community.general: '>=8.0.0'
+  community.postgresql: '>=3.0.0'
+  containers.podman: '>=1.10.0'
+  ansible.posix: '>=1.5.0'

@@ -1,0 +1,12 @@
+---
+#
+# n8n — Shared Variables
+#
+
+# Service name (role-created unit, no OS variation)
+__n8n_service_name: 'n8n.service'
+__n8n_runner_service_name: 'n8n-runner.service'
+
+# Runtime state of the rootless podman instance; the service unit creates
+# it as its RuntimeDirectory
+__n8n_runtime_dir: '/run/n8n'

@@ -1,0 +1,20 @@
+---
+# Handler topic contract: the tasks that obtain a certificate notify
+# 'Reload cert services' when certbot actually issued one. Roles consuming the
+# certificates subscribe with `listen` on their own reload or restart handler,
+# keeping their own service conditionals. The inventory configures nothing.
+#
+# This role subscribes itself with the renewal deploy hook script, so the
+# services it reloads on renewal (certbot_*_enabled, certbot_reload_services)
+# also pick up a certificate issued inside a play. certbot runs the deploy hook
+# directory itself on `certonly` only since 5.3.0, and never on the first run,
+# where the script is written after the certificate. On hosts with a newer
+# certbot this can reload a service twice; a reload is idempotent, so that is
+# accepted. The listener is always defined, as Ansible aborts a run when a
+# notification reaches no handler at all.
+- name: Run certbot deploy hooks
+  ansible.builtin.command:
+    cmd: "{{ certbot_config_dir }}/renewal-hooks/deploy/reload-services.sh"
+  changed_when: true
+  listen: Reload cert services
+  when: __certbot_reload_services | default([]) | length > 0

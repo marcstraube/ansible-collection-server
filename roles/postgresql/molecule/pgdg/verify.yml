@@ -1,0 +1,44 @@
+---
+# Service, config files, database and user: same checks as the default
+# scenario, resolved against the PGDG service name and paths.
+- name: Import default verify
+  ansible.builtin.import_playbook: ../default/verify.yml
+
+- name: Verify PGDG packages
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Verify | Gather installed packages
+      ansible.builtin.package_facts:
+
+    # Debian: the package name is the same for both sources, the PGDG
+    # build carries "pgdg" in its version string (17.x-1.pgdg13+1).
+    - name: Verify | Assert PostgreSQL comes from PGDG (Debian)
+      ansible.builtin.assert:
+        that:
+          - "'postgresql-' ~ postgresql_version in ansible_facts.packages"
+          - >-
+            ansible_facts.packages['postgresql-' ~ postgresql_version]
+            | map(attribute='version') | select('search', 'pgdg') | list | length > 0
+        fail_msg: >-
+          postgresql-{{ postgresql_version }} is missing or not the PGDG build:
+          {{ ansible_facts.packages['postgresql-' ~ postgresql_version] | default([]) }}
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Verify | Assert versioned PGDG packages are installed (RedHat)
+      ansible.builtin.assert:
+        that:
+          - "'postgresql' ~ postgresql_version ~ '-server' in ansible_facts.packages"
+          - "'postgresql' ~ postgresql_version ~ '-contrib' in ansible_facts.packages"
+        fail_msg: >-
+          Expected postgresql{{ postgresql_version }}-server and -contrib
+          from the PGDG repository.
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Verify | Assert the AppStream postgresql-server package is absent (RedHat)
+      ansible.builtin.assert:
+        that:
+          - "'postgresql-server' not in ansible_facts.packages"
+        fail_msg: The unversioned AppStream package must not be installed.
+      when: ansible_facts['os_family'] == 'RedHat'

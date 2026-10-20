@@ -1,0 +1,23 @@
+---
+- name: Install | Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Install | Certbot packages
+  ansible.builtin.package:
+    name: "{{ __certbot_packages }}"
+    state: present
+  register: __certbot_install
+  retries: 3
+  delay: 5
+
+- name: Install | Certbot plugin packages
+  ansible.builtin.package:
+    name: "{{ __certbot_plugin_packages[item] }}"
+    state: present
+  loop: "{{ certbot_plugins }}"
+  when: item in __certbot_plugin_packages
+  retries: 3
+  delay: 5

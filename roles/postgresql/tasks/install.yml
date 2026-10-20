@@ -1,0 +1,80 @@
+---
+# The PGDG repo file check (repos.yml) only exists on RedHat with
+# postgresql_repo 'pgdg'; everywhere else the gate falls through.
+- name: Install | PostgreSQL packages
+  ansible.builtin.package:
+    name: '{{ __postgresql_packages }}'
+    state: present
+  retries: 3
+  delay: 5
+  when: __postgresql_pgdg_repo_stat.stat.exists | default(true)
+
+# Guard against a cluster initialized by another major version than the
+# installed server: a rolling distro update (Arch Linux) or a changed EL
+# module stream replaces the binaries while the data directory keeps its
+# version, and the server refuses to start on it. Fail here with both
+# versions instead of at the service task. Tagged always so that every
+# stage sees the same precondition; the read-only command runs in check
+# mode as well.
+- name: Install | Check if the cluster is initialized
+  ansible.builtin.stat:
+    path: '{{ __postgresql_data_dir }}/PG_VERSION'
+  register: __postgresql_cluster_version_stat
+  tags:
+    - always
+
+- name: Install | Read cluster version
+  ansible.builtin.slurp:
+    src: '{{ __postgresql_data_dir }}/PG_VERSION'
+  register: __postgresql_cluster_version_file
+  when: __postgresql_cluster_version_stat.stat.exists
+  tags:
+    - always
+
+- name: Install | Detect installed server version
+  ansible.builtin.command:
+    cmd: '{{ __postgresql_bin_dir }}/postgres --version'
+  register: __postgresql_server_version_cmd
+  changed_when: false
+  check_mode: false
+  when: __postgresql_cluster_version_stat.stat.exists
+  tags:
+    - always
+
+- name: Install | Assert cluster and server major versions match
+  ansible.builtin.assert:
+    that:
+      - __postgresql_cluster_major == __postgresql_server_major
+    fail_msg: |
+      The cluster in {{ __postgresql_data_dir }} was initialized by
+      PostgreSQL {{ __postgresql_cluster_major }}, the installed server is
+      PostgreSQL {{ __postgresql_server_major }}. The server will not start
+      on this data directory, and the role does not perform major version
+      upgrades. Upgrade the cluster by hand (pg_upgrade; Arch Linux ships
+      the previous binaries in postgresql-old-upgrade) and rerun the role.
+  vars:
+    __postgresql_cluster_major: >-
+      {{ (__postgresql_cluster_version_file.content | b64decode | trim).split('.')[0] }}
+    __postgresql_server_major: >-
+      {{ __postgresql_server_version_cmd.stdout | regex_search('[0-9]+') }}
+  when: __postgresql_cluster_version_stat.stat.exists
+  tags:
+    - always
+
+- name: Install | Initialize database (Arch)
+  ansible.builtin.command:
+    cmd: 'initdb -D {{ __postgresql_data_dir }}'
+  become: true
+  become_user: '{{ __postgresql_user }}'
+  changed_when: true
+  when:
+    - ansible_facts['os_family'] == 'Archlinux'
+    - not __postgresql_cluster_version_stat.stat.exists
+
+- name: Install | Initialize database (RedHat)
+  ansible.builtin.command:
+    cmd: '{{ __postgresql_setup_command }}'
+  changed_when: true
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - not __postgresql_cluster_version_stat.stat.exists

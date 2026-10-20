@@ -1,0 +1,95 @@
+---
+- name: Main | Validate encryption key is set
+  ansible.builtin.assert:
+    that:
+      - n8n_encryption_key | length > 0
+    fail_msg: |
+      n8n_encryption_key must be set for credential security!
+      Generate one with: openssl rand -base64 32
+      Store in vault as: vault_n8n_encryption_key
+  when:
+    - n8n_enabled | bool
+    - ansible_facts['env'].MOLECULE_SCENARIO_NAME is not defined
+  tags:
+    - always
+
+- name: Main | Validate task runner auth token is set
+  ansible.builtin.assert:
+    that:
+      - n8n_runners_auth_token | length > 0
+    fail_msg: |
+      n8n_runners_auth_token must be set: n8n and the task runner launcher
+      share it to authenticate.
+      Generate one with: openssl rand -hex 32
+      Store in vault as: vault_n8n_runners_auth_token
+  when:
+    - n8n_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate webhook URL for production
+  ansible.builtin.assert:
+    that:
+      - n8n_webhook_url | length > 0
+      - n8n_webhook_url is match('^https://')
+    fail_msg: |
+      n8n_webhook_url must be set and use HTTPS for webhooks!
+      Example: https://n8n.example.com
+  when:
+    - n8n_enabled | bool
+    - n8n_webhook_url | length > 0
+    - ansible_facts['env'].MOLECULE_SCENARIO_NAME is not defined
+  tags:
+    - always
+
+- name: Main | Import update tasks
+  ansible.builtin.import_tasks: update.yml
+  when: n8n_enabled | bool
+  tags:
+    - n8n
+    - n8n:install
+
+- name: Main | Import install tasks
+  ansible.builtin.import_tasks: install.yml
+  when: n8n_enabled | bool
+  tags:
+    - n8n
+    - n8n:install
+
+- name: Main | Import database tasks
+  ansible.builtin.import_tasks: database.yml
+  when:
+    - n8n_enabled | bool
+    - n8n_db_type == 'postgresdb'
+    - n8n_db_create | bool
+  tags:
+    - n8n
+    - n8n:database
+
+- name: Main | Import configure tasks
+  ansible.builtin.import_tasks: configure.yml
+  when: n8n_enabled | bool
+  tags:
+    - n8n
+    - n8n:configure
+
+- name: Main | Import service tasks
+  ansible.builtin.import_tasks: service.yml
+  when: n8n_enabled | bool
+  tags:
+    - n8n
+    - n8n:service
+
+- name: Main | Include firewall tasks
+  ansible.builtin.include_tasks:
+    file: firewall.yml
+    apply:
+      tags:
+        - n8n
+        - n8n:firewall
+  when:
+    - n8n_enabled | bool
+    - n8n_firewalld_enabled | bool
+  tags:
+    - n8n
+    - n8n:firewall

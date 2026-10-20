@@ -1,0 +1,464 @@
+---
+#
+# Role Control
+#
+
+# Enable the n8n role
+n8n_enabled: false
+
+# Enable and start the n8n service
+n8n_service_enabled: true
+
+#
+# Installation
+#
+
+# n8n release: the tag of the container image the role runs. The default
+# follows the npm `stable` channel and is bumped by the update-n8n-version
+# workflow once the image tag is published.
+n8n_version: '2.43.8'
+
+# Container image and runtime settings
+n8n_podman_image: 'docker.io/n8nio/n8n'
+n8n_podman_pull_policy: 'missing'  # missing, always or never
+n8n_podman_container_name: 'n8n'
+n8n_podman_network: 'host'
+n8n_podman_memory: ''
+n8n_podman_cpus: ''
+n8n_podman_extra_args: []
+
+# Subordinate ID range of the n8n user for rootless podman; it must not
+# overlap with the ranges of other users in /etc/subuid and /etc/subgid
+n8n_subid_start: 100000
+n8n_subid_count: 65536
+
+#
+# Updates
+#
+# A change of n8n_version on a host with a deployed n8n is an update: the
+# role stops the service, backs up the data, pulls the new image and waits
+# for /healthz/readiness.
+# n8n migrates its database on start, and migrations are forward-only, so
+# a lower version is refused unless the backup set taken before the
+# upgrade is restored with it (n8n_update_restore).
+
+# Back up n8n_data_dir (and the PostgreSQL database with n8n_db_type
+# 'postgresdb') before every version change and before a restore
+n8n_update_backup_enabled: true
+
+# Directory for the backup sets, one subdirectory per set:
+# n8n-<installed version>-<timestamp>/{data.tar.gz,db.dump}
+n8n_update_backup_dir: '/var/backups/n8n'
+
+# Backup sets to keep; older sets are removed after a new backup
+n8n_update_backup_keep: 3
+
+# Name of a backup set to restore, e.g. 'n8n-2.42.0-20261014T120000'.
+# Replaces n8n_data_dir (and recreates the database) from that set and
+# requires n8n_version to match the version in the set name. One-shot:
+# remove the variable after the run, otherwise the next run restores the
+# same set again.
+n8n_update_restore: ''
+
+# Seconds to wait for /healthz/readiness after a service (re)start;
+# migrations run before the endpoint reports ready
+n8n_ready_timeout: 300
+
+#
+# User and Directory
+#
+
+# Run n8n as dedicated user
+n8n_user: 'n8n'
+n8n_group: 'n8n'
+n8n_user_home: '/var/lib/n8n'
+n8n_user_shell: '/usr/sbin/nologin'
+
+# Data directory (workflows, credentials, SQLite database).
+# This MUST be n8n_user_home + '/.n8n' — n8n itself appends '.n8n'
+# to its N8N_USER_FOLDER env var (which the role passes as
+# n8n_user_home, see templates/n8n.service.j2).
+n8n_data_dir: '{{ n8n_user_home }}/.n8n'
+
+#
+# Network
+#
+
+# Host to listen on (0.0.0.0 for all interfaces, 127.0.0.1 for local only)
+# SECURITY: Default to localhost - use reverse proxy for external access
+n8n_host: '127.0.0.1'
+
+# Port to listen on
+n8n_port: 5678
+
+# Protocol (http or https)
+# SECURITY: Always use https in production with reverse proxy
+n8n_protocol: 'http'
+
+# Webhook URL (REQUIRED for webhooks to work)
+# MUST use HTTPS for production webhooks
+# Example: https://n8n.example.com
+n8n_webhook_url: ''
+
+# Editor URL (for accessing n8n UI)
+n8n_editor_base_url: ''
+
+#
+# Database
+#
+
+# Database type: sqlite, postgresdb, mysqldb, mariadb
+# SECURITY: Use PostgreSQL for production
+n8n_db_type: 'sqlite'
+
+# PostgreSQL settings (when n8n_db_type is 'postgresdb')
+n8n_db_host: 'localhost'
+n8n_db_port: 5432
+n8n_db_name: 'n8n'
+n8n_db_user: 'n8n'
+n8n_db_password: '{{ vault_n8n_db_password | default("") }}'
+n8n_db_ssl: false
+
+# Create PostgreSQL database and user
+n8n_db_create: true
+
+#
+# Security
+#
+
+# Encryption key for credentials (CRITICAL - MUST BE SET!)
+# SECURITY: Generate with: openssl rand -base64 32
+# Store in vault: vault_n8n_encryption_key
+n8n_encryption_key: '{{ vault_n8n_encryption_key | default("") }}'
+
+# Basic authentication (recommended if no reverse proxy auth)
+n8n_basic_auth_enabled: true
+n8n_basic_auth_user: 'admin'
+n8n_basic_auth_password: '{{ vault_n8n_admin_password | default("") }}'
+
+# Security settings
+n8n_secure_cookie: true
+n8n_jwt_session_duration_hours: 2
+
+# Block workflow access to server environment variables
+n8n_block_env_access_in_node: true
+
+# Disable production webhook URLs requiring HTTPS
+n8n_skip_webhook_deregistration_shutdown: false
+
+#
+# Timezone and Localization
+#
+
+# Timezone for n8n workflow scheduling
+n8n_timezone: 'Europe/Berlin'
+
+# Default locale for the n8n UI
+n8n_default_locale: 'en'
+
+#
+# Execution
+#
+
+# Execution mode: regular, queue
+# queue requires Redis for scaling
+n8n_executions_mode: 'regular'
+
+# Default execution timeout for all workflows (seconds, -1 = no timeout).
+# Stops runaway workflows; individual workflows can override it up to
+# n8n_executions_timeout_max.
+n8n_executions_timeout: 3600
+
+# Maximum timeout users can set for an individual workflow (seconds)
+n8n_executions_timeout_max: 3600
+
+# Save execution data (none, save, all)
+n8n_executions_data_save_on_error: 'all'
+n8n_executions_data_save_on_success: 'all'
+
+# Max age for execution data (hours, -1 = never delete)
+n8n_executions_data_max_age: 168  # 7 days
+
+# Prune execution data on startup
+n8n_executions_data_prune: true
+
+#
+# Task Runners
+#
+# The Code node runs in task runners. n8n deprecates the internal mode, so
+# the role runs the launcher from the n8nio/runners image as a second
+# container (n8n-runner.service, bound to n8n.service) in the release of
+# n8n_version. The launcher talks to the task broker on localhost.
+
+# Shared secret between n8n and the launcher (CRITICAL - MUST BE SET!)
+# SECURITY: Generate with: openssl rand -hex 32
+# Store in vault: vault_n8n_runners_auth_token
+n8n_runners_auth_token: '{{ vault_n8n_runners_auth_token | default("") }}'
+
+# Port of the task broker; it listens on 127.0.0.1 only
+n8n_runners_broker_port: 5679
+
+# Port of the launcher's health check endpoint
+n8n_runners_health_check_port: 5680
+
+# Tasks a runner executes at a time
+n8n_runners_max_concurrency: 5
+
+# Seconds a Code node task may run before the runner stops it
+n8n_runners_task_timeout: 300
+
+# Seconds an idle runner waits before it exits; the launcher starts a new
+# one for the next task
+n8n_runners_auto_shutdown_timeout: 15
+
+# Launcher log level: debug, info, warn or error
+n8n_runners_launcher_log_level: 'info'
+
+# Node.js modules the JavaScript Code node may import: built-in modules
+# (e.g. 'crypto,fs') and external modules shipped with n8n (e.g.
+# 'moment,lodash'); comma-separated, '*' allows all
+n8n_runners_node_function_allow_builtin: ''
+n8n_runners_node_function_allow_external: ''
+
+# Python modules the Python Code node may import: standard library modules
+# (e.g. 'json,re,datetime') and third-party modules shipped in the runner
+# image; comma-separated, '*' allows all
+n8n_runners_stdlib_allow: ''
+n8n_runners_external_allow: ''
+
+# Additional environment variables for the launcher (dictionary)
+n8n_runners_extra_env_vars: {}
+
+# Container image of the launcher. The tag is n8n_version plus the suffix:
+# '-distroless' selects the variant without shell and package manager
+# that n8n recommends for the code the runners execute; '' selects the
+# Alpine image.
+n8n_runners_podman_image: 'docker.io/n8nio/runners'
+n8n_runners_podman_image_tag_suffix: '-distroless'
+n8n_runners_podman_container_name: 'n8n-runner'
+
+# Resource limits of the launcher container: the runners execute the code
+# of Code nodes, so the limits cap what a workflow can consume. Memory and
+# CPUs empty for no limit.
+n8n_runners_podman_memory: '1g'
+n8n_runners_podman_cpus: '1'
+n8n_runners_podman_pids_limit: 512
+
+# Size of the tmpfs on /tmp, the only writable path of the read-only
+# launcher container
+n8n_runners_podman_tmp_size: '256m'
+
+n8n_runners_podman_extra_args: []
+
+# Environment file of the launcher
+n8n_runners_env_file: '/etc/n8n/n8n-runner.env'
+
+#
+# Community Packages
+#
+
+# Allow installing community nodes that n8n has not verified
+n8n_unverified_packages_enabled: false
+
+#
+# Compression Node
+#
+
+# Limits for archives the Compression node decompresses
+n8n_compression_node_max_decompressed_size_bytes: 268435456
+n8n_compression_node_max_zip_entries: 1000
+
+#
+# Workflow
+#
+
+# Allow manual workflow execution
+n8n_manual_execution: true
+
+# Workflow timeout (seconds)
+n8n_workflow_timeout: 300
+
+#
+# Logging
+#
+
+# Log level: error, warn, info, verbose, debug
+n8n_log_level: 'info'
+
+# Log output: console, file, json
+n8n_log_output: 'console'
+
+# Log file location (if n8n_log_output includes file)
+n8n_log_file_location: '/var/log/n8n/n8n.log'
+n8n_log_file_max_size: '10m'
+n8n_log_file_max_count: 5
+
+#
+# Telemetry and Updates
+#
+
+# Disable telemetry (recommended for privacy)
+n8n_diagnostics_enabled: false
+
+# Hide usage page (first-time setup)
+n8n_hide_usage_page: false
+
+# Disable version notifications
+n8n_version_notifications_enabled: true
+
+#
+# OpenTelemetry (n8n >= 2.15)
+#
+# Emit workflow-execution traces to an OTLP-compatible backend
+# (Grafana Tempo, Jaeger, Datadog, Honeycomb, ...). Disabled by
+# default; set n8n_otel_enabled to true and point
+# n8n_otel_exporter_otlp_endpoint at your collector.
+
+n8n_otel_enabled: false
+
+# OTLP HTTP endpoint of the collector / backend
+n8n_otel_exporter_otlp_endpoint: 'http://localhost:4318'
+
+# Path appended to the endpoint for trace export
+n8n_otel_exporter_otlp_tracing_path: '/v1/traces'
+
+# Extra headers for the OTLP exporter (e.g. auth tokens),
+# comma-separated key=value pairs
+n8n_otel_exporter_otlp_headers: ''
+
+# Service name reported in spans
+n8n_otel_exporter_service_name: 'n8n'
+
+# Sample rate for traces (0.0 - 1.0)
+n8n_otel_traces_sample_rate: 1.0
+
+# Startup connectivity timeout to the OTLP endpoint (ms)
+n8n_otel_startup_connectivity_timeout_ms: 2000
+
+# Emit node-level spans in addition to the workflow root span
+n8n_otel_traces_include_node_spans: true
+
+# Inject W3C trace context into outbound HTTP requests
+n8n_otel_traces_inject_outbound: true
+
+# Trace only production executions of active workflows
+# (skip manual / test runs)
+n8n_otel_traces_production_only: true
+
+#
+# Insights (n8n >= 2.20)
+#
+
+# Retention for insights data in days. Empty string keeps the
+# n8n upstream default (365). Self-hosted maximum is 730.
+n8n_insights_max_age_days: ''
+
+#
+# External Services
+#
+
+# External hooks (for custom integrations)
+n8n_external_hook_files: ''
+
+# Custom nodes location
+n8n_custom_extensions: ''
+
+# Community nodes
+# Exclude dangerous nodes (JSON array string)
+# Default: Execute Command node (prevents RCE via workflows)
+n8n_nodes_exclude: '["n8n-nodes-base.executeCommand"]'
+n8n_nodes_include: ''
+
+#
+# Endpoints
+#
+
+# Disable specific endpoints for security
+n8n_endpoints_rest: '/'
+n8n_endpoints_webhook: 'webhook'
+n8n_endpoints_webhook_test: 'webhook-test'
+n8n_endpoints_webhook_waiting: 'webhook-waiting'
+
+# Disable production webhooks (testing only)
+n8n_disable_production_main_process: false
+
+#
+# Email (Notifications)
+#
+
+# Email transport mode (empty to disable, 'smtp' to enable)
+n8n_email_mode: ''
+
+# SMTP server settings
+n8n_smtp_host: ''
+n8n_smtp_port: 587
+n8n_smtp_user: ''
+n8n_smtp_pass: ''
+n8n_smtp_sender: ''
+n8n_smtp_ssl: true
+
+#
+# User Management
+#
+
+# User management (requires n8n version with user management)
+n8n_user_management_disabled: false
+
+#
+# Firewall
+#
+
+# Enable firewalld rule for n8n port
+n8n_firewalld_enabled: true
+
+# Firewalld zone for n8n port
+n8n_firewalld_zone: 'public'
+
+#
+# Systemd
+#
+
+# Systemd service restart policy and resource limits
+n8n_systemd_restart: 'on-failure'
+n8n_systemd_restart_sec: 10
+n8n_systemd_limit_nofile: 65536
+
+# Environment file location
+n8n_env_file: '/etc/n8n/n8n.env'
+
+#
+# Reverse Proxy
+#
+
+# Set to true if behind reverse proxy
+# SECURITY: Default to true - production deployments should use reverse proxy
+n8n_behind_reverse_proxy: true
+
+# Trusted proxy IPs (comma-separated)
+n8n_trusted_proxy_ips: ''
+
+#
+# Outgoing Proxy
+#
+# HTTP proxy for outgoing requests (empty = no proxy)
+# Used for the image pull and n8n workflow HTTP traffic
+
+# HTTP proxy (empty = no proxy)
+# Example: http://proxy.example.com:3128
+n8n_http_proxy: ''
+
+# HTTPS proxy (defaults to n8n_http_proxy if empty)
+n8n_https_proxy: '{{ n8n_http_proxy }}'
+
+# Comma-separated list of hosts/IPs to bypass the proxy
+n8n_no_proxy: 'localhost,127.0.0.1'
+
+#
+# Extra Environment Variables
+#
+
+# Additional environment variables (dictionary)
+n8n_extra_env_vars: {}
+# Example:
+#   N8N_CUSTOM_VAR: 'value'
+#   ANOTHER_VAR: 'another_value'

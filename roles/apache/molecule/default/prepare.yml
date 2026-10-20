@@ -1,0 +1,315 @@
+---
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __prepare_packages:
+      Archlinux:
+        - systemd
+        - dbus
+        - procps-ng
+        - openssl
+      Debian:
+        - systemd
+        - dbus
+        - procps
+        - openssl
+      RedHat:
+        - systemd
+        - dbus
+        - procps-ng
+        - openssl
+
+  tasks:
+    - name: Prepare | Update package cache (Arch)
+      community.general.pacman:
+        update_cache: true
+        upgrade: true
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Update package cache (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Update package cache (RedHat)
+      ansible.builtin.dnf:
+        update_cache: true
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name: '{{ __prepare_packages[ansible_facts["os_family"]] }}'
+        state: present
+      retries: 3
+      delay: 5
+
+    # RedHat httpd uses Type=notify which times out in containers
+    - name: Prepare | Create httpd systemd override directory (RedHat)
+      ansible.builtin.file:
+        path: /etc/systemd/system/httpd.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Override httpd service type for containers (RedHat)
+      ansible.builtin.copy:
+        content: |
+          [Service]
+          Type=simple
+          TimeoutStartSec=300
+        dest: /etc/systemd/system/httpd.service.d/override.conf
+        owner: root
+        group: root
+        mode: '0644'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Create test document root
+      ansible.builtin.file:
+        path: /var/www/testsite
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Create test index page
+      ansible.builtin.copy:
+        content: |
+          <!DOCTYPE html>
+          <html>
+          <head><title>Apache Test</title></head>
+          <body><h1>Apache Test Page</h1></body>
+          </html>
+        dest: /var/www/testsite/index.html
+        owner: root
+        group: root
+        mode: '0644'
+
+    # Provide a certificate for one SSL vhost so the conditional-deploy logic can
+    # be exercised for both the present-cert and missing-cert cases.
+    - name: Prepare | Create test SSL certificate directory
+      ansible.builtin.file:
+        path: /etc/ssl/test
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Generate test SSL certificate
+      ansible.builtin.command:
+        cmd: >-
+          openssl req -x509 -nodes -days 365 -newkey rsa:2048
+          -keyout /etc/ssl/test/present.key
+          -out /etc/ssl/test/present.crt
+          -subj "/CN=present.example.local"
+        creates: /etc/ssl/test/present.crt
+
+    # Fixtures for exclusive-mode pruning, planted before the role runs:
+    # 'zz-orphan' carries the ansible_managed header and is unlisted (pruned),
+    # 'zz-foreign' has no header (never touched), 'zz-keep' carries the header
+    # but is listed in apache_vhosts_keep (kept). The vhosts directory is
+    # created ahead of package install. Fixture names sort after testsite.local
+    # so surviving fixtures never become the default vhost for the functional
+    # HTTP test.
+    - name: Prepare | Load role variables for fixture paths
+      ansible.builtin.include_vars: '{{ item }}'
+      with_first_found:
+        - files:
+            - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["distribution"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}.yml'
+          paths:
+            - '../../vars'
+
+    - name: Prepare | Create vhosts directory for pruning fixtures
+      ansible.builtin.file:
+        path: '{{ __apache_vhosts_dir }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Create orphaned role-managed vhost fixture
+      ansible.builtin.copy:
+        content: |
+          {{ ansible_managed | default('Ansible managed') | comment }}
+          <VirtualHost *:80>
+              ServerName zz-orphan.example.local
+          </VirtualHost>
+        dest: '{{ __apache_vhosts_dir }}/zz-orphan.example.local.conf'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Create foreign vhost fixture without managed header
+      ansible.builtin.copy:
+        content: |
+          # Hand-written local configuration
+          <VirtualHost *:80>
+              ServerName zz-foreign.example.local
+          </VirtualHost>
+        dest: '{{ __apache_vhosts_dir }}/zz-foreign.example.local.conf'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Create keep-listed role-managed vhost fixture
+      ansible.builtin.copy:
+        content: |
+          {{ ansible_managed | default('Ansible managed') | comment }}
+          <VirtualHost *:80>
+              ServerName zz-keep.example.local
+          </VirtualHost>
+        dest: '{{ __apache_vhosts_dir }}/zz-keep.example.local.conf'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Create enabled-vhosts directory for fixtures (Debian)
+      ansible.builtin.file:
+        path: '{{ __apache_vhosts_enabled_dir }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # Simulates a site enabled by an earlier run, so the a2dissite path of the
+    # pruning is exercised.
+    - name: Prepare | Enable orphaned vhost fixture (Debian)
+      ansible.builtin.file:
+        src: '{{ __apache_vhosts_dir }}/zz-orphan.example.local.conf'
+        dest: '{{ __apache_vhosts_enabled_dir }}/zz-orphan.example.local.conf'
+        state: link
+      when: ansible_facts['os_family'] == 'Debian'
+
+    #
+    # PHP-FPM backend, so the vhost handler can be exercised end to end.
+    # Service and socket names differ per distribution (and per PHP version on
+    # Debian), so both are discovered at runtime instead of hardcoded.
+    #
+
+    - name: Prepare | Install PHP-FPM
+      ansible.builtin.package:
+        name: php-fpm
+        state: present
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Gather service facts
+      ansible.builtin.service_facts:
+
+    - name: Prepare | Determine PHP-FPM service name
+      ansible.builtin.set_fact:
+        __prepare_fpm_service: >-
+          {{
+            ansible_facts['services'] | dict2items
+            | map(attribute='key')
+            | select('search', '^php[0-9.-]*fpm[0-9.-]*\.service$')
+            | list | first
+          }}
+
+    - name: Prepare | Start PHP-FPM
+      ansible.builtin.systemd_service:
+        name: '{{ __prepare_fpm_service }}'
+        state: started
+        enabled: true
+
+    - name: Prepare | Wait for the PHP-FPM socket
+      ansible.builtin.find:
+        paths: /run
+        patterns: '*.sock'
+        file_type: any
+        recurse: true
+      register: __prepare_fpm_socket
+      until: >-
+        __prepare_fpm_socket.files | rejectattr('islnk')
+        | map(attribute='path') | select('search', 'fpm')
+        | list | length > 0
+      retries: 5
+      delay: 2
+
+    # A second match would make the socket picked in converge arbitrary, for
+    # instance once the scenario gains another PHP version.
+    - name: Prepare | Assert exactly one FPM socket was found
+      ansible.builtin.assert:
+        that:
+          - __prepare_fpm_paths | length == 1
+        fail_msg: >-
+          Expected one php-fpm socket, found {{ __prepare_fpm_paths | length }}:
+          {{ __prepare_fpm_paths }}
+      vars:
+        __prepare_fpm_paths: >-
+          {{
+            __prepare_fpm_socket.files | rejectattr('islnk') | map(attribute='path')
+            | select('search', 'fpm') | list
+          }}
+
+    # The RedHat php-fpm package drops a php.conf into conf.d that sets
+    # DirectoryIndex to index.php globally, which makes the existing html-only
+    # test vhost answer 403. The role configures the handler per vhost, so the
+    # packaged file is not needed here.
+    - name: Prepare | Remove the packaged php.conf (RedHat)
+      ansible.builtin.file:
+        path: /etc/httpd/conf.d/php.conf
+        state: absent
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Create PHP document root
+      ansible.builtin.file:
+        path: /var/www/php-test
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # Served through the PHP vhost. A handler that cannot reach FPM makes Apache
+    # deliver this file verbatim, which is exactly what must not happen.
+    - name: Prepare | Deploy PHP test script
+      ansible.builtin.copy:
+        content: |
+          <?php echo 'PHP-EXECUTED-OK';
+        dest: /var/www/php-test/index.php
+        owner: root
+        group: root
+        mode: '0644'
+
+    # Sensitive-path fixtures in the default HTTP vhost. verify.yml requests
+    # each one: the denied set must answer 403, the allowed set 200 -- the
+    # latter proves the deny patterns are anchored to whole path components.
+    - name: Prepare | Create sensitive-path fixture directories
+      ansible.builtin.file:
+        path: '/var/www/testsite/{{ item }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - '.git'
+        - '.hg'
+        - '.github'
+
+    - name: Prepare | Create sensitive-path fixture files
+      ansible.builtin.copy:
+        content: "fixture\n"
+        dest: '/var/www/testsite/{{ item }}'
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - '.env'
+        - '.env.local'
+        - '.git/config'
+        - '.hg/hgrc'
+        - '.DS_Store'
+        - 'dump.sql'
+        - 'dump.sql.gz'
+        - 'index.html.bak'
+        - 'notes.txt~'
+        - '.github/workflow.yml'
+        - '.envrc'
+        - 'allowed.txt'

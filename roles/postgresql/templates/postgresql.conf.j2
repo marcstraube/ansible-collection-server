@@ -1,0 +1,139 @@
+{{ ansible_managed | comment }}
+#
+# PostgreSQL Configuration
+#
+
+#------------------------------------------------------------------------------
+# FILE LOCATIONS
+#------------------------------------------------------------------------------
+
+data_directory = '{{ __postgresql_data_dir }}'
+hba_file = '{{ __postgresql_config_dir }}/pg_hba.conf'
+
+#------------------------------------------------------------------------------
+# CONNECTIONS AND AUTHENTICATION
+#------------------------------------------------------------------------------
+
+listen_addresses = '{{ postgresql_listen_addresses }}'
+port = {{ postgresql_port }}
+max_connections = {{ postgresql_max_connections }}
+unix_socket_directories = '{{ postgresql_unix_socket_directories }}'
+password_encryption = {{ postgresql_password_encryption }}
+
+#------------------------------------------------------------------------------
+# RESOURCE USAGE (except WAL)
+#------------------------------------------------------------------------------
+
+shared_buffers = {{ postgresql_shared_buffers }}
+huge_pages = {{ postgresql_huge_pages }}
+effective_cache_size = {{ postgresql_effective_cache_size }}
+work_mem = {{ postgresql_work_mem }}
+maintenance_work_mem = {{ postgresql_maintenance_work_mem }}
+
+#------------------------------------------------------------------------------
+# WRITE-AHEAD LOG
+#------------------------------------------------------------------------------
+
+wal_level = {{ postgresql_wal_level }}
+synchronous_commit = {{ postgresql_synchronous_commit }}
+wal_buffers = {{ postgresql_wal_buffers }}
+checkpoint_completion_target = {{ postgresql_checkpoint_completion_target }}
+max_wal_size = {{ postgresql_max_wal_size }}
+min_wal_size = {{ postgresql_min_wal_size }}
+
+#------------------------------------------------------------------------------
+# REPLICATION
+#------------------------------------------------------------------------------
+
+max_wal_senders = {{ postgresql_max_wal_senders }}
+max_replication_slots = {{ postgresql_max_replication_slots }}
+
+#------------------------------------------------------------------------------
+# QUERY TUNING
+#------------------------------------------------------------------------------
+
+random_page_cost = {{ postgresql_random_page_cost }}
+effective_io_concurrency = {{ postgresql_effective_io_concurrency }}
+default_statistics_target = {{ postgresql_default_statistics_target }}
+
+#------------------------------------------------------------------------------
+# REPORTING AND LOGGING
+#------------------------------------------------------------------------------
+
+log_destination = '{{ postgresql_log_destination }}'
+{% if postgresql_logging_collector | bool %}
+
+logging_collector = on
+log_directory = '{{ postgresql_log_directory }}'
+log_filename = '{{ postgresql_log_filename }}'
+log_rotation_age = {{ postgresql_log_rotation_age }}
+log_rotation_size = {{ postgresql_log_rotation_size }}
+{% endif %}
+
+log_line_prefix = '{{ postgresql_log_line_prefix }}'
+log_statement = '{{ postgresql_log_statement }}'
+{% if postgresql_log_min_duration_statement >= 0 %}
+
+log_min_duration_statement = {{ postgresql_log_min_duration_statement }}
+{% endif %}
+
+log_checkpoints = {{ postgresql_log_checkpoints | ternary('on', 'off') }}
+log_connections = {{ postgresql_log_connections | ternary('on', 'off') }}
+log_disconnections = {{ postgresql_log_disconnections | ternary('on', 'off') }}
+log_lock_waits = {{ postgresql_log_lock_waits | ternary('on', 'off') }}
+log_temp_files = {{ postgresql_log_temp_files }}
+
+#------------------------------------------------------------------------------
+# SHARED LIBRARIES
+#------------------------------------------------------------------------------
+{% if postgresql_shared_preload_libraries | length > 0 %}
+
+shared_preload_libraries = '{{ postgresql_shared_preload_libraries }}'
+{% endif %}
+
+#------------------------------------------------------------------------------
+# LOCK MANAGEMENT
+#------------------------------------------------------------------------------
+{% if postgresql_idle_in_transaction_session_timeout > 0 %}
+
+idle_in_transaction_session_timeout = {{ postgresql_idle_in_transaction_session_timeout }}
+{% endif %}
+
+#------------------------------------------------------------------------------
+# CLIENT CONNECTION DEFAULTS
+#------------------------------------------------------------------------------
+
+timezone = '{{ postgresql_timezone }}'
+lc_messages = '{{ postgresql_lc_messages }}'
+lc_monetary = '{{ postgresql_lc_monetary }}'
+lc_numeric = '{{ postgresql_lc_numeric }}'
+lc_time = '{{ postgresql_lc_time }}'
+
+#------------------------------------------------------------------------------
+# SSL
+#------------------------------------------------------------------------------
+{% if postgresql_ssl_enabled | bool %}
+
+ssl = on
+ssl_cert_file = '{{ __postgresql_ssl_cert_input }}'
+ssl_key_file = '{{ __postgresql_ssl_key_input }}'
+{% if postgresql_ssl_ca_file | length > 0 %}
+ssl_ca_file = '{{ postgresql_ssl_ca_file }}'
+{% endif %}
+ssl_min_protocol_version = '{{ postgresql_ssl_min_protocol_version }}'
+ssl_prefer_server_ciphers = {{ postgresql_ssl_prefer_server_ciphers | ternary('on', 'off') }}
+ssl_ciphers = '{{ postgresql_ssl_ciphers }}'
+{% else %}
+
+ssl = off
+{% endif %}
+{% if postgresql_extra_config | length > 0 %}
+
+#------------------------------------------------------------------------------
+# EXTRA CONFIGURATION
+#------------------------------------------------------------------------------
+
+{% for key, value in postgresql_extra_config.items() %}
+{{ key }} = {{ value }}
+{% endfor %}
+{% endif %}

@@ -1,0 +1,74 @@
+---
+- name: Service | Deploy systemd service file
+  ansible.builtin.template:
+    src: n8n.service.j2
+    dest: '/etc/systemd/system/{{ __n8n_service_name }}'
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - Reload n8n systemd units
+    - Restart n8n
+
+- name: Service | Deploy task runner service file
+  ansible.builtin.template:
+    src: n8n-runner.service.j2
+    dest: '/etc/systemd/system/{{ __n8n_runner_service_name }}'
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - Reload n8n systemd units
+    - Restart n8n runner
+
+- name: Service | Flush handlers to apply pending restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Service | Manage n8n service
+  ansible.builtin.systemd_service:
+    name: '{{ __n8n_service_name }}'
+    enabled: "{{ n8n_service_enabled | bool }}"
+    state: "{{ n8n_service_enabled | bool | ternary('started', 'stopped') }}"
+    daemon_reload: true
+
+# Bound to n8n.service: it starts with n8n and stops with it. A check run
+# has not deployed the unit yet, so report the failure and continue.
+- name: Service | Manage task runner service
+  ansible.builtin.systemd_service:
+    name: '{{ __n8n_runner_service_name }}'
+    enabled: "{{ n8n_service_enabled | bool }}"
+    state: "{{ n8n_service_enabled | bool | ternary('started', 'stopped') }}"
+  ignore_errors: '{{ ansible_check_mode }}'
+
+# /healthz/readiness answers 200 only once the database is connected and
+# migrated, so a version change with long migrations is covered as well.
+# n8n itself always listens on plain HTTP; n8n_protocol only shapes the
+# URLs it generates behind a TLS-terminating proxy. The waits verify the
+# deployment, which a check run does not perform.
+- name: Service | Wait for n8n to be ready
+  ansible.builtin.uri:
+    url: >-
+      http://{{ n8n_host if n8n_host != '0.0.0.0' else '127.0.0.1' }}:{{ n8n_port }}{{
+        n8n_endpoints_rest | regex_replace('/$', '') }}/healthz/readiness
+    status_code: 200
+    timeout: 10
+  register: __n8n_ready
+  until: __n8n_ready.status | default(0) == 200
+  retries: '{{ ((n8n_ready_timeout | int) / 5) | round(0, "ceil") | int }}'
+  delay: 5
+  when:
+    - n8n_service_enabled | bool
+    - not ansible_check_mode
+
+- name: Service | Wait for the task runner launcher to be healthy
+  ansible.builtin.uri:
+    url: 'http://127.0.0.1:{{ n8n_runners_health_check_port }}/healthz'
+    status_code: 200
+    timeout: 5
+  register: __n8n_runner_healthy
+  until: __n8n_runner_healthy.status | default(0) == 200
+  retries: 12
+  delay: 5
+  when:
+    - n8n_service_enabled | bool
+    - not ansible_check_mode

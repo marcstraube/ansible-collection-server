@@ -1,0 +1,30 @@
+---
+galaxy_info:
+  author: Marc Straube
+  description: Install and configure Apache HTTP Server
+  license: MIT
+  min_ansible_version: '2.19'
+
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+    - name: Debian
+      versions:
+        - trixie
+    - name: EL
+      versions:
+        - all
+
+  galaxy_tags:
+    - web
+    - webserver
+    - apache
+    - httpd
+    - http
+    - https
+    - ssl
+    - tls
+    - reverseproxy
+
+dependencies: []

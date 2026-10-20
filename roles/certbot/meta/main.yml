@@ -1,0 +1,28 @@
+---
+galaxy_info:
+  author: Marc Straube
+  description: Install and configure Certbot for Let's Encrypt TLS certificates
+  license: MIT
+  min_ansible_version: '2.19'
+
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+    - name: Debian
+      versions:
+        - trixie
+    - name: EL
+      versions:
+        - all
+
+  galaxy_tags:
+    - certbot
+    - letsencrypt
+    - ssl
+    - tls
+    - certificate
+    - https
+    - acme
+
+dependencies: []

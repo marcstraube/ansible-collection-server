@@ -1,0 +1,35 @@
+---
+galaxy_info:
+  author: Marc Straube
+  description: Run the n8n workflow automation platform as a rootless Podman container
+  license: MIT
+  min_ansible_version: '2.19'
+
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+
+    - name: Debian
+      versions:
+        - trixie
+
+    - name: EL
+      versions:
+        - all
+
+  galaxy_tags:
+    - automation
+    - workflow
+    - n8n
+    - integration
+    - webhooks
+    - api
+    - etl
+    - nocode
+    - lowcode
+    - zapier
+    - make
+    - ifttt
+
+dependencies: []

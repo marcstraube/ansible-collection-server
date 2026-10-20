@@ -1,0 +1,31 @@
+---
+# postgresql_repo and postgresql_version come from the scenario inventory
+# (molecule.yml) so that verify.yml resolves the same service and paths.
+- name: Converge
+  hosts: all
+  gather_facts: true
+
+  vars:
+    postgresql_enabled: true
+    postgresql_ssl_enabled: false
+    postgresql_firewalld_enabled: false
+    postgresql_shared_buffers: '64MB'
+    postgresql_effective_cache_size: '128MB'
+    postgresql_lc_messages: 'en_US.UTF-8'
+    postgresql_lc_monetary: 'en_US.UTF-8'
+    postgresql_lc_numeric: 'en_US.UTF-8'
+    postgresql_lc_time: 'en_US.UTF-8'
+    postgresql_databases:
+      - name: testdb
+        owner: testuser
+    postgresql_users:
+      - name: testuser
+        password: testpassword
+    postgresql_extensions:
+      - name: pgcrypto
+        database: testdb
+
+  tasks:
+    - name: Converge | Include postgresql role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'

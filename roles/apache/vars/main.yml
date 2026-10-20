@@ -1,0 +1,105 @@
+---
+#
+# Shared Variables
+#
+
+# Modules every configuration this role renders needs: access control
+# (Require, Require local), MIME types, DirectoryIndex, logging, request
+# timeouts and the user/group switch. Distributions that compile some of
+# them in statically drop those via __apache_modules_static.
+__apache_modules_base:
+  - 'authz_core'
+  - 'authz_host'
+  - 'dir'
+  - 'log_config'
+  - 'mime'
+  - 'reqtimeout'
+  - 'unixd'
+
+# Modules that follow from the configured features: switching a feature on
+# loads its module, switching it off drops it. Anything an application needs
+# on top (rewrite in .htaccess, Basic Auth, ...) goes into
+# apache_modules_enabled.
+__apache_modules_features: >-
+  {{
+    (['ssl', 'socache_shmcb'] if apache_ssl_enabled | bool else [])
+    + (['headers'] if apache_security_headers_enabled | bool else [])
+    + (['deflate', 'filter', 'setenvif'] if apache_compression_enabled | bool else [])
+    + (['expires'] if apache_caching_enabled | bool else [])
+    + (['alias'] if apache_acme_challenge_enabled | bool else [])
+    + (['http2'] if apache_http2_enabled | bool else [])
+    + (['status'] if apache_status_enabled | bool else [])
+    + (['rewrite'] if (apache_vhosts | selectattr('redirect_to_https', 'defined')
+                       | selectattr('redirect_to_https') | list | length > 0)
+                      or apache_reverse_proxies | default([]) | length > 0 else [])
+  }}
+
+# Modules the rendered configuration requires but apache_modules_enabled does
+# not carry: the PHP-FPM handler needs proxy + proxy_fcgi, reverse proxy vhosts
+# need proxy + proxy_http. Derived from what is actually configured, so a plain
+# static web server does not load them.
+__apache_proxy_modules: >-
+  {{
+    (
+      (['proxy', 'proxy_fcgi'] if apache_php_fpm_enabled | default(false) | bool else [])
+      + (['proxy', 'proxy_http'] if apache_reverse_proxies | default([]) | length > 0 else [])
+    ) | unique
+  }}
+
+# Everything requested: base set, feature modules, proxy modules and the
+# user's additions.
+__apache_modules_requested: >-
+  {{
+    (__apache_modules_base + __apache_modules_features + __apache_proxy_modules
+     + apache_modules_enabled + apache_optional_modules) | unique
+  }}
+
+# Modules other modules cannot work without. Debian declares these in
+# mods-available/*.load and a2enmod follows them; RedHat and Arch load
+# exactly what httpd.conf lists, so the role adds them itself.
+__apache_module_requires:
+  auth_basic: ['authn_core']
+  auth_digest: ['authn_core']
+  authn_anon: ['authn_core']
+  authn_dbm: ['authn_core']
+  authn_file: ['authn_core']
+  proxy_fcgi: ['proxy']
+  proxy_http: ['proxy']
+  proxy_wstunnel: ['proxy']
+  ssl: ['socache_shmcb']
+
+# The complete set of modules to load, minus apache_modules_disabled. The MPM
+# is handled separately (apache_mpm_module).
+__apache_modules: >-
+  {{
+    (__apache_modules_requested
+     + (__apache_module_requires | dict2items
+        | selectattr('key', 'in', __apache_modules_requested)
+        | map(attribute='value') | flatten))
+    | unique
+    | reject('in', apache_modules_disabled + __apache_modules_static | default([]))
+    | list
+  }}
+
+# Files other than vhosts that the role writes into the vhost directory;
+# exclusive vhost pruning must leave them alone.
+__apache_vhosts_dir_role_files: >-
+  {{
+    ['autoindex.conf']
+    if (ansible_facts['os_family'] == 'RedHat' and 'autoindex' not in __apache_modules)
+    else []
+  }}
+
+# PHP-FPM handler address for the server-wide block. Same rule as in
+# vhost_ssl.conf.j2: the placeholder URL belongs to a Unix socket only.
+__apache_php_fpm_handler: >-
+  {{
+    apache_php_fpm_socket ~ '|fcgi://localhost'
+    if (apache_php_fpm_socket.startswith('unix:') and '|' not in apache_php_fpm_socket)
+    else apache_php_fpm_socket
+  }}
+
+# MPM module paths (shared between Arch and RedHat)
+__apache_mpm_prefork_module: 'modules/mod_mpm_prefork.so'
+__apache_mpm_worker_module: 'modules/mod_mpm_worker.so'
+__apache_mpm_event_module: 'modules/mod_mpm_event.so'

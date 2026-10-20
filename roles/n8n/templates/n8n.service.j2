@@ -1,0 +1,69 @@
+{{ ansible_managed | comment }}
+
+[Unit]
+Description=n8n - Workflow Automation Tool
+Documentation=https://docs.n8n.io
+After=network-online.target
+Wants=network-online.target
+{% if n8n_db_type == 'postgresdb' %}
+Requires=postgresql.service
+After=postgresql.service
+{% endif %}
+
+[Service]
+Type=simple
+User={{ n8n_user }}
+Group={{ n8n_group }}
+
+# Rootless podman keeps its runtime state in XDG_RUNTIME_DIR; systemd
+# creates the directory and keeps it across restarts
+RuntimeDirectory={{ __n8n_runtime_dir | basename }}
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+Environment="XDG_RUNTIME_DIR={{ __n8n_runtime_dir }}"
+
+# Remove any existing container before starting
+ExecStartPre=-/usr/bin/podman rm -f {{ n8n_podman_container_name }}
+
+# The image runs n8n as its user "node" (UID 1000); keep-id maps the n8n
+# user onto it so the data directory on the host stays owned by n8n.
+# n8n needs no capabilities and no privilege escalation.
+ExecStart=/usr/bin/podman run \
+  --name={{ n8n_podman_container_name }} \
+  --rm \
+  --replace \
+  --log-driver=passthrough \
+  --userns=keep-id:uid=1000,gid=1000 \
+  --network={{ n8n_podman_network }} \
+  --env-file={{ n8n_env_file }} \
+  --cap-drop=all \
+  --security-opt=no-new-privileges \
+{% if n8n_podman_memory | length > 0 %}
+  --memory={{ n8n_podman_memory }} \
+{% endif %}
+{% if n8n_podman_cpus | length > 0 %}
+  --cpus={{ n8n_podman_cpus }} \
+{% endif %}
+{% for arg in n8n_podman_extra_args %}
+  {{ arg }} \
+{% endfor %}
+  --volume={{ n8n_data_dir }}:/home/node/.n8n:Z \
+  --volume=/var/log/n8n:/var/log/n8n:Z \
+  {{ n8n_podman_image }}:{{ n8n_version }}
+
+ExecStop=/usr/bin/podman stop -t 30 {{ n8n_podman_container_name }}
+
+# Resource limits
+LimitNOFILE={{ n8n_systemd_limit_nofile }}
+
+# Restart behavior
+Restart={{ n8n_systemd_restart }}
+RestartSec={{ n8n_systemd_restart_sec }}
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=n8n
+
+[Install]
+WantedBy=multi-user.target

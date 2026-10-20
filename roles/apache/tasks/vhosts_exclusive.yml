@@ -1,0 +1,80 @@
+---
+# Prune vhost configs this role deployed earlier that are no longer listed in
+# apache_vhosts, apache_vhosts_ssl or apache_reverse_proxies. Only files whose
+# content starts with the rendered ansible_managed header are candidates —
+# distro-provided or hand-written configs never match and are left untouched.
+# If the ansible_managed text changes between runs, configs deployed with the
+# old text no longer match and survive (fail-safe: nothing removed by mistake).
+
+# SSL vhosts count as managed even while their certificate is still pending —
+# the config file may not exist yet, but the vhost is not orphaned.
+# Non-vhost files the role itself keeps in the vhost directory (the
+# neutralized autoindex.conf on RedHat) are never orphans either.
+- name: Vhosts Exclusive | Build list of managed vhost config file names
+  ansible.builtin.set_fact:
+    __apache_vhosts_managed_files: >-
+      {% set result = [] -%}
+      {% for vhost in apache_vhosts -%}
+        {% set prefix = '00-' if vhost.default_vhost | default(false) | bool else '' -%}
+        {% set _ = result.append(prefix ~ vhost.server_name ~ '.conf') -%}
+      {%- endfor -%}
+      {% for vhost in apache_vhosts_ssl -%}
+        {% set prefix = '00-' if vhost.default_vhost | default(false) | bool else '' -%}
+        {% set _ = result.append(prefix ~ vhost.server_name ~ '-ssl.conf') -%}
+      {%- endfor -%}
+      {% for vhost in apache_reverse_proxies -%}
+        {% set prefix = '00-' if vhost.default_vhost | default(false) | bool else '' -%}
+        {% set _ = result.append(prefix ~ 'proxy-' ~ vhost.server_name ~ '.conf') -%}
+      {%- endfor -%}
+      {{ result + apache_vhosts_keep + __apache_vhosts_dir_role_files }}
+
+- name: Vhosts Exclusive | Find vhost config files
+  ansible.builtin.find:
+    paths: '{{ __apache_vhosts_dir }}'
+    patterns: '*.conf'
+    file_type: file
+  register: __apache_vhosts_found
+
+- name: Vhosts Exclusive | Identify unmanaged vhost config files
+  ansible.builtin.set_fact:
+    __apache_vhosts_unmanaged: >-
+      {{ __apache_vhosts_found.files | map(attribute='path') | map('basename')
+         | reject('in', __apache_vhosts_managed_files) | sort }}
+
+- name: Vhosts Exclusive | Read unmanaged vhost config headers
+  ansible.builtin.slurp:
+    src: '{{ __apache_vhosts_dir }}/{{ item }}'
+  loop: '{{ __apache_vhosts_unmanaged }}'
+  register: __apache_vhosts_unmanaged_content
+
+- name: Vhosts Exclusive | Identify orphaned role-managed vhost configs
+  ansible.builtin.set_fact:
+    __apache_vhosts_orphaned: >-
+      {% set marker = ansible_managed | default('Ansible managed') | comment | trim -%}
+      {% set result = [] -%}
+      {% for entry in __apache_vhosts_unmanaged_content.results | default([]) -%}
+        {% if (entry.content | b64decode).startswith(marker) -%}
+          {% set _ = result.append(entry.item) -%}
+        {%- endif %}
+      {%- endfor -%}
+      {{ result }}
+
+- name: Vhosts Exclusive | Report orphaned vhost configs to remove
+  ansible.builtin.debug:
+    msg: "Removing orphaned vhost config '{{ item }}' (exclusive mode)."
+  loop: '{{ __apache_vhosts_orphaned }}'
+
+- name: Vhosts Exclusive | Disable orphaned vhosts (Debian)
+  ansible.builtin.command:
+    cmd: '{{ __apache_dissite_command }} {{ item }}'
+    removes: '{{ __apache_vhosts_enabled_dir }}/{{ item }}'
+  loop: '{{ __apache_vhosts_orphaned }}'
+  when: ansible_facts['os_family'] == 'Debian'
+  notify: Reload Apache
+
+- name: Vhosts Exclusive | Remove orphaned vhost configs
+  ansible.builtin.file:
+    path: '{{ __apache_vhosts_dir }}/{{ item }}'
+    state: absent
+  loop: '{{ __apache_vhosts_orphaned }}'
+  notify: Reload Apache

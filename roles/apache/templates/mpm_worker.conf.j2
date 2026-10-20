@@ -1,0 +1,40 @@
+{{ ansible_managed | comment }}
+# The Worker MPM implements a hybrid multi-process multi-threaded server.
+# Each process can spawn multiple threads which handle requests. This allows
+# Apache to serve a large number of requests with fewer system resources than
+# a process-based server (prefork).
+
+<IfModule mpm_worker_module>
+    # StartServers: Initial number of server processes to start
+    # Recommendation: 2-4 for low traffic, 3-5 for medium, 5-10 for high traffic
+    StartServers             {{ apache_mpm_start_servers }}
+
+    # MinSpareThreads: Minimum number of idle threads available to handle request spikes
+    # The server will create more processes if needed to maintain this minimum
+    MinSpareThreads          {{ apache_mpm_min_spare_threads }}
+
+    # MaxSpareThreads: Maximum number of idle threads
+    # The server will kill processes if the number of idle threads exceeds this value
+    MaxSpareThreads          {{ apache_mpm_max_spare_threads }}
+
+    # ThreadLimit: Upper limit on the configurable number of threads per child process
+    # Must be set high enough to accommodate ThreadsPerChild
+    # Can only be changed by stopping and starting Apache
+    ThreadLimit              {{ apache_mpm_thread_limit }}
+
+    # ThreadsPerChild: Constant number of worker threads in each server process
+    # Recommendation: 25-50 for most sites, increase for high-traffic sites
+    ThreadsPerChild          {{ apache_mpm_threads_per_child }}
+
+    # MaxRequestWorkers: Maximum number of threads (workers) available to serve requests
+    # Calculated as: ServerLimit x ThreadsPerChild
+    # This is the maximum number of simultaneous connections Apache can handle
+    # Recommendation: 150-400 for medium sites, 400-1000+ for high-traffic sites
+    MaxRequestWorkers        {{ apache_mpm_max_request_workers }}
+
+    # MaxConnectionsPerChild: Maximum number of connections a server process will handle
+    # before being gracefully restarted (helps prevent memory leaks)
+    # Set to 0 for unlimited (not recommended in production)
+    # Recommendation: 1000-10000 connections
+    MaxConnectionsPerChild   {{ apache_mpm_max_connections_per_child }}
+</IfModule>

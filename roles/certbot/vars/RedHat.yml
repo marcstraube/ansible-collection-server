@@ -1,0 +1,28 @@
+---
+# RedHat/Fedora/Rocky-specific variables for Certbot
+
+__certbot_packages:
+  - 'certbot'
+
+__certbot_plugin_packages:
+  nginx: 'python3-certbot-nginx'
+  apache: 'python3-certbot-apache'
+  dns-cloudflare: 'python3-certbot-dns-cloudflare'
+  dns-route53: 'python3-certbot-dns-route53'
+  dns-google: 'python3-certbot-dns-google'
+  dns-digitalocean: 'python3-certbot-dns-digitalocean'
+  dns-linode: 'python3-certbot-dns-linode'
+  dns-ovh: 'python3-certbot-dns-ovh'
+  dns-rfc2136: 'python3-certbot-dns-rfc2136'
+
+__certbot_config_dir: '/etc/letsencrypt'
+__certbot_work_dir: '/var/lib/letsencrypt'
+__certbot_log_dir: '/var/log/letsencrypt'
+
+__certbot_timer_name: 'certbot-renew.timer'
+__certbot_service_name: 'certbot-renew.service'
+
+# Apache service reloaded by the renewal deploy hook (certbot_apache_enabled)
+__certbot_apache_service_name: 'httpd'
+
+__certbot_cron_file: '/etc/cron.d/certbot'

@@ -1,0 +1,185 @@
+---
+- name: Converge
+  hosts: all
+  gather_facts: true
+
+  vars: &converge_vars
+    apache_enabled: true
+    apache_service_enabled: true
+    apache_mpm_module: 'event'
+    apache_http2_enabled: false
+    apache_server_name: 'testsite.local'
+    apache_server_admin: 'admin@testsite.local'
+    apache_listen_ports:
+      - 80
+    apache_ssl_enabled: true
+    apache_server_tokens: 'Prod'
+    apache_server_signature: 'Off'
+    apache_trace_enable: 'Off'
+    apache_timeout: 60
+    apache_keep_alive: 'On'
+    apache_keep_alive_timeout: 5
+    apache_remove_default_vhost: true
+    # Feature modules (ssl, headers, deflate, expires, alias, rewrite, proxy)
+    # are derived; only what an application would add is listed here.
+    apache_modules_enabled:
+      - 'auth_basic'
+    apache_acme_challenge_enabled: true
+    apache_vhosts:
+      # default_vhost deploys this as 00-testsite.local.conf, so the functional
+      # HTTP test against 127.0.0.1 without a Host header lands here explicitly
+      # instead of relying on alphabetical file order.
+      - server_name: 'testsite.local'
+        server_alias:
+          - 'www.testsite.local'
+        document_root: '/var/www/testsite'
+        listen_port: 80
+        default_vhost: true
+        custom_config: |
+          <Directory "/var/www/testsite">
+            Options -Indexes +FollowSymLinks
+            AllowOverride None
+            Require all granted
+          </Directory>
+      # Only exercises ACME redirect-exclusion rendering; testsite.local is the
+      # explicit default vhost via default_vhost above.
+      - server_name: 'zz-redirect-test.local'
+        listen_port: 80
+        redirect_to_https: true
+    # Two SSL vhosts exercise the conditional deploy: 'present' has a certificate
+    # (deployed), 'pending' does not (skipped until certbot issues it).
+    apache_vhosts_ssl:
+      - server_name: 'present.example.local'
+        certificate_file: '/etc/ssl/test/present.crt'
+        certificate_key_file: '/etc/ssl/test/present.key'
+        certificate_chain_file: ''
+      - server_name: 'pending.example.local'
+        certificate_file: '/etc/ssl/test/missing.crt'
+        certificate_key_file: '/etc/ssl/test/missing.key'
+        certificate_chain_file: ''
+      # Exercises the PHP-FPM handler end to end; verify.yml requests a script
+      # from this vhost and asserts the response is output, not source.
+      - server_name: 'php.example.local'
+        document_root: '/var/www/php-test'
+        certificate_file: '/etc/ssl/test/present.crt'
+        certificate_key_file: '/etc/ssl/test/present.key'
+        certificate_chain_file: ''
+    # Exclusive mode prunes the 'zz-orphan' fixture planted in prepare.yml;
+    # the 'zz-foreign' (no managed header) and 'zz-keep' (keep-listed)
+    # fixtures must survive.
+    apache_vhosts_exclusive: true
+    apache_vhosts_keep:
+      - 'zz-keep.example.local.conf'
+
+  pre_tasks:
+    # Socket path differs per distribution and PHP version, so it is discovered
+    # rather than hardcoded. Deliberately passed WITHOUT the |fcgi://localhost
+    # suffix, so the role has to add the protocol itself.
+    - name: Converge | Find the PHP-FPM socket
+      ansible.builtin.find:
+        paths: /run
+        patterns: '*.sock'
+        file_type: any
+        recurse: true
+      register: __converge_fpm_socket
+
+    - name: Converge | Assert exactly one FPM socket was found
+      ansible.builtin.assert:
+        that:
+          - __converge_fpm_paths | length == 1
+        fail_msg: >-
+          Expected one php-fpm socket, found {{ __converge_fpm_paths | length }}:
+          {{ __converge_fpm_paths }}
+      vars:
+        __converge_fpm_paths: >-
+          {{
+            __converge_fpm_socket.files | rejectattr('islnk') | map(attribute='path')
+            | select('search', 'fpm') | list
+          }}
+
+    - name: Converge | Enable PHP-FPM for the vhosts
+      ansible.builtin.set_fact:
+        apache_php_fpm_enabled: true
+        apache_php_fpm_socket: >-
+          unix:{{
+            __converge_fpm_socket.files | rejectattr('islnk') | map(attribute='path')
+            | select('search', 'fpm') | list | first
+          }}
+
+  tasks:
+    - name: Converge | Include apache role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+
+# Handler behaviour, exercised once (a marker file keeps the idempotence run
+# clean): a configuration change must reload Apache gracefully, keeping the
+# main PID; an MPM change must restart it. verify.yml asserts on the PIDs.
+- name: Converge | Reload versus restart
+  hosts: all
+  gather_facts: true
+  vars:
+    <<: *converge_vars
+    __converge_apache_service: "{{ 'apache2' if ansible_facts['os_family'] == 'Debian' else 'httpd' }}"
+
+  tasks:
+    - name: Converge | Check whether the handler test already ran
+      ansible.builtin.stat:
+        path: /root/apache-handler-test.json
+      register: __converge_handler_marker
+
+    - name: Converge | Skip the handler test on later runs
+      ansible.builtin.meta: end_host
+      when: __converge_handler_marker.stat.exists
+
+    - name: Converge | Read the Apache main PID before the change
+      ansible.builtin.systemd_service:
+        name: '{{ __converge_apache_service }}'
+      register: __converge_pid_before
+
+    - name: Converge | Change httpd.conf without touching the MPM  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        apache_timeout: 61
+
+    - name: Converge | Run handlers for the configuration change
+      ansible.builtin.meta: flush_handlers
+
+    - name: Converge | Read the Apache main PID after the reload
+      ansible.builtin.systemd_service:
+        name: '{{ __converge_apache_service }}'
+      register: __converge_pid_reload
+
+    - name: Converge | Switch the MPM  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        apache_mpm_module: 'worker'
+
+    - name: Converge | Run handlers for the MPM change
+      ansible.builtin.meta: flush_handlers
+
+    - name: Converge | Read the Apache main PID after the restart
+      ansible.builtin.systemd_service:
+        name: '{{ __converge_apache_service }}'
+      register: __converge_pid_restart
+
+    - name: Converge | Restore the converged configuration  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+
+    - name: Converge | Run handlers for the restore
+      ansible.builtin.meta: flush_handlers
+
+    - name: Converge | Record the PIDs for verify.yml
+      ansible.builtin.copy:
+        content: "{{ __converge_pids | to_json }}\n"
+        dest: /root/apache-handler-test.json
+        owner: root
+        group: root
+        mode: '0600'
+      vars:
+        __converge_pids:
+          before: '{{ __converge_pid_before.status.MainPID }}'
+          reload: '{{ __converge_pid_reload.status.MainPID }}'
+          restart: '{{ __converge_pid_restart.status.MainPID }}'

@@ -1,0 +1,160 @@
+---
+# A vhost with default_vhost: true deploys as 00-<name>.conf so it sorts (and
+# loads) first and becomes Apache's catch-all for unmatched Host headers.
+- name: Vhosts | Assert at most one default vhost per list
+  ansible.builtin.assert:
+    that:
+      - apache_vhosts | selectattr('default_vhost', 'defined')
+        | selectattr('default_vhost') | list | length <= 1
+      - apache_vhosts_ssl | selectattr('default_vhost', 'defined')
+        | selectattr('default_vhost') | list | length <= 1
+      - apache_reverse_proxies | selectattr('default_vhost', 'defined')
+        | selectattr('default_vhost') | list | length <= 1
+    fail_msg: 'Only one vhost per list may set default_vhost: true.'
+    success_msg: 'Default vhost configuration is valid.'
+
+- name: Vhosts | Create document root directories
+  ansible.builtin.file:
+    path: '{{ item.document_root }}'
+    state: directory
+    owner: '{{ item.owner | default(__apache_user) }}'
+    group: '{{ item.group | default(__apache_group) }}'
+    mode: '{{ item.mode | default("0755") }}'
+  loop: "{{ apache_vhosts + apache_vhosts_ssl }}"
+  loop_control:
+    label: '{{ item.server_name }}'
+  when:
+    - item.document_root is defined
+    - item.create_document_root | default(false) | bool
+
+- name: Vhosts | Create ACME challenge webroot
+  ansible.builtin.file:
+    path: '{{ apache_acme_webroot }}/.well-known/acme-challenge'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: apache_acme_challenge_enabled | bool
+
+- name: Vhosts | Deploy HTTP virtual hosts
+  ansible.builtin.template:
+    src: 'vhost.conf.j2'
+    dest: '{{ __apache_vhosts_dir }}/{{ __apache_vhost_prefix }}{{ item.server_name }}.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  vars:
+    __apache_vhost_prefix: "{{ '00-' if item.default_vhost | default(false) | bool else '' }}"
+  loop: "{{ apache_vhosts }}"
+  loop_control:
+    label: '{{ item.server_name }}'
+  when: apache_vhosts | length > 0
+  notify: Reload Apache
+
+- name: Vhosts | Check SSL certificate presence
+  ansible.builtin.stat:
+    path: '{{ item.certificate_file }}'
+  loop: "{{ apache_vhosts_ssl }}"
+  loop_control:
+    label: '{{ item.server_name }}'
+  register: __apache_ssl_cert_stat
+
+- name: Vhosts | Build list of SSL vhosts with an existing certificate
+  ansible.builtin.set_fact:
+    __apache_ssl_vhosts_ready: >-
+      {{ __apache_ssl_cert_stat.results | default([])
+         | selectattr('stat.exists', 'defined')
+         | selectattr('stat.exists')
+         | map(attribute='item') | list }}
+
+- name: Vhosts | Report SSL vhosts pending certificate issuance
+  ansible.builtin.debug:
+    msg: >-
+      SSL vhost '{{ item.item.server_name }}' skipped: certificate
+      '{{ item.item.certificate_file }}' does not exist yet.
+  loop: "{{ __apache_ssl_cert_stat.results | default([]) }}"
+  loop_control:
+    label: '{{ item.item.server_name }}'
+  when: not (item.stat.exists | default(false))
+
+- name: Vhosts | Deploy HTTPS virtual hosts
+  ansible.builtin.template:
+    src: 'vhost_ssl.conf.j2'
+    dest: '{{ __apache_vhosts_dir }}/{{ __apache_vhost_prefix }}{{ item.server_name }}-ssl.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  vars:
+    __apache_vhost_prefix: "{{ '00-' if item.default_vhost | default(false) | bool else '' }}"
+  loop: "{{ __apache_ssl_vhosts_ready }}"
+  loop_control:
+    label: '{{ item.server_name }}'
+  notify: Reload Apache
+
+- name: Vhosts | Enable HTTP virtual hosts (Debian)
+  ansible.builtin.command:
+    cmd: '{{ __apache_ensite_command }} {{ __apache_vhost_prefix }}{{ item.server_name }}.conf'
+    creates: '{{ __apache_vhosts_enabled_dir }}/{{ __apache_vhost_prefix }}{{ item.server_name }}.conf'
+  vars:
+    __apache_vhost_prefix: "{{ '00-' if item.default_vhost | default(false) | bool else '' }}"
+  loop: "{{ apache_vhosts }}"
+  loop_control:
+    label: '{{ item.server_name }}'
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - apache_vhosts | length > 0
+  notify: Reload Apache
+
+- name: Vhosts | Enable HTTPS virtual hosts (Debian)
+  ansible.builtin.command:
+    cmd: '{{ __apache_ensite_command }} {{ __apache_vhost_prefix }}{{ item.server_name }}-ssl.conf'
+    creates: '{{ __apache_vhosts_enabled_dir }}/{{ __apache_vhost_prefix }}{{ item.server_name }}-ssl.conf'
+  vars:
+    __apache_vhost_prefix: "{{ '00-' if item.default_vhost | default(false) | bool else '' }}"
+  loop: "{{ __apache_ssl_vhosts_ready }}"
+  loop_control:
+    label: '{{ item.server_name }}'
+  when: ansible_facts['os_family'] == 'Debian'
+  notify: Reload Apache
+
+- name: Vhosts | Deploy reverse proxy virtual hosts
+  ansible.builtin.template:
+    src: 'reverse_proxy.conf.j2'
+    dest: '{{ __apache_vhosts_dir }}/{{ __apache_vhost_prefix }}proxy-{{ item.server_name }}.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  vars:
+    __apache_vhost_prefix: "{{ '00-' if item.default_vhost | default(false) | bool else '' }}"
+  loop: "{{ apache_reverse_proxies }}"
+  loop_control:
+    label: '{{ item.server_name }}'
+  when: apache_reverse_proxies | length > 0
+  notify: Reload Apache
+
+- name: Vhosts | Enable reverse proxy virtual hosts (Debian)
+  ansible.builtin.command:
+    cmd: '{{ __apache_ensite_command }} {{ __apache_vhost_prefix }}proxy-{{ item.server_name }}.conf'
+    creates: '{{ __apache_vhosts_enabled_dir }}/{{ __apache_vhost_prefix }}proxy-{{ item.server_name }}.conf'
+  vars:
+    __apache_vhost_prefix: "{{ '00-' if item.default_vhost | default(false) | bool else '' }}"
+  loop: "{{ apache_reverse_proxies }}"
+  loop_control:
+    label: '{{ item.server_name }}'
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - apache_reverse_proxies | length > 0
+  notify: Reload Apache
+
+- name: Vhosts | Validate Apache configuration
+  ansible.builtin.command:
+    cmd: 'apachectl configtest'
+  changed_when: false
+  failed_when: false
+  register: __apache_vhost_configtest
+
+- name: Vhosts | Display configuration test result
+  ansible.builtin.debug:
+    msg: '{{ __apache_vhost_configtest.stderr_lines }}'
+  when: __apache_vhost_configtest.rc != 0
+  failed_when: __apache_vhost_configtest.rc != 0

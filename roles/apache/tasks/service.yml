@@ -1,0 +1,7 @@
+---
+- name: Service | Manage Apache service
+  ansible.builtin.systemd_service:
+    name: '{{ __apache_service_name }}'
+    enabled: "{{ apache_service_enabled | bool }}"
+    state: "{{ apache_service_enabled | bool | ternary('started', 'stopped') }}"
+    daemon_reload: true

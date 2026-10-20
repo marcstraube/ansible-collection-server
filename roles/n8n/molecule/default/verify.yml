@@ -1,0 +1,131 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: false
+
+  vars:
+    # Deprecations n8n reports at startup that the role does not resolve yet
+    __verify_accepted_deprecations: []
+
+  tasks:
+    - name: Verify | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Verify | Load role defaults
+      ansible.builtin.include_vars:
+        file: '../../defaults/main.yml'
+        name: __verify_defaults
+
+    - name: Verify | Assert n8n user exists
+      ansible.builtin.user:
+        name: n8n
+      register: __verify_n8n_user
+      check_mode: true
+      failed_when: __verify_n8n_user.changed
+
+    - name: Verify | Assert the subordinate ID range exists
+      ansible.builtin.lineinfile:
+        path: '{{ item }}'
+        regexp: '^n8n:'
+        state: absent
+      check_mode: true
+      register: __verify_subid
+      failed_when: not __verify_subid.changed
+      loop:
+        - /etc/subuid
+        - /etc/subgid
+
+    - name: Verify | Assert environment file exists
+      ansible.builtin.stat:
+        path: /etc/n8n/n8n.env
+      register: __verify_env_file
+      failed_when: not __verify_env_file.stat.exists
+
+    - name: Verify | Assert systemd service file exists
+      ansible.builtin.stat:
+        path: '/etc/systemd/system/{{ __n8n_service_name }}'
+      register: __verify_service_file
+      failed_when: not __verify_service_file.stat.exists
+
+    - name: Verify | Assert the services are running
+      ansible.builtin.systemd_service:
+        name: '{{ item }}'
+      register: __verify_service_status
+      failed_when: __verify_service_status.status.ActiveState != 'active'
+      loop:
+        - '{{ __n8n_service_name }}'
+        - '{{ __n8n_runner_service_name }}'
+
+    - name: Verify | Read the running containers
+      ansible.builtin.command:
+        cmd: podman ps --filter name=^{{ item }}$ --format '{{ "{{" }}.Image{{ "}}" }}'
+      become: true
+      become_user: n8n
+      environment:
+        XDG_RUNTIME_DIR: '{{ __n8n_runtime_dir }}'
+      register: __verify_containers
+      changed_when: false
+      loop:
+        - n8n
+        - n8n-runner
+
+    - name: Verify | Assert the pinned images are running
+      ansible.builtin.assert:
+        that:
+          - __verify_running[0] == __verify_defaults.n8n_podman_image ~ ':' ~ __verify_version
+          - __verify_running[1] == __verify_defaults.n8n_runners_podman_image ~ ':' ~ __verify_version ~ __verify_suffix
+        fail_msg: 'Running: {{ __verify_running }}'
+      vars:
+        __verify_running: "{{ __verify_containers.results | map(attribute='stdout') | map('trim') | list }}"
+        __verify_version: '{{ __verify_defaults.n8n_version }}'
+        __verify_suffix: '{{ __verify_defaults.n8n_runners_podman_image_tag_suffix }}'
+
+    - name: Verify | Assert the task runner launcher is healthy
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1:5680/healthz'
+        status_code: 200
+
+    - name: Verify | Assert n8n reports ready
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1:5678/healthz/readiness'
+        status_code: 200
+
+    # n8n writes its instance settings on first start; the keep-id mapping
+    # keeps the files owned by the n8n user on the host.
+    - name: Verify | Stat the n8n settings file
+      ansible.builtin.stat:
+        path: /var/lib/n8n/.n8n/config
+      register: __verify_config
+
+    - name: Verify | Assert the data directory stays owned by n8n
+      ansible.builtin.assert:
+        that:
+          - __verify_config.stat.exists
+          - __verify_config.stat.pw_name == 'n8n'
+        fail_msg: >-
+          exists={{ __verify_config.stat.exists }}
+          owner={{ __verify_config.stat.pw_name | default('n/a') }}
+          uid={{ __verify_config.stat.uid | default('n/a') }}
+
+    # n8n lists deprecations as " - <item> -> <action>" lines at startup.
+    # Every line that is not accepted above has to be resolved by the role.
+    - name: Verify | Read the n8n journal
+      ansible.builtin.command:
+        cmd: 'journalctl -u {{ __n8n_service_name }} -u {{ __n8n_runner_service_name }} --no-pager -o cat'
+      register: __verify_journal
+      changed_when: false
+
+    - name: Verify | Collect the reported deprecations
+      ansible.builtin.set_fact:
+        __verify_deprecations: >-
+          {{ __verify_journal.stdout_lines
+             | select('match', '^ - ')
+             | reject('match', '^(' ~ (__verify_accepted_deprecations | map('regex_escape') | join('|')) ~ ')')
+             | list }}
+
+    - name: Verify | Assert no unresolved deprecation is reported
+      ansible.builtin.assert:
+        that:
+          - __verify_deprecations | length == 0
+        fail_msg: '{{ __verify_deprecations }}'

@@ -1,0 +1,42 @@
+---
+- name: Converge
+  hosts: all
+  gather_facts: true
+
+  vars:
+    n8n_enabled: true
+    n8n_host: '127.0.0.1'
+    n8n_port: 5678
+    n8n_db_type: 'sqlite'
+    n8n_encryption_key: 'test-encryption-key-do-not-use-in-production'
+    n8n_runners_auth_token: 'test-runner-token-do-not-use-in-production'
+    n8n_basic_auth_enabled: true
+    n8n_basic_auth_user: 'admin'
+    n8n_basic_auth_password: 'test-password'
+    n8n_webhook_url: ''
+    n8n_firewalld_enabled: false
+    # The molecule instance is a rootless container itself and maps 65536
+    # IDs, so the subordinate range of the n8n user has to fit below that.
+    n8n_subid_start: 10000
+    n8n_subid_count: 50000
+    podman_compose_enabled: false
+    podman_docker_enabled: false
+    podman_docker_alias_enabled: false
+    podman_docker_socket_symlink_enabled: false
+    podman_tools: []
+    # The distroless runner image owns /home/nonroot by UID 65532, which the
+    # reduced subordinate range cannot map; keep such files as root instead
+    # of failing the pull.
+    podman_storage_options:
+      overlay:
+        mountopt: 'nodev,metacopy=on'
+        ignore_chown_errors: 'true'
+
+  tasks:
+    - name: Converge | Include podman role
+      ansible.builtin.include_role:
+        name: marcstraube.common.podman
+
+    - name: Converge | Include n8n role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'

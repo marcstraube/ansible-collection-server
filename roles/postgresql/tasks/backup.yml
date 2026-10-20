@@ -1,0 +1,28 @@
+---
+- name: Backup | Create backup directory
+  ansible.builtin.file:
+    path: '{{ postgresql_backup_dir }}'
+    state: directory
+    owner: '{{ __postgresql_user }}'
+    group: '{{ __postgresql_group }}'
+    mode: '0700'
+
+- name: Backup | Deploy backup script
+  ansible.builtin.template:
+    src: backup.sh.j2
+    dest: /usr/local/bin/postgresql-backup.sh
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Backup | Configure backup cron job
+  ansible.builtin.cron:
+    name: PostgreSQL backup
+    minute: '{{ postgresql_backup_schedule.split()[0] }}'
+    hour: '{{ postgresql_backup_schedule.split()[1] }}'
+    day: '{{ postgresql_backup_schedule.split()[2] }}'
+    month: '{{ postgresql_backup_schedule.split()[3] }}'
+    weekday: '{{ postgresql_backup_schedule.split()[4] }}'
+    job: /usr/local/bin/postgresql-backup.sh
+    user: '{{ __postgresql_user }}'
+    state: present

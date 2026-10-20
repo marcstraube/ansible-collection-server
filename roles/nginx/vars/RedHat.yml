@@ -1,0 +1,14 @@
+---
+__nginx_module_packages:
+  http_geoip: 'nginx-mod-http-geoip'
+  http_image_filter: 'nginx-mod-http-image-filter'
+  http_perl: 'nginx-mod-http-perl'
+  http_xslt_filter: 'nginx-mod-http-xslt-filter'
+  stream: 'nginx-mod-stream'
+  mail: 'nginx-mod-mail'
+
+__nginx_run_dir: '/run'
+__nginx_user: 'nginx'
+__nginx_group: 'nginx'
+__nginx_default_root: '/usr/share/nginx/html'
+__nginx_htpasswd_package: 'httpd-tools'

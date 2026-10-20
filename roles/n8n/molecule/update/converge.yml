@@ -1,0 +1,14 @@
+---
+# Updates the release installed by prepare.yml to the role default.
+- name: Converge
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Converge | Include podman role
+      ansible.builtin.include_role:
+        name: marcstraube.common.podman
+
+    - name: Converge | Include n8n role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
