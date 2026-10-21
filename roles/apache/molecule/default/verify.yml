@@ -367,7 +367,7 @@
         __apache_pids: "{{ __apache_handler_test.content | b64decode | from_json }}"
 
     #
-    # Open File Limit (apache_limit_nofile: 65536 in the converge)
+    # Open File Limit (apache_limit_nofile: 40000 in the converge)
     #
 
     - name: Verify | Read the Apache main PID
@@ -384,16 +384,16 @@
     - name: Verify | Assert the drop-in limit applies and its removal restores the default
       ansible.builtin.assert:
         that:
-          - __apache_nofile.stdout.split()[3] == '65536'
-          - __apache_nofile.stdout.split()[4] == '65536'
+          - __apache_nofile.stdout.split()[3] == '40000'
+          - __apache_nofile.stdout.split()[4] == '40000'
           - __apache_limit_test.dropin_removed | bool
-          - __apache_limit_test.nofile_without_dropin != '65536'
+          - __apache_limit_test.nofile_without_dropin != '40000'
         fail_msg: >-
-          Expected soft and hard limit 65536 on the main process
+          Expected soft and hard limit 40000 on the main process
           ('{{ __apache_nofile.stdout }}') and the default limit back after
           removing the drop-in (recorded: {{ __apache_limit_test }})
         success_msg: >-
-          Main process runs with 65536 open files; without the drop-in the soft
+          Main process runs with 40000 open files; without the drop-in the soft
           limit was {{ __apache_limit_test.nofile_without_dropin }}
       vars:
         __apache_limit_test: "{{ __apache_handler_test.content | b64decode | from_json }}"
