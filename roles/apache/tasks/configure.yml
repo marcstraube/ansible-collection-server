@@ -29,6 +29,52 @@
     - __apache_mpm_loaded | length > 0
     - __apache_mpm_loaded != apache_mpm_module
 
+- name: Configure | Validate apache_mpm_server_limit
+  ansible.builtin.assert:
+    that:
+      - apache_mpm_server_limit | string is match('^[0-9]+$')
+      - >-
+        (apache_mpm_server_limit | int) * (apache_mpm_threads_per_child | int)
+        >= (apache_mpm_max_request_workers | int)
+    fail_msg: >-
+      apache_mpm_server_limit ({{ apache_mpm_server_limit }}) must be a number
+      that, multiplied by apache_mpm_threads_per_child
+      ({{ apache_mpm_threads_per_child }}), reaches at least
+      apache_mpm_max_request_workers ({{ apache_mpm_max_request_workers }}).
+    quiet: true
+  when:
+    - apache_mpm_module in ['event', 'worker']
+    - apache_mpm_server_limit | string | length > 0
+
+# ServerLimit is read only at startup; a graceful reload keeps the old value.
+# The value in the deployed main configuration is compared before the template
+# task overwrites it.
+- name: Configure | Read the deployed main configuration
+  ansible.builtin.slurp:
+    src: '{{ __apache_config_file }}'
+  register: __apache_config_deployed
+  failed_when: false
+  check_mode: false
+
+- name: Configure | Restart Apache for a ServerLimit change
+  ansible.builtin.debug:
+    msg: >-
+      ServerLimit changes from {{ __apache_server_limit_deployed or 'unset' }}
+      to {{ __apache_server_limit_wanted or 'unset' }}; Apache restarts instead
+      of reloading.
+  changed_when: true
+  notify: Restart Apache
+  vars:
+    __apache_server_limit_deployed: >-
+      {{ (__apache_config_deployed.content | default('') | b64decode
+          | regex_search('(?m)^\s*ServerLimit\s+(\d+)', '\1') or ['']) | first }}
+    __apache_server_limit_wanted: >-
+      {{ apache_mpm_server_limit | string
+         if apache_mpm_module in ['event', 'worker'] else '' }}
+  when:
+    - __apache_config_deployed.content is defined
+    - __apache_server_limit_deployed != __apache_server_limit_wanted
+
 - name: Configure | Remove default SSL config (RedHat)
   ansible.builtin.file:
     path: '{{ __apache_vhosts_dir }}/ssl.conf'

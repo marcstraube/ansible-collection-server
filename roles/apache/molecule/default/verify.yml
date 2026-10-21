@@ -63,7 +63,8 @@
           - "'ServerTokens Prod' in (__apache_config_content.content | b64decode)"
           - "'ServerSignature Off' in (__apache_config_content.content | b64decode)"
           - "'TraceEnable Off' in (__apache_config_content.content | b64decode)"
-        fail_msg: "Apache config missing expected security settings"
+          - (__apache_config_content.content | b64decode) is search('(?m)^\\s+ServerLimit\\s+20$')
+        fail_msg: "Apache config missing expected security settings or ServerLimit 20"
         success_msg: "Apache config contains expected security settings"
 
     #
@@ -354,7 +355,7 @@
         src: /root/apache-handler-test.json
       register: __apache_handler_test
 
-    - name: Verify | Assert reload keeps the main process and an MPM change restarts it
+    - name: Verify | Assert reload keeps the main process and MPM or ServerLimit changes restart it
       ansible.builtin.assert:
         that:
           - __apache_pids.before | int > 0
@@ -362,10 +363,11 @@
           - __apache_pids.restart != __apache_pids.reload
           - __apache_pids.reloads_reload | int > __apache_pids.reloads_before | int
           - __apache_pids.reloads_restart | int == __apache_pids.reloads_reload | int
+          - __apache_pids.server_limit != __apache_pids.unlimited
         fail_msg: >-
-          A configuration change must reload Apache (same main PID) and an MPM
-          change must restart it (new main PID) without a reload after the
-          restart. Recorded: {{ __apache_pids }}
+          A configuration change must reload Apache (same main PID); an MPM or
+          ServerLimit change must restart it (new main PID) without a reload
+          after the restart. Recorded: {{ __apache_pids }}
       vars:
         __apache_pids: "{{ __apache_handler_test.content | b64decode | from_json }}"
 
