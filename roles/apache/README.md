@@ -241,6 +241,24 @@ with the old text are no longer recognized and survive (fail-safe — remove the
 by hand or re-deploy first). List file names in `apache_vhosts_keep` to exempt
 unmanaged files explicitly.
 
+### Service Limits
+
+| Variable              | Default | Description                                                   |
+| --------------------- | ------- | ------------------------------------------------------------- |
+| `apache_limit_nofile` | `''`    | `LimitNOFILE` of the service; empty keeps the systemd default |
+
+Apache needs one file descriptor per log directive in a virtual host and one
+per distinct error log file ([File Descriptor Limits](https://httpd.apache.org/docs/2.4/vhosts/fd-limits.html)).
+With the systemd default soft limit of 1024 a host with many virtual hosts that
+log separately runs out: the configuration test passes, but the restart fails
+with `AH00019: Unable to open logs` and the service stops. Setting
+`apache_limit_nofile` (e.g. `65536`) deploys a systemd drop-in with
+`LimitNOFILE` and restarts Apache, since a reload keeps the running main
+process and its limit. Debian starts Apache through `apachectl`, which applies
+its own `ulimit -n` from `APACHE_ULIMIT_MAX_FILES` (8192 when unset); the role
+sets that line in `/etc/apache2/envvars` to the same value. Emptying the
+variable removes the drop-in and restores the commented distro line.
+
 ## Tags
 
 | Tag                | Scope                     |
