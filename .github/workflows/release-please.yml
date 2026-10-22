@@ -156,8 +156,11 @@ jobs:
   # conflict is resolved on that branch. A newer back-merge supersedes an
   # open one, since its branch contains everything the older one carries.
   #
-  # The branch and PR are created with the release bot token so that CI
-  # runs on them, and auto-merge lands the PR as a merge commit once the
+  # Branch and merge are created through the GitHub API with the release bot
+  # token: GitHub signs the merge commit for the app, which a local git
+  # merge on the runner cannot do. The job fails instead of opening a PR
+  # if the merge commit is not verified. The release bot token also makes
+  # CI run on the PR, and auto-merge lands it as a merge commit once the
   # CI Gate passes.
   back-merge:
     name: Merge main into develop
@@ -188,38 +191,50 @@ jobs:
             echo "needed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@v7
-        if: steps.changes.outputs.needed == 'true'
-        with:
-          token: ${{ steps.app-token.outputs.token }}
-          fetch-depth: 0
-
       - name: Open the back-merge PR and enable auto-merge
         if: steps.changes.outputs.needed == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
-          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           RELEASE_CREATED: ${{ needs.release-please.outputs.release_created }}
           VERSION: ${{ needs.release-please.outputs.version }}
         run: |
           set -euo pipefail
 
-          BOT_ID=$(gh api "users/${APP_SLUG}[bot]" --jq '.id')
-          git config user.name "${APP_SLUG}[bot]"
-          git config user.email "${BOT_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
-
           BRANCH="back-merge/${GITHUB_SHA::7}"
-          git switch -c "$BRANCH" "$GITHUB_SHA"
 
-          if git merge --no-ff --no-edit origin/develop; then
-            CONFLICT=false
+          # Cut the branch from main at this push; a re-run resets it.
+          if gh api "repos/${REPO}/git/ref/heads/${BRANCH}" > /dev/null 2>&1; then
+            gh api -X PATCH "repos/${REPO}/git/refs/heads/${BRANCH}" \
+              -f sha="$GITHUB_SHA" -F force=true > /dev/null
           else
-            git merge --abort
-            CONFLICT=true
+            gh api -X POST "repos/${REPO}/git/refs" \
+              -f ref="refs/heads/${BRANCH}" -f sha="$GITHUB_SHA" > /dev/null
           fi
-          # --force: a re-run of this job rebuilds the same branch.
-          git push --force origin "$BRANCH"
+
+          # Merge develop into the branch on GitHub's side. HTTP 409 is a
+          # merge conflict; HTTP 204 (empty response) means main already
+          # contains develop, as right after a release.
+          CONFLICT=false
+          if MERGE_RESPONSE=$(gh api -X POST "repos/${REPO}/merges" \
+              -f base="$BRANCH" -f head=develop \
+              -f commit_message="chore: merge develop into ${BRANCH}" \
+              2> merge-error.txt); then
+            MERGE_SHA=$(printf '%s' "$MERGE_RESPONSE" | jq -r '.sha // empty')
+            if [ -n "$MERGE_SHA" ]; then
+              VERIFIED=$(gh api "repos/${REPO}/commits/${MERGE_SHA}" \
+                --jq '.commit.verification.verified')
+              if [ "$VERIFIED" != "true" ]; then
+                echo "::error::Merge commit ${MERGE_SHA} is not verified; no back-merge PR opened."
+                exit 1
+              fi
+            fi
+          elif grep -q 'HTTP 409' merge-error.txt; then
+            CONFLICT=true
+          else
+            cat merge-error.txt >&2
+            exit 1
+          fi
 
           if [ "$RELEASE_CREATED" = "true" ]; then
             TITLE="chore: merge main into develop after v${VERSION}"
