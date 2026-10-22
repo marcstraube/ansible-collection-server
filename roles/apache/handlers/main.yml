@@ -9,14 +9,29 @@
   ansible.builtin.systemd_service:
     name: '{{ __apache_service_name }}'
     state: restarted
+  register: __apache_restart_result
   when: apache_service_enabled | bool
 
 # Also subscribes to the 'Reload cert services' topic of the certbot role and
 # marcstraube.common.pki, so a new or renewed certificate takes effect in the
 # same run.
+#
+# Skipped right after a restart in the same handler run: the restart already
+# loaded the new configuration, and a graceful reload issued before the new
+# main process is ready makes httpd start a second instance, which fails to
+# bind the listening ports.
 - name: Reload Apache
   ansible.builtin.systemd_service:
     name: '{{ __apache_service_name }}'
     state: reloaded
   listen: Reload cert services
-  when: apache_service_enabled | bool
+  when:
+    - apache_service_enabled | bool
+    - not (__apache_restart_result.changed | default(false))
+
+# Runs after 'Reload Apache' in every handler run that restarted Apache, so a
+# reload notified in a later handler run is not skipped.
+- name: Clear the Apache restart result
+  ansible.builtin.set_fact:
+    __apache_restart_result: {}
+  listen: Restart Apache

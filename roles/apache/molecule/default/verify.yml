@@ -360,9 +360,12 @@
           - __apache_pids.before | int > 0
           - __apache_pids.reload == __apache_pids.before
           - __apache_pids.restart != __apache_pids.reload
+          - __apache_pids.reloads_reload | int > __apache_pids.reloads_before | int
+          - __apache_pids.reloads_restart | int == __apache_pids.reloads_reload | int
         fail_msg: >-
           A configuration change must reload Apache (same main PID) and an MPM
-          change must restart it (new main PID). Recorded: {{ __apache_pids }}
+          change must restart it (new main PID) without a reload after the
+          restart. Recorded: {{ __apache_pids }}
       vars:
         __apache_pids: "{{ __apache_handler_test.content | b64decode | from_json }}"
 
