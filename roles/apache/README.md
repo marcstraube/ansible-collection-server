@@ -50,6 +50,35 @@ See [defaults/main.yml](defaults/main.yml) for all available variables.
 | `apache_ssl_enabled`      | `false`                   | Enable SSL/TLS                    |
 | `apache_http2_enabled`    | `false`                   | Enable HTTP/2                     |
 
+### MPM Tuning
+
+| Variable                               | Default | Description                    |
+| -------------------------------------- | ------- | ------------------------------ |
+| `apache_mpm_start_servers`             | `3`     | StartServers (event/worker)    |
+| `apache_mpm_min_spare_threads`         | `25`    | MinSpareThreads                |
+| `apache_mpm_max_spare_threads`         | `75`    | MaxSpareThreads                |
+| `apache_mpm_threads_per_child`         | `25`    | ThreadsPerChild                |
+| `apache_mpm_max_request_workers`       | `400`   | MaxRequestWorkers              |
+| `apache_mpm_max_connections_per_child` | `1000`  | MaxConnectionsPerChild         |
+| `apache_mpm_server_limit`              | `''`    | ServerLimit; empty: no setting |
+
+Without `ServerLimit`, Apache sizes its scoreboard to
+`MaxRequestWorkers / ThreadsPerChild` server processes, with no free slot.
+A process that is shutting down keeps its slot until its last connection ends:
+after a graceful reload, when idle threads exceed `MaxSpareThreads`, and when it
+reaches `MaxConnectionsPerChild`. Apache then cannot start new processes and
+logs `AH03490: scoreboard is full, not at MaxRequestWorkers`. Set
+`apache_mpm_server_limit` above that ratio, for example to twice its value, to
+leave room for these processes.
+
+The role checks that `apache_mpm_server_limit` × `apache_mpm_threads_per_child`
+reaches `apache_mpm_max_request_workers`. Apache reads `ServerLimit` only at
+startup, so the role restarts Apache instead of reloading it when the value
+changes. A restart interrupts the service. On EL and Debian the unit stops
+Apache gracefully: it closes its listening sockets at once and starts again only
+after the open connections have finished. On Arch Linux the unit stops Apache
+immediately, aborting requests in progress.
+
 ### Security
 
 | Variable                          | Default  | Description                      |
@@ -240,6 +269,24 @@ untouched. If the `ansible_managed` text changes between runs, configs deployed
 with the old text are no longer recognized and survive (fail-safe — remove them
 by hand or re-deploy first). List file names in `apache_vhosts_keep` to exempt
 unmanaged files explicitly.
+
+### Service Limits
+
+| Variable              | Default | Description                                                   |
+| --------------------- | ------- | ------------------------------------------------------------- |
+| `apache_limit_nofile` | `''`    | `LimitNOFILE` of the service; empty keeps the systemd default |
+
+Apache needs one file descriptor per log directive in a virtual host and one
+per distinct error log file ([File Descriptor Limits](https://httpd.apache.org/docs/2.4/vhosts/fd-limits.html)).
+With the systemd default soft limit of 1024 a host with many virtual hosts that
+log separately runs out: the configuration test passes, but the restart fails
+with `AH00019: Unable to open logs` and the service stops. Setting
+`apache_limit_nofile` (e.g. `65536`) deploys a systemd drop-in with
+`LimitNOFILE` and restarts Apache, since a reload keeps the running main
+process and its limit. Debian starts Apache through `apachectl`, which applies
+its own `ulimit -n` from `APACHE_ULIMIT_MAX_FILES` (8192 when unset); the role
+sets that line in `/etc/apache2/envvars` to the same value. Emptying the
+variable removes the drop-in and restores the commented distro line.
 
 ## Tags
 
