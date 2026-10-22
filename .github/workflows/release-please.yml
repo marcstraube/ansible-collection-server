@@ -140,9 +140,10 @@ jobs:
   # develop right away, whether or not its patch release is cut yet, and
   # the release PR's version bump, CHANGELOG.md and dated MIGRATION.md
   # section follow once it is merged. Without the back-merge, develop
-  # drifts from main and the next release merge conflicts. Closing
-  # keywords in a squashed hotfix commit close their issues once it lands
-  # in develop, the default branch.
+  # drifts from main and the next release merge conflicts. A hotfix PR's
+  # merge commit carries the PR body (repository setting), so its closing
+  # keywords close their issues once the commit lands in develop, the
+  # default branch.
   #
   # A release merge (develop into main) leaves nothing to bring back: main
   # then has no file changes since its merge base with develop, and the
