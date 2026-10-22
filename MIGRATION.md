@@ -13,3 +13,5 @@ inserts a fresh empty `## Unreleased` above it. Do not delete the
 heading or rename it to a concrete version — the workflow handles that.
 
 ## Unreleased
+
+## v1.0.1 - 2026-10-22
