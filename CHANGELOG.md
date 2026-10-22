@@ -2,6 +2,17 @@
 
 All notable changes to this collection will be documented in this file.
 
+## 1.0.1 (2026-10-22)
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+## What's Changed
+### Bug Fixes
+* fix(apache): skip the reload right after a restart in the same handler run by @marcstraube in https://github.com/marcstraube/ansible-collection-server/pull/9
+
+
+**Full Changelog**: https://github.com/marcstraube/ansible-collection-server/compare/v1.0.0...v1.0.1
+
 ## [1.0.0] - 2026-10-20
 
 ### Summary
