@@ -20,6 +20,10 @@
     apache_keep_alive: 'On'
     apache_keep_alive_timeout: 5
     apache_remove_default_vhost: true
+    # Raised open file limit via systemd drop-in; verify.yml reads it from the
+    # running main process. An uncommon value, so it cannot match a default the
+    # container runtime already sets (65536 on some CI runners).
+    apache_limit_nofile: 40000
     # Feature modules (ssl, headers, deflate, expires, alias, rewrite, proxy)
     # are derived; only what an application would add is listed here.
     apache_modules_enabled:
@@ -164,6 +168,33 @@
         name: '{{ __converge_apache_service }}'
       register: __converge_pid_restart
 
+    # Emptying the limit must remove the drop-in and bring the default limit
+    # back, which only a restart applies.
+    - name: Converge | Drop the open file limit  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        apache_limit_nofile: ''
+
+    - name: Converge | Run handlers for the limit removal
+      ansible.builtin.meta: flush_handlers
+
+    - name: Converge | Check the drop-in after the limit removal
+      ansible.builtin.stat:
+        path: '/etc/systemd/system/{{ __converge_apache_service }}.service.d/limits.conf'
+      register: __converge_dropin_removed
+
+    - name: Converge | Read the Apache main PID without the limit
+      ansible.builtin.systemd_service:
+        name: '{{ __converge_apache_service }}'
+      register: __converge_pid_unlimited
+
+    - name: Converge | Read the open file limit without the drop-in
+      ansible.builtin.command:
+        argv: ['grep', 'Max open files', '/proc/{{ __converge_pid_unlimited.status.MainPID }}/limits']
+      register: __converge_nofile_unlimited
+      changed_when: false
+
     - name: Converge | Restore the converged configuration  # noqa: role-name[path]
       ansible.builtin.include_role:
         name: '{{ playbook_dir }}/../..'
@@ -183,3 +214,5 @@
           before: '{{ __converge_pid_before.status.MainPID }}'
           reload: '{{ __converge_pid_reload.status.MainPID }}'
           restart: '{{ __converge_pid_restart.status.MainPID }}'
+          dropin_removed: '{{ not __converge_dropin_removed.stat.exists }}'
+          nofile_without_dropin: '{{ __converge_nofile_unlimited.stdout.split()[3] }}'
