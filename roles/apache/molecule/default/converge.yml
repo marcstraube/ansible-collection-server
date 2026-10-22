@@ -140,6 +140,12 @@
         name: '{{ __converge_apache_service }}'
       register: __converge_pid_before
 
+    - name: Converge | Read the Apache journal before the change
+      ansible.builtin.command:
+        argv: ['journalctl', '-u', '{{ __converge_apache_service }}', '-o', 'cat', '--no-pager']
+      register: __converge_reloads_before
+      changed_when: false
+
     - name: Converge | Change httpd.conf without touching the MPM  # noqa: role-name[path]
       ansible.builtin.include_role:
         name: '{{ playbook_dir }}/../..'
@@ -154,6 +160,15 @@
         name: '{{ __converge_apache_service }}'
       register: __converge_pid_reload
 
+    - name: Converge | Read the Apache journal after the configuration change
+      ansible.builtin.command:
+        argv: ['journalctl', '-u', '{{ __converge_apache_service }}', '-o', 'cat', '--no-pager']
+      register: __converge_reloads_reload
+      changed_when: false
+
+    # The MPM switch also changes the main configuration, so it notifies both
+    # the restart and the reload handler; only the restart may run.
+
     - name: Converge | Switch the MPM  # noqa: role-name[path]
       ansible.builtin.include_role:
         name: '{{ playbook_dir }}/../..'
@@ -167,6 +182,12 @@
       ansible.builtin.systemd_service:
         name: '{{ __converge_apache_service }}'
       register: __converge_pid_restart
+
+    - name: Converge | Read the Apache journal after the MPM change
+      ansible.builtin.command:
+        argv: ['journalctl', '-u', '{{ __converge_apache_service }}', '-o', 'cat', '--no-pager']
+      register: __converge_reloads_restart
+      changed_when: false
 
     # Emptying the limit must remove the drop-in and bring the default limit
     # back, which only a restart applies.
@@ -214,5 +235,11 @@
           before: '{{ __converge_pid_before.status.MainPID }}'
           reload: '{{ __converge_pid_reload.status.MainPID }}'
           restart: '{{ __converge_pid_restart.status.MainPID }}'
+          reloads_before: >-
+            {{ __converge_reloads_before.stdout_lines | select('match', 'Reloading') | list | length }}
+          reloads_reload: >-
+            {{ __converge_reloads_reload.stdout_lines | select('match', 'Reloading') | list | length }}
+          reloads_restart: >-
+            {{ __converge_reloads_restart.stdout_lines | select('match', 'Reloading') | list | length }}
           dropin_removed: '{{ not __converge_dropin_removed.stat.exists }}'
           nofile_without_dropin: '{{ __converge_nofile_unlimited.stdout.split()[3] }}'
