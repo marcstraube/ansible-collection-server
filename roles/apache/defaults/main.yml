@@ -83,6 +83,15 @@ apache_mpm_threads_per_child: 25
 apache_mpm_max_request_workers: 400
 apache_mpm_max_connections_per_child: 1000
 
+# ServerLimit (event/worker): the number of scoreboard slots for server
+# processes. Empty: no directive, Apache derives it from
+# MaxRequestWorkers / ThreadsPerChild (16 with the defaults above). Processes
+# that are shutting down keep their slot until their last connection ends
+# (after a graceful reload, above MaxSpareThreads, at MaxConnectionsPerChild);
+# set headroom above that ratio when Apache logs AH03490 "scoreboard is full".
+# Apache reads ServerLimit only at startup, so a change restarts the service.
+apache_mpm_server_limit: ''
+
 # Prefork MPM Settings
 
 # Prefork tuning (maps to Apache MPM directives)

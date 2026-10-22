@@ -50,6 +50,35 @@ See [defaults/main.yml](defaults/main.yml) for all available variables.
 | `apache_ssl_enabled`      | `false`                   | Enable SSL/TLS                    |
 | `apache_http2_enabled`    | `false`                   | Enable HTTP/2                     |
 
+### MPM Tuning
+
+| Variable                               | Default | Description                    |
+| -------------------------------------- | ------- | ------------------------------ |
+| `apache_mpm_start_servers`             | `3`     | StartServers (event/worker)    |
+| `apache_mpm_min_spare_threads`         | `25`    | MinSpareThreads                |
+| `apache_mpm_max_spare_threads`         | `75`    | MaxSpareThreads                |
+| `apache_mpm_threads_per_child`         | `25`    | ThreadsPerChild                |
+| `apache_mpm_max_request_workers`       | `400`   | MaxRequestWorkers              |
+| `apache_mpm_max_connections_per_child` | `1000`  | MaxConnectionsPerChild         |
+| `apache_mpm_server_limit`              | `''`    | ServerLimit; empty: no setting |
+
+Without `ServerLimit`, Apache sizes its scoreboard to
+`MaxRequestWorkers / ThreadsPerChild` server processes, with no free slot.
+A process that is shutting down keeps its slot until its last connection ends:
+after a graceful reload, when idle threads exceed `MaxSpareThreads`, and when it
+reaches `MaxConnectionsPerChild`. Apache then cannot start new processes and
+logs `AH03490: scoreboard is full, not at MaxRequestWorkers`. Set
+`apache_mpm_server_limit` above that ratio, for example to twice its value, to
+leave room for these processes.
+
+The role checks that `apache_mpm_server_limit` × `apache_mpm_threads_per_child`
+reaches `apache_mpm_max_request_workers`. Apache reads `ServerLimit` only at
+startup, so the role restarts Apache instead of reloading it when the value
+changes. A restart interrupts the service. On EL and Debian the unit stops
+Apache gracefully: it closes its listening sockets at once and starts again only
+after the open connections have finished. On Arch Linux the unit stops Apache
+immediately, aborting requests in progress.
+
 ### Security
 
 | Variable                          | Default  | Description                      |

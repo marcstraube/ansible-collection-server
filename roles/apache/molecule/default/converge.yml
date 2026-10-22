@@ -24,6 +24,8 @@
     # running main process. An uncommon value, so it cannot match a default the
     # container runtime already sets (65536 on some CI runners).
     apache_limit_nofile: 40000
+    # Headroom above MaxRequestWorkers / ThreadsPerChild (400 / 25 = 16).
+    apache_mpm_server_limit: 20
     # Feature modules (ssl, headers, deflate, expires, alias, rewrite, proxy)
     # are derived; only what an application would add is listed here.
     apache_modules_enabled:
@@ -216,6 +218,24 @@
       register: __converge_nofile_unlimited
       changed_when: false
 
+    # ServerLimit is read only at startup, so a change must restart Apache
+    # even though only httpd.conf changes. MPM and open file limit stay as in
+    # the previous step, so ServerLimit is the only reason for a restart.
+    - name: Converge | Change the ServerLimit  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        apache_limit_nofile: ''
+        apache_mpm_server_limit: 24
+
+    - name: Converge | Run handlers for the ServerLimit change
+      ansible.builtin.meta: flush_handlers
+
+    - name: Converge | Read the Apache main PID after the ServerLimit change
+      ansible.builtin.systemd_service:
+        name: '{{ __converge_apache_service }}'
+      register: __converge_pid_server_limit
+
     - name: Converge | Restore the converged configuration  # noqa: role-name[path]
       ansible.builtin.include_role:
         name: '{{ playbook_dir }}/../..'
@@ -243,3 +263,5 @@
             {{ __converge_reloads_restart.stdout_lines | select('match', 'Reloading') | list | length }}
           dropin_removed: '{{ not __converge_dropin_removed.stat.exists }}'
           nofile_without_dropin: '{{ __converge_nofile_unlimited.stdout.split()[3] }}'
+          unlimited: '{{ __converge_pid_unlimited.status.MainPID }}'
+          server_limit: '{{ __converge_pid_server_limit.status.MainPID }}'
