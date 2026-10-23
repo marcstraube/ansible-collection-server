@@ -10,8 +10,11 @@
     apache_http2_enabled: false
     apache_server_name: 'testsite.local'
     apache_server_admin: 'admin@testsite.local'
+    # 127.0.0.2 is a loopback address distinct from 127.0.0.1: the bound vhost
+    # below must answer there and nowhere else.
     apache_listen_ports:
       - 80
+      - '127.0.0.2:8081'
     apache_ssl_enabled: true
     apache_server_tokens: 'Prod'
     apache_server_signature: 'Off'
@@ -52,6 +55,12 @@
       - server_name: 'zz-redirect-test.local'
         listen_port: 80
         redirect_to_https: true
+      # Renders <VirtualHost 127.0.0.2:8081>; verify.yml requests it on that
+      # address and expects 127.0.0.1:8081 to refuse the connection.
+      - server_name: 'bound.example.local'
+        document_root: '/var/www/bound'
+        listen_address: '127.0.0.2'
+        listen_port: 8081
     # Two SSL vhosts exercise the conditional deploy: 'present' has a certificate
     # (deployed), 'pending' does not (skipped until certbot issues it).
     apache_vhosts_ssl:

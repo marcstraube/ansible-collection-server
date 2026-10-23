@@ -267,6 +267,46 @@
         success_msg: "HTTP response contains expected content"
 
     #
+    # Address Binding (listen_address)
+    #
+
+    - name: Verify | Read the address-bound vhost config
+      ansible.builtin.slurp:
+        src: '{{ __apache_vhosts_dir }}/bound.example.local.conf'
+      register: __apache_bound_conf
+
+    - name: Verify | Assert the vhost is bound to its address
+      ansible.builtin.assert:
+        that:
+          - "'<VirtualHost 127.0.0.2:8081>' in (__apache_bound_conf.content | b64decode)"
+        fail_msg: "bound.example.local is not rendered as <VirtualHost 127.0.0.2:8081>"
+        success_msg: "bound.example.local is rendered as <VirtualHost 127.0.0.2:8081>"
+
+    - name: Verify | Request the address-bound vhost
+      ansible.builtin.uri:
+        url: http://127.0.0.2:8081/
+        return_content: true
+      register: __apache_bound_response
+
+    - name: Verify | Request the bound port on another address
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8081/
+        timeout: 5
+      register: __apache_unbound_response
+      failed_when: false
+
+    - name: Verify | Assert the vhost answers on its address only
+      ansible.builtin.assert:
+        that:
+          - "'Address Bound Page' in __apache_bound_response.content"
+          - __apache_unbound_response.status == -1
+        fail_msg: >-
+          Expected 127.0.0.2:8081 to serve the bound vhost and 127.0.0.1:8081 to
+          refuse the connection, got status {{ __apache_unbound_response.status }}
+          on 127.0.0.1:8081
+        success_msg: "The vhost answers on 127.0.0.2:8081 only"
+
+    #
     # Version Verification
     #
 

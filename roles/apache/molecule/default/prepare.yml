@@ -88,6 +88,27 @@
         group: root
         mode: '0644'
 
+    - name: Prepare | Create address-bound document root
+      ansible.builtin.file:
+        path: /var/www/bound
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Create address-bound index page
+      ansible.builtin.copy:
+        content: |
+          <!DOCTYPE html>
+          <html>
+          <head><title>Bound Test</title></head>
+          <body><h1>Address Bound Page</h1></body>
+          </html>
+        dest: /var/www/bound/index.html
+        owner: root
+        group: root
+        mode: '0644'
+
     # Provide a certificate for one SSL vhost so the conditional-deploy logic can
     # be exercised for both the present-cert and missing-cert cases.
     - name: Prepare | Create test SSL certificate directory
