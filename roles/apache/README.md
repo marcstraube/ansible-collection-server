@@ -83,6 +83,13 @@ the role switches one off only when the variable is explicitly `false`.
 Returning a variable to `null` therefore does not revert a boolean the role set
 earlier; set it to `false` for that.
 
+SELinux also restricts the ports httpd may bind to those labeled `http_port_t`
+(80, 81, 443, 488, 8008, 8009, 8443 and 9000). Every other port in
+`apache_listen_ports`, and in `apache_listen_ssl_ports` while SSL is enabled,
+gets that label from the role; without it Apache cannot bind the port and shuts
+down on the next reload. Labels the role added stay in place when a port is
+removed from the lists.
+
 ### Sensitive Paths
 
 | Variable                      | Default   | Description                          |

@@ -27,3 +27,15 @@ __apache_tools_packages:
 # SSL package
 __apache_ssl_packages:
   - mod_ssl
+
+# Ports the SELinux policy labels http_port_t out of the box; listen ports
+# outside this list get the label from the role.
+__apache_selinux_default_ports:
+  - '80'
+  - '81'
+  - '443'
+  - '488'
+  - '8008'
+  - '8009'
+  - '8443'
+  - '9000'
