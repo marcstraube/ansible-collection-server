@@ -45,11 +45,14 @@ apache_server_name: '{{ ansible_facts["fqdn"] }}'
 # Server admin email
 apache_server_admin: 'webmaster@{{ ansible_facts["domain"] }}'
 
-# Listen ports
+# Listen ports. An entry is rendered verbatim into a Listen directive, so
+# 'ADDRESS:PORT' (e.g. '192.0.2.10:8081', IPv6 as '[2001:db8::10]:8081')
+# binds the port to a single address. A vhost with listen_address needs the
+# matching ADDRESS:PORT entry here.
 apache_listen_ports:
   - 80
 
-# Listen ports for HTTPS (requires SSL module)
+# Listen ports for HTTPS (requires SSL module), same format as above
 apache_listen_ssl_ports:
   - 443
 
@@ -350,6 +353,10 @@ apache_vhosts_keep: []
 # 00-<name>.conf — it then loads first and becomes Apache's catch-all for
 # requests whose Host header matches no vhost (also valid in apache_vhosts_ssl
 # and apache_reverse_proxies; on SSL it also serves unknown-SNI requests).
+# listen_address (default '*') binds the vhost to one address, rendered as
+# <VirtualHost ADDRESS:PORT>; IPv6 addresses go in brackets. Valid in all three
+# lists. Apache only receives connections on that address when a matching
+# Listen entry exists (apache_listen_ports / apache_listen_ssl_ports).
 # Example:
 #   - server_name: 'www.example.com'
 #     server_alias:

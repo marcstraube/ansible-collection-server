@@ -277,6 +277,34 @@ with the old text are no longer recognized and survive (fail-safe — remove the
 by hand or re-deploy first). List file names in `apache_vhosts_keep` to exempt
 unmanaged files explicitly.
 
+### Address Binding
+
+By default every vhost answers on all addresses (`<VirtualHost *:PORT>`). Set
+`listen_address` on an entry of `apache_vhosts`, `apache_vhosts_ssl` or
+`apache_reverse_proxies` to bind it to one address, for example a backend
+behind a reverse proxy that should only answer on its internal interface.
+IPv6 addresses go in brackets (`'[2001:db8::10]'`).
+
+`listen_address` only changes the `<VirtualHost>` line. Apache accepts
+connections on that address only if a matching `Listen` entry exists:
+`apache_listen_ports` and `apache_listen_ssl_ports` are rendered verbatim, so
+list the entries as `'ADDRESS:PORT'`. Two `Listen` entries for the same
+address and port make Apache refuse to start.
+
+```yaml
+apache_listen_ports:
+  - '192.0.2.10:8081'
+apache_vhosts:
+  - server_name: 'app.example.com'
+    document_root: '/var/www/app.example.com'
+    listen_address: '192.0.2.10'
+    listen_port: 8081
+```
+
+Binding to an address limits the interfaces Apache listens on; it does not
+restrict which clients may connect. Restrict the source addresses with the
+firewall, for example through the `marcstraube.common.firewalld` role.
+
 ### Service Limits
 
 | Variable              | Default | Description                                                   |
