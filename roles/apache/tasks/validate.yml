@@ -1,0 +1,19 @@
+---
+# Main configuration and vhosts are only consistent with each other once both
+# are written and orphaned vhosts are pruned: switching SSL off, for example,
+# removes mod_ssl from the main configuration while the SSL vhosts still use
+# it until the prune. The configuration is therefore tested once, after all of
+# them, and before any handler reloads or restarts Apache.
+
+- name: Validate | Test the Apache configuration
+  ansible.builtin.command:
+    cmd: 'apachectl configtest'
+  changed_when: false
+  failed_when: false
+  register: __apache_configtest
+
+- name: Validate | Display configuration test result
+  ansible.builtin.debug:
+    msg: '{{ __apache_configtest.stderr_lines }}'
+  when: __apache_configtest.rc != 0
+  failed_when: __apache_configtest.rc != 0

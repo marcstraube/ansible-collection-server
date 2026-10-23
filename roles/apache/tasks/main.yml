@@ -48,6 +48,14 @@
     - apache
     - apache:vhosts
 
+- name: Main | Import validate tasks
+  ansible.builtin.import_tasks: validate.yml
+  when: apache_enabled | bool
+  tags:
+    - apache
+    - apache:configure
+    - apache:vhosts
+
 - name: Main | Import service tasks
   ansible.builtin.import_tasks: service.yml
   when: apache_enabled | bool
