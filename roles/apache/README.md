@@ -210,8 +210,12 @@ suffix there would make Apache read the whole string as a hostname.
 
 - `global` writes a single block into the server configuration. Every vhost
   inherits it, including vhosts written by something other than this role.
-- `vhost` writes one `<FilesMatch>` block into every SSL vhost.
+- `vhost` writes one `<FilesMatch>` block into every vhost of
+  `apache_vhosts_ssl` and `apache_vhosts`. HTTP vhosts with
+  `redirect_to_https` are skipped, since they answer every request with a
+  redirect.
 
+Both HTTP and SSL vhosts accept `php_fpm_socket` and `php_fpm_timeout`.
 In `global` mode a vhost overrides the handler with its own `php_fpm_socket`,
 because a vhost-local `<FilesMatch>` takes precedence over the server-context one
 — so hosts running several PHP versions stay expressible. The same applies to

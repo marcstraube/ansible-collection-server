@@ -110,6 +110,17 @@
         group: root
         mode: '0644'
 
+    # Served through the address-bound HTTP vhost, which carries its own
+    # PHP-FPM handler.
+    - name: Prepare | Deploy PHP test script for the HTTP vhost
+      ansible.builtin.copy:
+        content: |
+          <?php echo 'PHP-HTTP-EXECUTED-OK';
+        dest: /var/www/bound/index.php
+        owner: root
+        group: root
+        mode: '0644'
+
     # Provide a certificate for one SSL vhost so the conditional-deploy logic can
     # be exercised for both the present-cert and missing-cert cases.
     - name: Prepare | Create test SSL certificate directory

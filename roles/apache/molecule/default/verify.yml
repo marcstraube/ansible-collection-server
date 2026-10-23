@@ -306,6 +306,33 @@
           on 127.0.0.1:8081
         success_msg: "The vhost answers on 127.0.0.2:8081 only"
 
+    - name: Verify | Read the redirect vhost config for a PHP handler
+      ansible.builtin.slurp:
+        src: '{{ __apache_vhosts_dir }}/zz-redirect-test.local.conf'
+      register: __apache_redirect_conf
+
+    - name: Verify | Request a PHP script through the HTTP vhost
+      ansible.builtin.uri:
+        url: http://127.0.0.2:8081/index.php
+        return_content: true
+      register: __apache_http_php_response
+
+    # The global handler would execute PHP as well, so the rendered config
+    # proves that the vhost carries its own handler.
+    - name: Verify | Assert the HTTP vhost hands PHP to its own FPM handler
+      ansible.builtin.assert:
+        that:
+          - "'SetHandler \"proxy:unix:' in (__apache_bound_conf.content | b64decode)"
+          - "'|fcgi://localhost\"' in (__apache_bound_conf.content | b64decode)"
+          - "'SetHandler' not in (__apache_redirect_conf.content | b64decode)"
+          - "'PHP-HTTP-EXECUTED-OK' in __apache_http_php_response.content"
+          - "'<?php' not in __apache_http_php_response.content"
+        fail_msg: >-
+          Expected a PHP-FPM handler in bound.example.local, none in the redirect
+          vhost, and executed PHP output; got
+          {{ __apache_http_php_response.content | truncate(80) }}
+        success_msg: "HTTP vhosts carry their own PHP-FPM handler"
+
     #
     # Client Address Behind a Reverse Proxy (mod_remoteip)
     #

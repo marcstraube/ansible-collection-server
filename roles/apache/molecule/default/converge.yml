@@ -56,11 +56,14 @@
         listen_port: 80
         redirect_to_https: true
       # Renders <VirtualHost 127.0.0.2:8081>; verify.yml requests it on that
-      # address and expects 127.0.0.1:8081 to refuse the connection.
+      # address and expects 127.0.0.1:8081 to refuse the connection. Its own
+      # php_fpm_socket must render a handler into the HTTP vhost, resolved
+      # lazily from the socket the pre_tasks discover.
       - server_name: 'bound.example.local'
         document_root: '/var/www/bound'
         listen_address: '127.0.0.2'
         listen_port: 8081
+        php_fpm_socket: '{{ apache_php_fpm_socket }}'
     # The client address from X-Forwarded-For replaces the peer address only for
     # requests from 127.0.0.1; verify.yml also sends one from 127.0.0.2, whose
     # header must be ignored.

@@ -429,7 +429,8 @@ apache_php_fpm_socket: 'unix:/run/php-fpm/php-fpm.sock|fcgi://localhost'
 # Where the PHP-FPM handler is configured:
 #   global - a single block in the server configuration, inherited by every
 #            vhost, including vhosts written by something other than this role
-#   vhost  - one block per vhost
+#   vhost  - one block per vhost in apache_vhosts_ssl and apache_vhosts
+#            (HTTP vhosts with redirect_to_https are skipped)
 # A vhost overrides the handler through its own php_fpm_socket, because a
 # vhost-local <FilesMatch> takes precedence over the server-context one. The same
 # holds for php_fpm_timeout, and both override independently of each other.
