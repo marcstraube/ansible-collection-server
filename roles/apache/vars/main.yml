@@ -29,6 +29,7 @@ __apache_modules_features: >-
     + (['alias'] if apache_acme_challenge_enabled | bool else [])
     + (['http2'] if apache_http2_enabled | bool else [])
     + (['status'] if apache_status_enabled | bool else [])
+    + (['remoteip'] if apache_remoteip_header | length > 0 else [])
     + (['rewrite'] if (apache_vhosts | selectattr('redirect_to_https', 'defined')
                        | selectattr('redirect_to_https') | list | length > 0)
                       or apache_reverse_proxies | default([]) | length > 0 else [])

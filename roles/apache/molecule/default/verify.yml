@@ -307,6 +307,63 @@
         success_msg: "The vhost answers on 127.0.0.2:8081 only"
 
     #
+    # Client Address Behind a Reverse Proxy (mod_remoteip)
+    #
+    # 127.0.0.1 is the trusted proxy: its X-Forwarded-For must replace the
+    # client address in the access log. A request from 127.0.0.2 is not
+    # trusted, so its header must be ignored and the peer address logged.
+    #
+
+    - name: Verify | Send a request through the trusted proxy address
+      ansible.builtin.command:
+        argv:
+          - curl
+          - '--silent'
+          - '--fail'
+          - '--output'
+          - '/dev/null'
+          - '--interface'
+          - '127.0.0.1'
+          - '--header'
+          - 'X-Forwarded-For: 198.51.100.7'
+          - 'http://127.0.0.1/'
+      changed_when: false
+
+    - name: Verify | Send a request from an untrusted address
+      ansible.builtin.command:
+        argv:
+          - curl
+          - '--silent'
+          - '--fail'
+          - '--output'
+          - '/dev/null'
+          - '--interface'
+          - '127.0.0.2'
+          - '--header'
+          - 'X-Forwarded-For: 203.0.113.9'
+          - 'http://127.0.0.1/'
+      changed_when: false
+
+    - name: Verify | Read the default vhost access log
+      ansible.builtin.slurp:
+        src: '{{ __apache_log_dir }}/testsite.local-access.log'
+      register: __apache_access_log
+
+    - name: Verify | Assert only the trusted proxy can set the client address
+      ansible.builtin.assert:
+        that:
+          - __apache_log_lines | select('match', '^198\\.51\\.100\\.7 ') | list | length > 0
+          - __apache_log_lines | select('match', '^127\\.0\\.0\\.2 ') | list | length > 0
+          - __apache_log_lines | select('search', '203\\.0\\.113\\.9') | list | length == 0
+        fail_msg: >-
+          Expected 198.51.100.7 (trusted proxy) and 127.0.0.2 (untrusted, header
+          ignored) in the access log, and no 203.0.113.9. Last lines:
+          {{ __apache_log_lines[-3:] }}
+        success_msg: "mod_remoteip trusts the configured proxy only"
+      vars:
+        __apache_log_lines: '{{ (__apache_access_log.content | b64decode).splitlines() }}'
+
+    #
     # Version Verification
     #
 
@@ -375,6 +432,7 @@
           - 'proxy'
           - 'proxy_fcgi'
           - 'auth_basic'
+          - 'remoteip'
         __apache_unwanted:
           - 'autoindex'
           - 'access_compat'
