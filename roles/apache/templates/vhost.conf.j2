@@ -38,6 +38,11 @@
     RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
 
 {% endif %}
+{# A redirect vhost answers every request with a redirect, so a PHP handler
+   would never run there. #}
+{% if not item.redirect_to_https | default(false) %}
+{% include 'vhost_php_fpm.conf.j2' %}
+{% endif %}
     # Logging
     ErrorLog {{ __apache_log_dir }}/{{ item.server_name }}-error.log
     CustomLog {{ __apache_log_dir }}/{{ item.server_name }}-access.log combined
