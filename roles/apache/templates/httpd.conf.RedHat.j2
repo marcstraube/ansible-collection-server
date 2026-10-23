@@ -238,6 +238,17 @@ Include {{ __apache_config_dir }}/security.conf
     Require all denied
 </Location>
 
+{% if apache_remoteip_header | length > 0 %}
+#
+# Client Address Behind a Reverse Proxy
+#
+# Replaces the proxy address with the client address from the header for
+# access logs, REMOTE_ADDR and Require ip. Only the listed proxies are trusted.
+
+RemoteIPHeader {{ apache_remoteip_header }}
+RemoteIPTrustedProxy {{ apache_remoteip_trusted_proxies | join(' ') }}
+
+{% endif %}
 {% if apache_php_fpm_enabled | default(false) and apache_php_fpm_scope | default('vhost') == 'global' %}
 #
 # PHP-FPM

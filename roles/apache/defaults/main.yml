@@ -399,6 +399,24 @@ apache_vhosts_ssl: []
 apache_reverse_proxies: []
 
 #
+# Client Address Behind a Reverse Proxy (mod_remoteip)
+#
+
+# Request header that carries the client address set by a reverse proxy or
+# load balancer, e.g. 'X-Forwarded-For'. Empty disables mod_remoteip. When set,
+# Apache replaces the proxy address with the client address for access logs,
+# REMOTE_ADDR and Require ip.
+apache_remoteip_header: ''
+
+# Proxies whose header is trusted (addresses or CIDR ranges), rendered as
+# RemoteIPTrustedProxy. Required when apache_remoteip_header is set: without
+# it, any client could claim an arbitrary address through the header.
+# Example:
+#   - '192.0.2.10'
+#   - '198.51.100.0/24'
+apache_remoteip_trusted_proxies: []
+
+#
 # PHP-FPM
 #
 

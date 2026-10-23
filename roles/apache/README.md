@@ -169,6 +169,7 @@ The role loads only the modules its configuration needs. A fixed base set
 | `apache_acme_challenge_enabled`             | `alias`                          |
 | `apache_http2_enabled`                      | `http2`                          |
 | `apache_status_enabled`                     | `status`                         |
+| `apache_remoteip_header`                    | `remoteip`                       |
 | `apache_php_fpm_enabled`                    | `proxy`, `proxy_fcgi`            |
 | `apache_reverse_proxies`                    | `proxy`, `proxy_http`, `rewrite` |
 | a vhost with `redirect_to_https`            | `rewrite`                        |
@@ -304,6 +305,28 @@ apache_vhosts:
 Binding to an address limits the interfaces Apache listens on; it does not
 restrict which clients may connect. Restrict the source addresses with the
 firewall, for example through the `marcstraube.common.firewalld` role.
+
+### Client Address Behind a Reverse Proxy
+
+| Variable                          | Default | Description                                  |
+| --------------------------------- | ------- | -------------------------------------------- |
+| `apache_remoteip_header`          | `''`    | Header with the client address; empty = off  |
+| `apache_remoteip_trusted_proxies` | `[]`    | Proxies whose header is trusted              |
+
+Behind a reverse proxy or load balancer, Apache sees the proxy as the client:
+access logs, `REMOTE_ADDR` in applications and `Require ip` all get the proxy
+address. With `apache_remoteip_header` set, the role loads `mod_remoteip` and
+renders `RemoteIPHeader` and `RemoteIPTrustedProxy` into the main
+configuration, so the client address from the header replaces the proxy
+address for every vhost. Only requests from the addresses or CIDR ranges in
+`apache_remoteip_trusted_proxies` are trusted; the role refuses an empty list,
+since any client could otherwise set an arbitrary address through the header.
+
+```yaml
+apache_remoteip_header: 'X-Forwarded-For'
+apache_remoteip_trusted_proxies:
+  - '192.0.2.1'
+```
 
 ### Service Limits
 

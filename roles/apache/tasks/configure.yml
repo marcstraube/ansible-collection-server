@@ -46,6 +46,17 @@
     - apache_mpm_module in ['event', 'worker']
     - apache_mpm_server_limit | string | length > 0
 
+- name: Configure | Validate the mod_remoteip settings
+  ansible.builtin.assert:
+    that:
+      - apache_remoteip_trusted_proxies | length > 0
+    fail_msg: >-
+      apache_remoteip_header is set but apache_remoteip_trusted_proxies is
+      empty. mod_remoteip would then accept the header from any client, which
+      could set an arbitrary client address.
+    quiet: true
+  when: apache_remoteip_header | length > 0
+
 # ServerLimit is read only at startup; a graceful reload keeps the old value.
 # The value in the deployed main configuration is compared before the template
 # task overwrites it.
