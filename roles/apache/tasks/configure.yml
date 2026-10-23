@@ -282,3 +282,26 @@
     - ansible_facts['os_family'] == 'RedHat'
     - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
     - item.state is not none
+
+# The policy only lets httpd bind the ports in http_port_t (80, 81, 443, 488,
+# 8008, 8009, 8443 and 9000). Any other listen port needs the label, or Apache
+# fails to bind it with "Permission denied" and shuts down on the next reload.
+# Listen entries may carry an address ('192.0.2.10:8081'); only the port counts.
+- name: Configure | Label additional listen ports for SELinux
+  community.general.seport:
+    ports: '{{ __apache_selinux_ports }}'
+    proto: tcp
+    setype: http_port_t
+    state: present
+  vars:
+    __apache_selinux_ports: >-
+      {{
+        (apache_listen_ports
+         + (apache_listen_ssl_ports if apache_ssl_enabled | bool else []))
+        | map('string') | map('split', ':') | map('last')
+        | reject('in', __apache_selinux_default_ports) | unique | list
+      }}
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+    - __apache_selinux_ports | length > 0
