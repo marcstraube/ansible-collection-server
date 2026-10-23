@@ -20,6 +20,12 @@
     apache_keep_alive: 'On'
     apache_keep_alive_timeout: 5
     apache_remove_default_vhost: true
+    # Raised open file limit via systemd drop-in; verify.yml reads it from the
+    # running main process. An uncommon value, so it cannot match a default the
+    # container runtime already sets (65536 on some CI runners).
+    apache_limit_nofile: 40000
+    # Headroom above MaxRequestWorkers / ThreadsPerChild (400 / 25 = 16).
+    apache_mpm_server_limit: 20
     # Feature modules (ssl, headers, deflate, expires, alias, rewrite, proxy)
     # are derived; only what an application would add is listed here.
     apache_modules_enabled:
@@ -185,6 +191,51 @@
       register: __converge_reloads_restart
       changed_when: false
 
+    # Emptying the limit must remove the drop-in and bring the default limit
+    # back, which only a restart applies.
+    - name: Converge | Drop the open file limit  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        apache_limit_nofile: ''
+
+    - name: Converge | Run handlers for the limit removal
+      ansible.builtin.meta: flush_handlers
+
+    - name: Converge | Check the drop-in after the limit removal
+      ansible.builtin.stat:
+        path: '/etc/systemd/system/{{ __converge_apache_service }}.service.d/limits.conf'
+      register: __converge_dropin_removed
+
+    - name: Converge | Read the Apache main PID without the limit
+      ansible.builtin.systemd_service:
+        name: '{{ __converge_apache_service }}'
+      register: __converge_pid_unlimited
+
+    - name: Converge | Read the open file limit without the drop-in
+      ansible.builtin.command:
+        argv: ['grep', 'Max open files', '/proc/{{ __converge_pid_unlimited.status.MainPID }}/limits']
+      register: __converge_nofile_unlimited
+      changed_when: false
+
+    # ServerLimit is read only at startup, so a change must restart Apache
+    # even though only httpd.conf changes. MPM and open file limit stay as in
+    # the previous step, so ServerLimit is the only reason for a restart.
+    - name: Converge | Change the ServerLimit  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        apache_limit_nofile: ''
+        apache_mpm_server_limit: 24
+
+    - name: Converge | Run handlers for the ServerLimit change
+      ansible.builtin.meta: flush_handlers
+
+    - name: Converge | Read the Apache main PID after the ServerLimit change
+      ansible.builtin.systemd_service:
+        name: '{{ __converge_apache_service }}'
+      register: __converge_pid_server_limit
+
     # Switching SSL off removes mod_ssl from the main configuration while the
     # SSL vhosts that use it are only pruned later in the same run (exclusive
     # mode). The configuration test must run after the prune, or this include
@@ -193,6 +244,8 @@
       ansible.builtin.include_role:
         name: '{{ playbook_dir }}/../..'
       vars:
+        apache_limit_nofile: ''
+        apache_mpm_server_limit: 24
         apache_ssl_enabled: false
         apache_vhosts_ssl: []
 
@@ -224,3 +277,7 @@
             {{ __converge_reloads_reload.stdout_lines | select('match', 'Reloading') | list | length }}
           reloads_restart: >-
             {{ __converge_reloads_restart.stdout_lines | select('match', 'Reloading') | list | length }}
+          dropin_removed: '{{ not __converge_dropin_removed.stat.exists }}'
+          nofile_without_dropin: '{{ __converge_nofile_unlimited.stdout.split()[3] }}'
+          unlimited: '{{ __converge_pid_unlimited.status.MainPID }}'
+          server_limit: '{{ __converge_pid_server_limit.status.MainPID }}'
