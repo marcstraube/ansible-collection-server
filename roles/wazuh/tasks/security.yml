@@ -1,0 +1,224 @@
+---
+# Runs after the services are started: both steps talk to the running
+# indexer and manager. Each step first checks whether the configured
+# password is accepted and only changes something when it is not, on the
+# first run and after a password change.
+
+#
+# Wazuh Indexer
+#
+# The indexer starts without a security index and answers 503 until
+# securityadmin uploads the security configuration. internal_users.yml
+# replaces the package demo users with 'admin' and 'kibanaserver'.
+#
+
+- name: Security | Wait for the indexer
+  ansible.builtin.wait_for:
+    host: '{{ wazuh_indexer_network_host }}'
+    port: '{{ wazuh_indexer_http_port }}'
+    timeout: 300
+  when: wazuh_indexer_service_enabled | bool
+
+- name: Security | Check indexer user passwords
+  ansible.builtin.uri:
+    url: '{{ __wazuh_indexer_url }}/_plugins/_security/authinfo'
+    url_username: '{{ item.name }}'
+    url_password: '{{ item.password }}'
+    force_basic_auth: true
+    ca_path: '{{ __wazuh_indexer_certs_dir }}/{{ __wazuh_ca_cert_name }}'
+    status_code: [200, 401, 503]
+  loop:
+    - { name: 'admin', password: '{{ wazuh_indexer_admin_password }}' }
+    - { name: 'kibanaserver', password: '{{ wazuh_indexer_kibanaserver_password }}' }
+  loop_control:
+    label: '{{ item.name }}'
+  register: __wazuh_indexer_auth
+  retries: 30
+  delay: 10
+  until: __wazuh_indexer_auth is not failed
+  no_log: true
+  when: wazuh_indexer_service_enabled | bool
+
+- name: Security | Initialize indexer users
+  when:
+    - wazuh_indexer_service_enabled | bool
+    - __wazuh_indexer_auth.results | rejectattr('status', 'equalto', 200) | list | length > 0
+  block:
+    # hash.sh ships with the indexer, so the controller needs no bcrypt
+    # library
+    - name: Security | Hash indexer user passwords
+      ansible.builtin.command:
+        argv:
+          - '{{ __wazuh_indexer_security_tools_dir }}/hash.sh'
+          - '-p'
+          - '{{ item }}'
+      environment:
+        JAVA_HOME: '{{ __wazuh_indexer_java_home }}'
+      loop:
+        - '{{ wazuh_indexer_admin_password }}'
+        - '{{ wazuh_indexer_kibanaserver_password }}'
+      register: __wazuh_indexer_hashes
+      changed_when: false
+      no_log: true
+
+    - name: Security | Deploy indexer internal users
+      ansible.builtin.template:
+        src: internal_users.yml.j2
+        dest: '{{ __wazuh_indexer_security_config_dir }}/internal_users.yml'
+        owner: '{{ __wazuh_indexer_user }}'
+        group: '{{ __wazuh_indexer_user }}'
+        mode: '0640'
+      vars:
+        __wazuh_indexer_admin_hash: '{{ __wazuh_indexer_hashes.results[0].stdout_lines | last }}'
+        __wazuh_indexer_kibanaserver_hash: '{{ __wazuh_indexer_hashes.results[1].stdout_lines | last }}'
+      no_log: true
+
+    - name: Security | Upload security configuration to the indexer
+      ansible.builtin.command:
+        argv:
+          - '{{ __wazuh_indexer_security_tools_dir }}/securityadmin.sh'
+          - '-cd'
+          - '{{ __wazuh_indexer_security_config_dir }}/'
+          - '-icl'
+          - '-nhnv'
+          - '-cacert'
+          - '{{ __wazuh_indexer_certs_dir }}/{{ __wazuh_ca_cert_name }}'
+          - '-cert'
+          - '{{ __wazuh_indexer_certs_dir }}/{{ __wazuh_admin_cert_name }}'
+          - '-key'
+          - '{{ __wazuh_indexer_certs_dir }}/{{ __wazuh_admin_key_name }}'
+          - '-h'
+          - '{{ wazuh_indexer_network_host }}'
+          - '-p'
+          - '{{ wazuh_indexer_http_port | string }}'
+      environment:
+        JAVA_HOME: '{{ __wazuh_indexer_java_home }}'
+        OPENSEARCH_PATH_CONF: '{{ __wazuh_indexer_config_dir }}'
+      register: __wazuh_securityadmin
+      retries: 5
+      delay: 10
+      until: __wazuh_securityadmin.rc == 0
+      changed_when: true
+
+    - name: Security | Wait for the indexer users
+      ansible.builtin.uri:
+        url: '{{ __wazuh_indexer_url }}/_plugins/_security/authinfo'
+        url_username: '{{ item.name }}'
+        url_password: '{{ item.password }}'
+        force_basic_auth: true
+        ca_path: '{{ __wazuh_indexer_certs_dir }}/{{ __wazuh_ca_cert_name }}'
+      loop:
+        - { name: 'admin', password: '{{ wazuh_indexer_admin_password }}' }
+        - { name: 'kibanaserver', password: '{{ wazuh_indexer_kibanaserver_password }}' }
+      loop_control:
+        label: '{{ item.name }}'
+      register: __wazuh_indexer_auth_after
+      retries: 12
+      delay: 5
+      until: __wazuh_indexer_auth_after is not failed
+      no_log: true
+
+#
+# Wazuh Manager API
+#
+# The manager creates the administrator 'wazuh' and the dashboard user
+# 'wazuh-wui' with package default passwords. A user whose configured
+# password is rejected logs in with its default password and changes its
+# own password. The API serves a self-signed certificate the manager
+# generates on installation, so the loopback requests skip certificate
+# validation.
+#
+
+- name: Security | Wait for the Wazuh API
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 55000
+    timeout: 300
+  when: wazuh_manager_service_enabled | bool
+
+- name: Security | Check Wazuh API user passwords
+  ansible.builtin.uri:
+    url: '{{ __wazuh_api_url }}/security/user/authenticate'
+    method: POST
+    url_username: '{{ item.name }}'
+    url_password: '{{ item.password }}'
+    force_basic_auth: true
+    validate_certs: false
+    status_code: [200, 401]
+  loop: '{{ __wazuh_api_users }}'
+  loop_control:
+    label: '{{ item.name }}'
+  register: __wazuh_api_auth
+  retries: 30
+  delay: 10
+  until: __wazuh_api_auth is not failed
+  no_log: true
+  when: wazuh_manager_service_enabled | bool
+
+- name: Security | Set Wazuh API user passwords
+  when:
+    - wazuh_manager_service_enabled | bool
+    - __wazuh_api_pending | length > 0
+  vars:
+    __wazuh_api_pending: >-
+      {{ __wazuh_api_auth.results | selectattr('status', 'equalto', 401)
+         | map(attribute='item') | list }}
+  block:
+    - name: Security | Authenticate with the default Wazuh API passwords
+      ansible.builtin.uri:
+        url: '{{ __wazuh_api_url }}/security/user/authenticate'
+        method: POST
+        url_username: '{{ item.name }}'
+        url_password: '{{ item.default_password }}'
+        force_basic_auth: true
+        validate_certs: false
+        status_code: [200, 401]
+      loop: '{{ __wazuh_api_pending }}'
+      loop_control:
+        label: '{{ item.name }}'
+      register: __wazuh_api_default_auth
+      no_log: true
+
+    - name: Security | Assert the Wazuh API users are accessible
+      ansible.builtin.assert:
+        that:
+          - __wazuh_api_rejected | length == 0
+        fail_msg: >-
+          The Wazuh API rejects both the configured and the default password
+          of {{ __wazuh_api_rejected | join(', ') }}. Set
+          wazuh_api_*_password to the current password.
+        quiet: true
+      vars:
+        __wazuh_api_rejected: >-
+          {{ __wazuh_api_default_auth.results | rejectattr('status', 'equalto', 200)
+             | map(attribute='item.name') | list }}
+
+    - name: Security | Look up the Wazuh API user IDs
+      ansible.builtin.uri:
+        url: '{{ __wazuh_api_url }}/security/users'
+        headers:
+          Authorization: 'Bearer {{ __wazuh_api_default_auth.results[0].json.data.token }}'
+        validate_certs: false
+      register: __wazuh_api_user_list
+      no_log: true
+
+    - name: Security | Change the Wazuh API user passwords
+      ansible.builtin.uri:
+        url: '{{ __wazuh_api_url }}/security/users/{{ __wazuh_api_user_id }}'
+        method: PUT
+        headers:
+          Authorization: 'Bearer {{ item.json.data.token }}'
+        body_format: json
+        body:
+          password: '{{ item.item.password }}'
+        validate_certs: false
+      loop: '{{ __wazuh_api_default_auth.results }}'
+      loop_control:
+        label: '{{ item.item.name }}'
+      vars:
+        __wazuh_api_user_id: >-
+          {{ __wazuh_api_user_list.json.data.affected_items
+             | selectattr('username', 'equalto', item.item.name)
+             | map(attribute='id') | first }}
+      changed_when: true
+      no_log: true

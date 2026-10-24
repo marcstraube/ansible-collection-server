@@ -1,0 +1,107 @@
+---
+- name: Main | Load OS-specific variables
+  ansible.builtin.include_vars: '{{ item }}'
+  with_first_found:
+    - files:
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}.yml'
+      paths:
+        - 'vars'
+      skip: true
+  tags:
+    - always
+
+- name: Main | Assert supported platform
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ['RedHat', 'Debian']
+    fail_msg: >-
+      The wazuh role supports RedHat and Debian. Got:
+      {{ ansible_facts['os_family'] }}
+  when: wazuh_enabled | bool
+  tags:
+    - always
+
+- name: Main | Assert certificate paths
+  ansible.builtin.assert:
+    that:
+      - wazuh_ca_cert_file | length > 0
+      - wazuh_node_cert_file | length > 0
+      - wazuh_node_key_file | length > 0
+      - wazuh_admin_cert_file | length > 0
+      - wazuh_admin_key_file | length > 0
+      - wazuh_dashboard_cert_file | length > 0
+      - wazuh_dashboard_key_file | length > 0
+    fail_msg: >-
+      The wazuh role needs a CA certificate, a node certificate and an admin
+      certificate with their keys on the host. Set wazuh_ca_cert_file,
+      wazuh_node_cert_file, wazuh_node_key_file, wazuh_admin_cert_file and
+      wazuh_admin_key_file, for example to certificates deployed by
+      marcstraube.common.pki.
+  when: wazuh_enabled | bool
+  tags:
+    - always
+
+- name: Main | Assert credentials
+  ansible.builtin.assert:
+    that:
+      - wazuh_indexer_admin_password | length > 0
+      - wazuh_indexer_kibanaserver_password | length > 0
+      - wazuh_api_wazuh_password is regex(__wazuh_api_password_regex)
+      - wazuh_api_wui_password is regex(__wazuh_api_password_regex)
+    fail_msg: >-
+      The wazuh role needs wazuh_indexer_admin_password,
+      wazuh_indexer_kibanaserver_password, wazuh_api_wazuh_password and
+      wazuh_api_wui_password. The Wazuh API requires 8 to 64 characters with
+      upper and lower case letters, a digit and a symbol for both
+      wazuh_api_*_password.
+    quiet: true
+  no_log: true
+  when: wazuh_enabled | bool
+  tags:
+    - always
+
+- name: Main | Import repository tasks
+  ansible.builtin.import_tasks: repos.yml
+  when: wazuh_enabled | bool
+  tags:
+    - wazuh
+    - wazuh:install
+
+- name: Main | Import install tasks
+  ansible.builtin.import_tasks: install.yml
+  when: wazuh_enabled | bool
+  tags:
+    - wazuh
+    - wazuh:install
+
+- name: Main | Import certificate tasks
+  ansible.builtin.import_tasks: certs.yml
+  when: wazuh_enabled | bool
+  tags:
+    - wazuh
+    - wazuh:certs
+
+- name: Main | Import configure tasks
+  ansible.builtin.import_tasks: configure.yml
+  when: wazuh_enabled | bool
+  tags:
+    - wazuh
+    - wazuh:configure
+
+- name: Main | Import service tasks
+  ansible.builtin.import_tasks: service.yml
+  when: wazuh_enabled | bool
+  tags:
+    - wazuh
+    - wazuh:service
+
+- name: Main | Import security tasks
+  ansible.builtin.import_tasks: security.yml
+  when: wazuh_enabled | bool
+  tags:
+    - wazuh
+    - wazuh:security

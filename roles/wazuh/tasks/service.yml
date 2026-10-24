@@ -1,0 +1,28 @@
+---
+# Start order follows the data flow: the indexer first, then the manager
+# and Filebeat that write into it, the dashboard last.
+
+- name: Service | Manage Wazuh indexer service
+  ansible.builtin.systemd_service:
+    name: '{{ __wazuh_indexer_service_name }}'
+    enabled: "{{ wazuh_indexer_service_enabled | bool }}"
+    state: "{{ wazuh_indexer_service_enabled | bool | ternary('started', 'stopped') }}"
+    daemon_reload: true
+
+- name: Service | Manage Wazuh manager service
+  ansible.builtin.systemd_service:
+    name: '{{ __wazuh_manager_service_name }}'
+    enabled: "{{ wazuh_manager_service_enabled | bool }}"
+    state: "{{ wazuh_manager_service_enabled | bool | ternary('started', 'stopped') }}"
+
+- name: Service | Manage Filebeat service
+  ansible.builtin.systemd_service:
+    name: '{{ __wazuh_filebeat_service_name }}'
+    enabled: "{{ wazuh_filebeat_service_enabled | bool }}"
+    state: "{{ wazuh_filebeat_service_enabled | bool | ternary('started', 'stopped') }}"
+
+- name: Service | Manage Wazuh dashboard service
+  ansible.builtin.systemd_service:
+    name: '{{ __wazuh_dashboard_service_name }}'
+    enabled: "{{ wazuh_dashboard_service_enabled | bool }}"
+    state: "{{ wazuh_dashboard_service_enabled | bool | ternary('started', 'stopped') }}"

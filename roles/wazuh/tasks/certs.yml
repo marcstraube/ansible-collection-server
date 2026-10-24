@@ -1,0 +1,163 @@
+---
+# The certificates come from the paths in wazuh_*_file. The indexer reads
+# certificates only inside its configuration directory and expects PKCS#8
+# keys, so the role copies every file into the certificate directory of the
+# component and converts the keys. A changed source file changes the copy
+# and restarts the component.
+
+#
+# Subjects
+#
+# The node and admin subjects become plugins.security.nodes_dn and
+# plugins.security.authcz.admin_dn in opensearch.yml. Tagged always so that
+# a configure-only run renders the same DNs.
+#
+
+- name: Certs | Read node and admin certificates
+  community.crypto.x509_certificate_info:
+    path: '{{ item }}'
+  loop:
+    - '{{ wazuh_node_cert_file }}'
+    - '{{ wazuh_admin_cert_file }}'
+  register: __wazuh_cert_info
+  tags:
+    - always
+
+- name: Certs | Assert subject attributes are supported
+  ansible.builtin.assert:
+    that:
+      - item.subject_ordered | map('first')
+        | reject('in', __wazuh_dn_attribute_names) | list | length == 0
+    fail_msg: >-
+      The subject of {{ item.item }} contains attributes the role cannot
+      translate into a DN: {{ item.subject_ordered | map('first')
+      | reject('in', __wazuh_dn_attribute_names) | join(', ') }}.
+      Supported: {{ __wazuh_dn_attribute_names | list | join(', ') }}.
+  loop: '{{ __wazuh_cert_info.results }}'
+  loop_control:
+    label: '{{ item.item }}'
+  tags:
+    - always
+
+# RFC 4514 lists the attributes in reverse order of the certificate subject
+- name: Certs | Build node and admin DNs
+  ansible.builtin.set_fact:
+    __wazuh_node_dn: >-
+      {{ __wazuh_cert_info.results[0].subject_ordered | reverse
+         | map('first') | map('extract', __wazuh_dn_attribute_names)
+         | zip(__wazuh_cert_info.results[0].subject_ordered | reverse | map('last'))
+         | map('join', '=') | join(',') }}
+    __wazuh_admin_dn: >-
+      {{ __wazuh_cert_info.results[1].subject_ordered | reverse
+         | map('first') | map('extract', __wazuh_dn_attribute_names)
+         | zip(__wazuh_cert_info.results[1].subject_ordered | reverse | map('last'))
+         | map('join', '=') | join(',') }}
+  tags:
+    - always
+
+#
+# Wazuh Indexer
+#
+
+- name: Certs | Create indexer certificate directory
+  ansible.builtin.file:
+    path: '{{ __wazuh_indexer_certs_dir }}'
+    state: directory
+    owner: '{{ __wazuh_indexer_user }}'
+    group: '{{ __wazuh_indexer_user }}'
+    mode: '0500'
+
+- name: Certs | Deploy indexer certificates
+  ansible.builtin.copy:
+    src: '{{ item.src }}'
+    dest: '{{ __wazuh_indexer_certs_dir }}/{{ item.name }}'
+    remote_src: true
+    owner: '{{ __wazuh_indexer_user }}'
+    group: '{{ __wazuh_indexer_user }}'
+    mode: '0400'
+  loop:
+    - { src: '{{ wazuh_ca_cert_file }}', name: '{{ __wazuh_ca_cert_name }}' }
+    - { src: '{{ wazuh_node_cert_file }}', name: '{{ __wazuh_node_cert_name }}' }
+    - { src: '{{ wazuh_admin_cert_file }}', name: '{{ __wazuh_admin_cert_name }}' }
+  loop_control:
+    label: '{{ item.name }}'
+  notify: Restart Wazuh indexer
+
+- name: Certs | Deploy indexer keys as PKCS#8
+  community.crypto.openssl_privatekey_convert:
+    src_path: '{{ item.src }}'
+    dest_path: '{{ __wazuh_indexer_certs_dir }}/{{ item.name }}'
+    format: pkcs8
+    owner: '{{ __wazuh_indexer_user }}'
+    group: '{{ __wazuh_indexer_user }}'
+    mode: '0400'
+  loop:
+    - { src: '{{ wazuh_node_key_file }}', name: '{{ __wazuh_node_key_name }}' }
+    - { src: '{{ wazuh_admin_key_file }}', name: '{{ __wazuh_admin_key_name }}' }
+  loop_control:
+    label: '{{ item.name }}'
+  no_log: true
+  notify: Restart Wazuh indexer
+
+#
+# Filebeat
+#
+# Filebeat authenticates with username and password; it only needs the CA
+# to verify the indexer.
+#
+
+- name: Certs | Create Filebeat certificate directory
+  ansible.builtin.file:
+    path: '{{ __wazuh_filebeat_certs_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0500'
+
+- name: Certs | Deploy Filebeat CA certificate
+  ansible.builtin.copy:
+    src: '{{ wazuh_ca_cert_file }}'
+    dest: '{{ __wazuh_filebeat_certs_dir }}/{{ __wazuh_ca_cert_name }}'
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0400'
+  notify: Restart Filebeat
+
+#
+# Wazuh Dashboard
+#
+
+- name: Certs | Create dashboard certificate directory
+  ansible.builtin.file:
+    path: '{{ __wazuh_dashboard_certs_dir }}'
+    state: directory
+    owner: '{{ __wazuh_dashboard_user }}'
+    group: '{{ __wazuh_dashboard_user }}'
+    mode: '0500'
+
+- name: Certs | Deploy dashboard certificates
+  ansible.builtin.copy:
+    src: '{{ item.src }}'
+    dest: '{{ __wazuh_dashboard_certs_dir }}/{{ item.name }}'
+    remote_src: true
+    owner: '{{ __wazuh_dashboard_user }}'
+    group: '{{ __wazuh_dashboard_user }}'
+    mode: '0400'
+  loop:
+    - { src: '{{ wazuh_ca_cert_file }}', name: '{{ __wazuh_ca_cert_name }}' }
+    - { src: '{{ wazuh_dashboard_cert_file }}', name: '{{ __wazuh_dashboard_cert_name }}' }
+  loop_control:
+    label: '{{ item.name }}'
+  notify: Restart Wazuh dashboard
+
+- name: Certs | Deploy dashboard key
+  ansible.builtin.copy:
+    src: '{{ wazuh_dashboard_key_file }}'
+    dest: '{{ __wazuh_dashboard_certs_dir }}/{{ __wazuh_dashboard_key_name }}'
+    remote_src: true
+    owner: '{{ __wazuh_dashboard_user }}'
+    group: '{{ __wazuh_dashboard_user }}'
+    mode: '0400'
+  no_log: true
+  notify: Restart Wazuh dashboard

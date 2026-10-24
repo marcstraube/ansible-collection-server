@@ -1,0 +1,33 @@
+{{ ansible_managed | comment }}
+# Wazuh - Filebeat configuration file
+filebeat.modules:
+  - module: wazuh
+    alerts:
+      enabled: true
+    archives:
+      enabled: false
+
+setup.template.json.enabled: true
+setup.template.json.path: '{{ __wazuh_filebeat_template_file }}'
+setup.template.json.name: 'wazuh'
+setup.template.overwrite: true
+setup.ilm.enabled: false
+
+# Send events directly to Wazuh indexer
+output.elasticsearch:
+  hosts:
+    - '{{ wazuh_indexer_network_host }}:{{ wazuh_indexer_http_port }}'
+  protocol: https
+  username: 'admin'
+  password: {{ wazuh_indexer_admin_password | to_json }}
+  ssl.certificate_authorities:
+    - '{{ __wazuh_filebeat_certs_dir }}/{{ __wazuh_ca_cert_name }}'
+
+logging.metrics.enabled: false
+
+seccomp:
+  default_action: allow
+  syscalls:
+  - action: allow
+    names:
+    - rseq

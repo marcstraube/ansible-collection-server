@@ -1,0 +1,20 @@
+---
+# Packages pinned to wazuh_version / wazuh_filebeat_version
+__wazuh_packages:
+  - 'wazuh-indexer={{ wazuh_version }}-*'
+  - 'wazuh-manager={{ wazuh_version }}-*'
+  - 'filebeat={{ wazuh_filebeat_version }}-*'
+  - 'wazuh-dashboard={{ wazuh_version }}-*'
+
+# Dependencies (dashboard: debhelper, libcap2-bin; certificate handling:
+# cryptography; deb822_repository: python3-debian)
+__wazuh_dependency_packages:
+  - 'ca-certificates'
+  - 'debhelper'
+  - 'libcap2-bin'
+  - 'python3-cryptography'
+  - 'python3-debian'
+  - 'tar'
+
+# Wazuh apt repository
+__wazuh_repo_uri: 'https://packages.wazuh.com/{{ __wazuh_repo_major }}/apt/'

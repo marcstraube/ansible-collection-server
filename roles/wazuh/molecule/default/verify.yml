@@ -1,0 +1,162 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Verify | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Verify | Gather package facts
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Verify | Assert Wazuh packages are installed
+      ansible.builtin.assert:
+        that:
+          - item in ansible_facts.packages
+        fail_msg: '{{ item }} is not installed'
+      loop:
+        - wazuh-indexer
+        - wazuh-manager
+        - filebeat
+        - wazuh-dashboard
+
+    - name: Verify | Stat indexer certificates
+      ansible.builtin.stat:
+        path: '{{ __wazuh_indexer_certs_dir }}/{{ item }}'
+      register: __verify_indexer_certs
+      loop:
+        - '{{ __wazuh_ca_cert_name }}'
+        - '{{ __wazuh_node_cert_name }}'
+        - '{{ __wazuh_node_key_name }}'
+        - '{{ __wazuh_admin_cert_name }}'
+        - '{{ __wazuh_admin_key_name }}'
+
+    - name: Verify | Assert indexer certificates are owned by the indexer
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.pw_name == __wazuh_indexer_user
+          - item.stat.mode == '0400'
+      loop: '{{ __verify_indexer_certs.results }}'
+      loop_control:
+        label: '{{ item.item }}'
+
+    - name: Verify | Read indexer node key
+      ansible.builtin.slurp:
+        src: '{{ __wazuh_indexer_certs_dir }}/{{ __wazuh_node_key_name }}'
+      register: __verify_node_key
+      no_log: true
+
+    - name: Verify | Assert indexer node key is PKCS#8
+      ansible.builtin.assert:
+        that:
+          - (__verify_node_key.content | b64decode).startswith('-----BEGIN PRIVATE KEY-----')
+        fail_msg: The indexer node key is not a PKCS#8 key
+      no_log: true
+
+    - name: Verify | Read indexer configuration
+      ansible.builtin.slurp:
+        src: '{{ __wazuh_indexer_config_file }}'
+      register: __verify_indexer_config
+
+    - name: Verify | Assert DNs from the certificates
+      ansible.builtin.assert:
+        that:
+          - "'CN=wazuh-node,O=Wazuh Test' in __verify_indexer_config_text"
+          - "'CN=admin' in __verify_indexer_config_text"
+      vars:
+        __verify_indexer_config_text: '{{ __verify_indexer_config.content | b64decode }}'
+
+    - name: Verify | Wait for the indexer HTTPS port
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 9200
+        timeout: 180
+
+    - name: Verify | Authenticate indexer users over HTTPS
+      ansible.builtin.uri:
+        url: 'https://127.0.0.1:9200/_plugins/_security/authinfo'
+        url_username: '{{ item.name }}'
+        url_password: '{{ item.password }}'
+        force_basic_auth: true
+        ca_path: '{{ __wazuh_indexer_certs_dir }}/{{ __wazuh_ca_cert_name }}'
+      register: __verify_indexer_auth
+      retries: 12
+      delay: 10
+      until: __verify_indexer_auth is not failed
+      loop:
+        - { name: 'admin', password: '{{ wazuh_indexer_admin_password }}' }
+        - { name: 'kibanaserver', password: '{{ wazuh_indexer_kibanaserver_password }}' }
+      loop_control:
+        label: '{{ item.name }}'
+
+    - name: Verify | Assert indexer demo users are gone
+      ansible.builtin.uri:
+        url: 'https://127.0.0.1:9200/_plugins/_security/authinfo'
+        url_username: 'kibanaro'
+        url_password: 'kibanaro'
+        force_basic_auth: true
+        ca_path: '{{ __wazuh_indexer_certs_dir }}/{{ __wazuh_ca_cert_name }}'
+        status_code: 401
+
+    - name: Verify | Test Filebeat connection to the indexer
+      ansible.builtin.command:
+        cmd: filebeat test output
+      register: __verify_filebeat_output
+      changed_when: false
+      retries: 6
+      delay: 10
+      until: __verify_filebeat_output.rc == 0
+
+    - name: Verify | Authenticate Wazuh API users
+      ansible.builtin.uri:
+        url: 'https://127.0.0.1:55000/security/user/authenticate'
+        method: POST
+        url_username: '{{ item.name }}'
+        url_password: '{{ item.password }}'
+        force_basic_auth: true
+        validate_certs: false
+      loop:
+        - { name: 'wazuh', password: '{{ wazuh_api_wazuh_password }}' }
+        - { name: 'wazuh-wui', password: '{{ wazuh_api_wui_password }}' }
+      loop_control:
+        label: '{{ item.name }}'
+
+    - name: Verify | Assert Wazuh API default passwords are rejected
+      ansible.builtin.uri:
+        url: 'https://127.0.0.1:55000/security/user/authenticate'
+        method: POST
+        url_username: '{{ item }}'
+        url_password: '{{ item }}'
+        force_basic_auth: true
+        validate_certs: false
+        status_code: 401
+      loop:
+        - 'wazuh'
+        - 'wazuh-wui'
+
+    - name: Verify | Wait for the dashboard
+      ansible.builtin.uri:
+        url: 'https://127.0.0.1:443/api/status'
+        url_username: 'admin'
+        url_password: '{{ wazuh_indexer_admin_password }}'
+        force_basic_auth: true
+        ca_path: '{{ __wazuh_dashboard_certs_dir }}/{{ __wazuh_ca_cert_name }}'
+      register: __verify_dashboard_status
+      retries: 30
+      delay: 10
+      until: __verify_dashboard_status is not failed
+
+    - name: Verify | Assert services are running
+      ansible.builtin.systemd_service:
+        name: '{{ item }}'
+      register: __verify_service
+      failed_when: __verify_service.status.ActiveState != 'active'
+      loop:
+        - '{{ __wazuh_indexer_service_name }}'
+        - '{{ __wazuh_manager_service_name }}'
+        - '{{ __wazuh_filebeat_service_name }}'
+        - '{{ __wazuh_dashboard_service_name }}'

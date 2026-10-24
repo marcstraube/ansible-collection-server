@@ -1,0 +1,19 @@
+{{ ansible_managed | comment }}
+server.host: "{{ wazuh_dashboard_server_host }}"
+server.port: {{ wazuh_dashboard_server_port }}
+opensearch.hosts: https://{{ wazuh_indexer_network_host }}:{{ wazuh_indexer_http_port }}
+opensearch.ssl.verificationMode: certificate
+opensearch.ssl.certificateAuthorities: ["{{ __wazuh_dashboard_certs_dir }}/{{ __wazuh_ca_cert_name }}"]
+opensearch.username: kibanaserver
+opensearch.password: {{ wazuh_indexer_kibanaserver_password | to_json }}
+opensearch.requestHeadersWhitelist: ["securitytenant","Authorization"]
+opensearch_security.multitenancy.enabled: false
+opensearch_security.readonly_mode.roles: ["kibana_read_only"]
+server.ssl.enabled: true
+server.ssl.key: "{{ __wazuh_dashboard_certs_dir }}/{{ __wazuh_dashboard_key_name }}"
+server.ssl.certificate: "{{ __wazuh_dashboard_certs_dir }}/{{ __wazuh_dashboard_cert_name }}"
+uiSettings.overrides.defaultRoute: /app/wz-home
+# Session expiration settings
+opensearch_security.cookie.ttl: 900000
+opensearch_security.session.ttl: 900000
+opensearch_security.session.keepalive: true

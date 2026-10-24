@@ -1,0 +1,69 @@
+---
+# Wazuh package repository, one per major version. The packages are pinned
+# to wazuh_version in install.yml, so the repository never moves a host to
+# another release on its own.
+
+#
+# Debian
+#
+
+- name: Repos | Ensure apt prerequisites
+  ansible.builtin.package:
+    name:
+      - 'ca-certificates'
+      - 'python3-debian'
+    state: present
+  retries: 3
+  delay: 5
+  when: ansible_facts['os_family'] == 'Debian'
+
+# signed_by takes the key URL directly — the module downloads it and
+# stores it beside the .sources file, so no separate key task is needed.
+- name: Repos | Add Wazuh apt repository
+  ansible.builtin.deb822_repository:
+    name: wazuh
+    types: deb
+    uris: '{{ __wazuh_repo_uri }}'
+    suites: stable
+    components: main
+    signed_by: '{{ __wazuh_repo_key_url }}'
+    state: present
+  retries: 5
+  delay: 10
+  register: __wazuh_apt_repo
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Repos | Update apt cache after repo change
+  ansible.builtin.apt:
+    update_cache: true
+  retries: 3
+  delay: 5
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - __wazuh_apt_repo is changed
+
+#
+# RedHat
+#
+# dnf imports the signing key from gpgkey on first use.
+#
+
+- name: Repos | Add Wazuh yum repository (RedHat)
+  ansible.builtin.yum_repository:
+    name: wazuh
+    description: Wazuh repository
+    baseurl: '{{ __wazuh_repo_baseurl }}'
+    gpgkey: '{{ __wazuh_repo_key_url }}'
+    gpgcheck: true
+  retries: 5
+  delay: 10
+  when: ansible_facts['os_family'] == 'RedHat'
+
+# In check mode the repository task above writes nothing; without this
+# gate the package install fails with "No package wazuh-indexer available".
+- name: Repos | Check Wazuh repository file presence (RedHat)
+  ansible.builtin.stat:
+    path: '{{ __wazuh_repo_file }}'
+  register: __wazuh_repo_stat
+  check_mode: false
+  when: ansible_facts['os_family'] == 'RedHat'

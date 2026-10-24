@@ -1,0 +1,60 @@
+---
+# A Wazuh update has to follow the upstream order (indexer, manager,
+# dashboard) with the indexer shard allocation disabled in between. The role
+# does not perform updates: a changed wazuh_version on a host with Wazuh
+# installed fails here with both versions. Tagged always so that every
+# stage sees the same precondition.
+- name: Install | Gather package facts
+  ansible.builtin.package_facts:
+    manager: auto
+  tags:
+    - always
+
+- name: Install | Assert installed Wazuh version matches wazuh_version
+  ansible.builtin.assert:
+    that:
+      - __wazuh_installed_versions | reject('equalto', wazuh_version) | list | length == 0
+    fail_msg: |
+      Installed Wazuh packages differ from wazuh_version {{ wazuh_version }}:
+
+      {% for package in __wazuh_component_packages
+         if package in ansible_facts.packages %}
+        - {{ package }} {{ ansible_facts.packages[package][0].version }}
+      {% endfor %}
+
+      The role does not update Wazuh. Follow the upstream upgrade guide or
+      restore the previous wazuh_version.
+  vars:
+    __wazuh_component_packages:
+      - 'wazuh-indexer'
+      - 'wazuh-manager'
+      - 'wazuh-dashboard'
+    __wazuh_installed_versions: >-
+      {{ __wazuh_component_packages
+         | select('in', ansible_facts.packages)
+         | map('extract', ansible_facts.packages)
+         | map('first')
+         | map(attribute='version')
+         | map('regex_replace', '-.*$', '')
+         | list }}
+  tags:
+    - always
+
+- name: Install | Dependency packages
+  ansible.builtin.package:
+    name: '{{ __wazuh_dependency_packages }}'
+    state: present
+  retries: 3
+  delay: 5
+
+# The Wazuh repo file check (repos.yml) only exists on RedHat; everywhere
+# else the gate falls through.
+- name: Install | Wazuh packages
+  ansible.builtin.package:
+    name: '{{ __wazuh_packages }}'
+    state: present
+  retries: 3
+  delay: 5
+  when: __wazuh_repo_stat.stat.exists | default(true)
+  notify:
+    - Reload Wazuh systemd units

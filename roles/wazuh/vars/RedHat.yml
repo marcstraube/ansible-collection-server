@@ -1,0 +1,17 @@
+---
+# Packages pinned to wazuh_version / wazuh_filebeat_version
+__wazuh_packages:
+  - 'wazuh-indexer-{{ wazuh_version }}'
+  - 'wazuh-manager-{{ wazuh_version }}'
+  - 'filebeat-{{ wazuh_filebeat_version }}'
+  - 'wazuh-dashboard-{{ wazuh_version }}'
+
+# Dependencies (dashboard: libcap; certificate handling: cryptography)
+__wazuh_dependency_packages:
+  - 'libcap'
+  - 'python3-cryptography'
+  - 'tar'
+
+# Wazuh yum repository
+__wazuh_repo_baseurl: 'https://packages.wazuh.com/{{ __wazuh_repo_major }}/yum/'
+__wazuh_repo_file: '/etc/yum.repos.d/wazuh.repo'

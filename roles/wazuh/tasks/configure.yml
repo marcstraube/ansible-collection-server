@@ -1,0 +1,129 @@
+---
+#
+# Wazuh Indexer
+#
+
+- name: Configure | Deploy indexer configuration
+  ansible.builtin.template:
+    src: opensearch.yml.j2
+    dest: '{{ __wazuh_indexer_config_file }}'
+    owner: root
+    group: '{{ __wazuh_indexer_user }}'
+    mode: '0640'
+  notify: Restart Wazuh indexer
+
+- name: Configure | Create indexer JVM options directory
+  ansible.builtin.file:
+    path: '{{ __wazuh_indexer_jvm_options_dir }}'
+    state: directory
+    owner: root
+    group: '{{ __wazuh_indexer_user }}'
+    mode: '0750'
+
+- name: Configure | Deploy indexer heap size
+  ansible.builtin.template:
+    src: heap.options.j2
+    dest: '{{ __wazuh_indexer_heap_config_file }}'
+    owner: root
+    group: '{{ __wazuh_indexer_user }}'
+    mode: '0640'
+  when: wazuh_indexer_heap_size | length > 0
+  notify: Restart Wazuh indexer
+
+- name: Configure | Remove indexer heap size override
+  ansible.builtin.file:
+    path: '{{ __wazuh_indexer_heap_config_file }}'
+    state: absent
+  when: wazuh_indexer_heap_size | length == 0
+  notify: Restart Wazuh indexer
+
+#
+# Filebeat
+#
+
+- name: Configure | Deploy Filebeat configuration
+  ansible.builtin.template:
+    src: filebeat.yml.j2
+    dest: '{{ __wazuh_filebeat_config_file }}'
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+  notify: Restart Filebeat
+
+- name: Configure | Download Wazuh index template
+  ansible.builtin.get_url:
+    url: '{{ __wazuh_filebeat_template_url }}'
+    dest: '{{ __wazuh_filebeat_template_file }}'
+    owner: root
+    group: root
+    mode: '0644'
+  retries: 5
+  delay: 10
+  notify: Restart Filebeat
+
+- name: Configure | Install Wazuh Filebeat module
+  ansible.builtin.unarchive:
+    src: '{{ __wazuh_filebeat_module_url }}'
+    dest: '{{ __wazuh_filebeat_module_parent_dir }}'
+    remote_src: true
+    creates: '{{ __wazuh_filebeat_module_dir }}'
+    owner: root
+    group: root
+  retries: 5
+  delay: 10
+  notify: Restart Filebeat
+
+#
+# Wazuh Dashboard
+#
+
+- name: Configure | Deploy dashboard configuration
+  ansible.builtin.template:
+    src: opensearch_dashboards.yml.j2
+    dest: '{{ __wazuh_dashboard_config_file }}'
+    owner: '{{ __wazuh_dashboard_user }}'
+    group: '{{ __wazuh_dashboard_user }}'
+    mode: '0640'
+  no_log: true
+  notify: Restart Wazuh dashboard
+
+# The package seeds the dashboard keystore with the default kibanaserver
+# credentials, which take precedence over opensearch_dashboards.yml
+- name: Configure | List dashboard keystore entries
+  ansible.builtin.command:
+    argv:
+      - '{{ __wazuh_dashboard_keystore_bin }}'
+      - 'list'
+      - '--allow-root'
+  register: __wazuh_dashboard_keystore
+  changed_when: false
+
+- name: Configure | Remove package credentials from the dashboard keystore
+  ansible.builtin.command:
+    argv:
+      - '{{ __wazuh_dashboard_keystore_bin }}'
+      - 'remove'
+      - '{{ item }}'
+      - '--allow-root'
+  loop: "{{ ['opensearch.username', 'opensearch.password'] | intersect(__wazuh_dashboard_keystore.stdout_lines) }}"
+  changed_when: true
+  notify: Restart Wazuh dashboard
+
+- name: Configure | Create dashboard plugin configuration directory
+  ansible.builtin.file:
+    path: '{{ __wazuh_dashboard_plugin_config_dir }}'
+    state: directory
+    owner: '{{ __wazuh_dashboard_user }}'
+    group: '{{ __wazuh_dashboard_user }}'
+    mode: '0750'
+
+- name: Configure | Deploy dashboard plugin configuration
+  ansible.builtin.template:
+    src: wazuh.yml.j2
+    dest: '{{ __wazuh_dashboard_plugin_config_file }}'
+    owner: '{{ __wazuh_dashboard_user }}'
+    group: '{{ __wazuh_dashboard_user }}'
+    mode: '0640'
+  no_log: true
+  notify: Restart Wazuh dashboard

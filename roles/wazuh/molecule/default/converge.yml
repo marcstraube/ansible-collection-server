@@ -1,0 +1,19 @@
+---
+- name: Converge
+  hosts: all
+  gather_facts: true
+
+  vars:
+    # Certificates issued by marcstraube.common.pki in prepare.yml
+    wazuh_enabled: true
+    wazuh_ca_cert_file: '/etc/ssl/ca/certs/ca.crt'
+    wazuh_node_cert_file: '/etc/ssl/certs/wazuh-node.crt'
+    wazuh_node_key_file: '/etc/ssl/private/wazuh-node.key'
+    wazuh_admin_cert_file: '/etc/ssl/certs/wazuh-admin.crt'
+    wazuh_admin_key_file: '/etc/ssl/private/wazuh-admin.key'
+    wazuh_indexer_heap_size: '512m'
+
+  tasks:
+    - name: Converge | Include wazuh role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'

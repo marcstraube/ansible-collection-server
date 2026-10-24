@@ -21,7 +21,7 @@ for the base system (podman, pki, firewalld, fail2ban).
 ## Requirements
 
 - ansible-core >= 2.19
-- Collections: `marcstraube.common`, `community.general`,
+- Collections: `marcstraube.common`, `community.crypto`, `community.general`,
   `community.postgresql`, `containers.podman`, `ansible.posix`
   (installed automatically with the collection)
 
@@ -46,6 +46,12 @@ for the base system (podman, pki, firewalld, fail2ban).
 | Role    | Description                                             |
 | ------- | ------------------------------------------------------- |
 | **n8n** | n8n workflow automation as a rootless Podman container  |
+
+### Security
+
+| Role      | Description                                                    |
+| --------- | -------------------------------------------------------------- |
+| **wazuh** | Wazuh all-in-one server: indexer, manager, Filebeat, dashboard |
 
 ## Installation
 
