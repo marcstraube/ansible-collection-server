@@ -1,0 +1,32 @@
+---
+# =============================================================================
+# Wazuh Server Playbook
+# =============================================================================
+# Wazuh all-in-one stack: pki-issued certificates and the Wazuh indexer,
+# manager, Filebeat and dashboard. The stack and its order live in
+# tasks/wazuh_server.yml; this play adds the Arch Linux system update in
+# front of it.
+#
+# Usage:
+#   ansible-playbook marcstraube.server.wazuh_server -i inventory/
+#   ansible-playbook marcstraube.server.wazuh_server -i inventory/ \
+#     --tags wazuh:security
+#
+# Configure roles via inventory variables (group_vars/host_vars).
+# See each role's defaults/main.yml for available variables.
+# =============================================================================
+
+- name: Wazuh Server Deployment
+  hosts: wazuh_servers
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Wazuh | Import system update tasks
+      ansible.builtin.import_tasks:
+        file: tasks/system_update.yml
+
+  tasks:
+    - name: Wazuh | Import Wazuh server tasks
+      ansible.builtin.import_tasks:
+        file: tasks/wazuh_server.yml

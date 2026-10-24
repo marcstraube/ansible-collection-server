@@ -85,11 +85,12 @@ of the stack in the required order and, on Arch Linux, a full system
 upgrade first, so a rolling release never installs packages on an outdated
 package database. Other platforms skip the upgrade.
 
-| Playbook                             | Host group    | Stack                               |
-| ------------------------------------ | ------------- | ----------------------------------- |
-| `marcstraube.server.web_server`      | `web_servers` | nginx or apache, certbot            |
-| `marcstraube.server.database_server` | `db_servers`  | pki, postgresql                     |
-| `marcstraube.server.n8n`             | `n8n_servers` | podman, postgresql, pki, n8n, nginx |
+| Playbook                             | Host group      | Stack                               |
+| ------------------------------------ | --------------- | ----------------------------------- |
+| `marcstraube.server.web_server`      | `web_servers`   | nginx or apache, certbot            |
+| `marcstraube.server.database_server` | `db_servers`    | pki, postgresql                     |
+| `marcstraube.server.n8n`             | `n8n_servers`   | podman, postgresql, pki, n8n, nginx |
+| `marcstraube.server.wazuh_server`    | `wazuh_servers` | pki, wazuh                          |
 
 Every role in a stack is gated on its `<role>_enabled` toggle, so the
 inventory decides which parts of a stack run on a host:
@@ -108,7 +109,8 @@ ansible-playbook marcstraube.server.web_server -i inventory/ --tags nginx
 The roles are imported statically, so their sub-tags stay visible to
 `--tags` and `--list-tags`. A play of your own can import the task files
 under `playbooks/tasks/` instead: `system_update.yml` for the upgrade and
-`web_server.yml`, `database_server.yml` or `n8n.yml` for the stack.
+`web_server.yml`, `database_server.yml`, `n8n.yml` or `wazuh_server.yml`
+for the stack.
 
 ### Single Roles
 
