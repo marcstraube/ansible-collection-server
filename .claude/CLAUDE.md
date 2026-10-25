@@ -24,13 +24,14 @@ Full reference with YAML quoting rules: see infra project `.claude/CLAUDE.md`.
 
 ## Roles
 
-| Role         | Purpose                                                |
-| ------------ | ------------------------------------------------------ |
-| `nginx`      | Nginx web server, reverse proxy, stream proxy          |
-| `apache`     | Apache HTTP Server, MPM selection, HTTP/2, PHP-FPM     |
-| `certbot`    | Let's Encrypt certificates and renewal hooks           |
-| `postgresql` | PostgreSQL server, TLS, PGDG repository option         |
-| `n8n`        | n8n workflow automation as a rootless Podman container |
+| Role           | Purpose                                                |
+| -------------- | ------------------------------------------------------ |
+| `nginx`        | Nginx web server, reverse proxy, stream proxy          |
+| `apache`       | Apache HTTP Server, MPM selection, HTTP/2, PHP-FPM     |
+| `certbot`      | Let's Encrypt certificates and renewal hooks           |
+| `postgresql`   | PostgreSQL server, TLS, PGDG repository option         |
+| `n8n`          | n8n workflow automation as a rootless Podman container |
+| `wazuh_server` | Wazuh all-in-one server (indexer, manager, dashboard)  |
 
 Every role ships with `<role>_enabled: false` in its defaults; the inventory
 turns it on per host group.
@@ -61,6 +62,7 @@ Available entry task files:
 | `web_server.yml` | Nginx/Apache + certbot |
 | `database_server.yml` | PostgreSQL with pki-issued certificates |
 | `n8n.yml` | N8N workflow automation (podman, postgresql, pki, nginx) |
+| `wazuh_server.yml` | Wazuh all-in-one server with pki-issued certificates |
 | `system_update.yml` | Arch Linux full upgrade, `pre_tasks` of every collection playbook |
 
 Every role an entry task file references has to exist in the collection build —
