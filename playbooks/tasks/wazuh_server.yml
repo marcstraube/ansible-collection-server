@@ -1,0 +1,35 @@
+---
+# =============================================================================
+# Wazuh Server Tasks
+# =============================================================================
+# Task file for Wazuh server deployment — single source of truth.
+# Import it from a play with `ansible.builtin.import_tasks`.
+#
+# Stack: pki, wazuh_server.
+#
+# pki runs first so the certificates from pki_server_certs and
+# pki_client_certs exist before the wazuh_server role asserts its
+# certificate paths. The wazuh_server role copies the certificates into each
+# component and compares them by content, so a certificate renewed by pki,
+# in this play or an earlier one, changes the copy and restarts the
+# component. No forward of pki_cert_material_changed is needed.
+#
+# Roles are imported statically (import_role) so their internal sub-tags are
+# exposed to --tags / --list-tags. Run `ansible-playbook … --list-tags` to see
+# the full set. Dynamic include_role would hide sub-tags behind the include.
+# =============================================================================
+
+- name: Wazuh | Import pki role
+  ansible.builtin.import_role:
+    name: marcstraube.common.pki
+  tags:
+    - wazuh_server
+    - pki
+  when: wazuh_server_enabled | bool
+
+- name: Wazuh | Import wazuh_server role
+  ansible.builtin.import_role:
+    name: marcstraube.server.wazuh_server
+  tags:
+    - wazuh_server
+  when: wazuh_server_enabled | bool

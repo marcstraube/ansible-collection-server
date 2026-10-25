@@ -132,6 +132,9 @@ IncludeOptional conf-enabled/*.conf
 
 {% if apache_mpm_module == 'event' or apache_mpm_module == 'worker' %}
 <IfModule mpm_{{ apache_mpm_module }}_module>
+{% if apache_mpm_server_limit | string | length > 0 %}
+    ServerLimit              {{ apache_mpm_server_limit }}
+{% endif %}
     StartServers             {{ apache_mpm_start_servers }}
     MinSpareThreads          {{ apache_mpm_min_spare_threads }}
     MaxSpareThreads          {{ apache_mpm_max_spare_threads }}
@@ -311,6 +314,17 @@ Include {{ __apache_config_dir }}/security.conf
     Require all denied
 </Location>
 
+{% if apache_remoteip_header | length > 0 %}
+#
+# Client Address Behind a Reverse Proxy
+#
+# Replaces the proxy address with the client address from the header for
+# access logs, REMOTE_ADDR and Require ip. Only the listed proxies are trusted.
+
+RemoteIPHeader {{ apache_remoteip_header }}
+RemoteIPTrustedProxy {{ apache_remoteip_trusted_proxies | join(' ') }}
+
+{% endif %}
 {% if apache_php_fpm_enabled | default(false) and apache_php_fpm_scope | default('vhost') == 'global' %}
 #
 # PHP-FPM

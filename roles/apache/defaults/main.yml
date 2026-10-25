@@ -45,11 +45,14 @@ apache_server_name: '{{ ansible_facts["fqdn"] }}'
 # Server admin email
 apache_server_admin: 'webmaster@{{ ansible_facts["domain"] }}'
 
-# Listen ports
+# Listen ports. An entry is rendered verbatim into a Listen directive, so
+# 'ADDRESS:PORT' (e.g. '192.0.2.10:8081', IPv6 as '[2001:db8::10]:8081')
+# binds the port to a single address. A vhost with listen_address needs the
+# matching ADDRESS:PORT entry here.
 apache_listen_ports:
   - 80
 
-# Listen ports for HTTPS (requires SSL module)
+# Listen ports for HTTPS (requires SSL module), same format as above
 apache_listen_ssl_ports:
   - 443
 
@@ -82,6 +85,15 @@ apache_mpm_thread_limit: 64
 apache_mpm_threads_per_child: 25
 apache_mpm_max_request_workers: 400
 apache_mpm_max_connections_per_child: 1000
+
+# ServerLimit (event/worker): the number of scoreboard slots for server
+# processes. Empty: no directive, Apache derives it from
+# MaxRequestWorkers / ThreadsPerChild (16 with the defaults above). Processes
+# that are shutting down keep their slot until their last connection ends
+# (after a graceful reload, above MaxSpareThreads, at MaxConnectionsPerChild);
+# set headroom above that ratio when Apache logs AH03490 "scoreboard is full".
+# Apache reads ServerLimit only at startup, so a change restarts the service.
+apache_mpm_server_limit: ''
 
 # Prefork MPM Settings
 
@@ -341,6 +353,10 @@ apache_vhosts_keep: []
 # 00-<name>.conf — it then loads first and becomes Apache's catch-all for
 # requests whose Host header matches no vhost (also valid in apache_vhosts_ssl
 # and apache_reverse_proxies; on SSL it also serves unknown-SNI requests).
+# listen_address (default '*') binds the vhost to one address, rendered as
+# <VirtualHost ADDRESS:PORT>; IPv6 addresses go in brackets. Valid in all three
+# lists. Apache only receives connections on that address when a matching
+# Listen entry exists (apache_listen_ports / apache_listen_ssl_ports).
 # Example:
 #   - server_name: 'www.example.com'
 #     server_alias:
@@ -383,6 +399,24 @@ apache_vhosts_ssl: []
 apache_reverse_proxies: []
 
 #
+# Client Address Behind a Reverse Proxy (mod_remoteip)
+#
+
+# Request header that carries the client address set by a reverse proxy or
+# load balancer, e.g. 'X-Forwarded-For'. Empty disables mod_remoteip. When set,
+# Apache replaces the proxy address with the client address for access logs,
+# REMOTE_ADDR and Require ip.
+apache_remoteip_header: ''
+
+# Proxies whose header is trusted (addresses or CIDR ranges), rendered as
+# RemoteIPTrustedProxy. Required when apache_remoteip_header is set: without
+# it, any client could claim an arbitrary address through the header.
+# Example:
+#   - '192.0.2.10'
+#   - '198.51.100.0/24'
+apache_remoteip_trusted_proxies: []
+
+#
 # PHP-FPM
 #
 
@@ -395,7 +429,8 @@ apache_php_fpm_socket: 'unix:/run/php-fpm/php-fpm.sock|fcgi://localhost'
 # Where the PHP-FPM handler is configured:
 #   global - a single block in the server configuration, inherited by every
 #            vhost, including vhosts written by something other than this role
-#   vhost  - one block per vhost
+#   vhost  - one block per vhost in apache_vhosts_ssl and apache_vhosts
+#            (HTTP vhosts with redirect_to_https are skipped)
 # A vhost overrides the handler through its own php_fpm_socket, because a
 # vhost-local <FilesMatch> takes precedence over the server-context one. The same
 # holds for php_fpm_timeout, and both override independently of each other.
@@ -439,6 +474,21 @@ apache_extra_config: ''
 # Example:
 #   - '/etc/apache2/conf-available/custom.conf'
 apache_extra_conf_includes: []
+
+#
+# Service Limits
+#
+
+# Open file limit (LimitNOFILE) of the Apache service, deployed as a systemd
+# drop-in and on Debian also as APACHE_ULIMIT_MAX_FILES in envvars, since
+# apachectl sets its own limit there; empty keeps the distro default (systemd
+# soft limit 1024, on Debian 8192 from apachectl). Apache needs one
+# descriptor per log directive in a virtual host (one per distinct error log
+# file), so hosts with many virtual hosts that log separately exceed the
+# default: the configuration test passes, but the restart fails with
+# 'AH00019: Unable to open logs'. Changing the value restarts Apache.
+# Example: 65536
+apache_limit_nofile: ''
 
 #
 # Firewall

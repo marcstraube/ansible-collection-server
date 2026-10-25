@@ -1,0 +1,116 @@
+---
+#
+# Role Control
+#
+
+# Enable the wazuh_server role
+wazuh_server_enabled: false
+
+#
+# Installation
+#
+# All-in-one deployment: Wazuh indexer, Wazuh manager, Filebeat and
+# Wazuh dashboard on a single host.
+
+# Wazuh release, pins the indexer, manager and dashboard packages
+wazuh_server_version: '4.14.9'
+
+# Filebeat OSS release the Wazuh module supports
+wazuh_server_filebeat_version: '7.10.2'
+
+# Wazuh Filebeat module release
+wazuh_server_filebeat_module_version: '0.5'
+
+#
+# Certificates
+#
+# Paths on the managed host to PEM files issued by one CA, for example
+# deployed by marcstraube.common.pki. The role copies them into the
+# certificate directory of each component and converts the private keys to
+# PKCS#8. The subjects of the node and admin certificates become
+# plugins.security.nodes_dn and plugins.security.authcz.admin_dn.
+
+# CA certificate that issued all certificates below
+wazuh_server_ca_cert_file: ''
+
+# Indexer node certificate and key, also served by the dashboard on HTTPS
+wazuh_server_node_cert_file: ''
+wazuh_server_node_key_file: ''
+
+# Admin client certificate and key for the security plugin (securityadmin)
+wazuh_server_admin_cert_file: ''
+wazuh_server_admin_key_file: ''
+
+# Dashboard certificate and key, defaults to the node certificate
+wazuh_server_dashboard_cert_file: '{{ wazuh_server_node_cert_file }}'
+wazuh_server_dashboard_key_file: '{{ wazuh_server_node_key_file }}'
+
+#
+# Credentials
+#
+# Required. Keep them in an Ansible Vault. The role replaces the internal
+# users of the indexer with 'admin' and 'kibanaserver' and sets the
+# passwords of the Wazuh API users 'wazuh' and 'wazuh-wui'. A changed
+# password is applied on the next run.
+
+# Indexer user 'admin': dashboard login and Filebeat
+wazuh_server_indexer_admin_password: ''
+
+# Indexer user 'kibanaserver': dashboard backend
+wazuh_server_indexer_kibanaserver_password: ''
+
+# Wazuh API passwords: 8 to 64 characters with upper and lower case
+# letters, a digit and a symbol.
+
+# Wazuh API user 'wazuh': administrator
+wazuh_server_api_wazuh_password: ''
+
+# Wazuh API user 'wazuh-wui': dashboard access to the manager API
+wazuh_server_api_wui_password: ''
+
+#
+# Wazuh Indexer
+#
+
+# Enable and start the Wazuh indexer service
+wazuh_server_indexer_service_enabled: true
+
+# Address the indexer binds to; the manager (Filebeat) and the dashboard
+# run on the same host, so loopback is enough
+wazuh_server_indexer_network_host: '127.0.0.1'
+
+# HTTP port of the indexer REST API
+wazuh_server_indexer_http_port: 9200
+
+# Node and cluster name
+wazuh_server_indexer_node_name: 'node-1'
+wazuh_server_indexer_cluster_name: 'wazuh'
+
+# JVM heap size (Xms and Xmx), e.g. '4g'. Empty keeps the package default.
+# Upstream recommends half of the RAM, at most 32g.
+wazuh_server_indexer_heap_size: ''
+
+#
+# Wazuh Manager
+#
+
+# Enable and start the Wazuh manager service
+wazuh_server_manager_service_enabled: true
+
+#
+# Filebeat
+#
+
+# Enable and start the Filebeat service
+wazuh_server_filebeat_service_enabled: true
+
+#
+# Wazuh Dashboard
+#
+
+# Enable and start the Wazuh dashboard service
+wazuh_server_dashboard_service_enabled: true
+
+# Address and port the dashboard listens on
+wazuh_server_dashboard_server_host: '0.0.0.0'
+wazuh_server_dashboard_server_port: 443
