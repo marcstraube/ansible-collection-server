@@ -2,6 +2,18 @@
 
 All notable changes to this collection will be documented in this file.
 
+## 1.0.2 (2026-10-23)
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+## What's Changed
+### Bug Fixes
+* fix(apache): test the configuration after vhosts are pruned by @marcstraube in https://github.com/marcstraube/ansible-collection-server/pull/30
+* fix(apache): label additional listen ports for SELinux by @marcstraube in https://github.com/marcstraube/ansible-collection-server/pull/33
+
+
+**Full Changelog**: https://github.com/marcstraube/ansible-collection-server/compare/v1.0.1...v1.0.2
+
 ## 1.0.1 (2026-10-22)
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
