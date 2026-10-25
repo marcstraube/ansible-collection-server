@@ -1,0 +1,63 @@
+---
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __prepare_packages:
+      Debian:
+        - systemd
+        - dbus
+        - procps
+        - gnupg
+        - ca-certificates
+      RedHat:
+        - systemd
+        - dbus
+        - procps-ng
+
+  tasks:
+    - name: Prepare | Update package cache (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Update package cache (RedHat)
+      ansible.builtin.dnf:
+        update_cache: true
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name: '{{ __prepare_packages[ansible_facts["os_family"]] }}'
+        state: present
+      retries: 3
+      delay: 5
+
+    # The certificates the role consumes, issued by a local CA through
+    # marcstraube.common.pki — the documented way to provide them.
+
+    - name: Prepare | Issue test certificates
+      ansible.builtin.include_role:
+        name: marcstraube.common.pki
+      vars:
+        pki_enabled: true
+        pki_system_config_enabled: false
+        pki_ca_enabled: true
+        pki_ca_organization: 'Wazuh Test'
+        pki_ca_common_name: 'Wazuh Test Root CA'
+        pki_ca_passphrase: ''
+        pki_server_certs:
+          - name: 'wazuh-node'
+            common_name: 'wazuh-node'
+            san:
+              - 'DNS:localhost'
+              - 'IP:127.0.0.1'
+            sign_with_ca: true
+        pki_client_certs:
+          - name: 'wazuh-admin'
+            common_name: 'admin'

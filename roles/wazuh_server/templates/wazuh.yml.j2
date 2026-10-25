@@ -1,0 +1,9 @@
+{{ ansible_managed | comment }}
+# Wazuh dashboard plugin: connection to the Wazuh manager API
+hosts:
+  - default:
+      url: https://127.0.0.1
+      port: 55000
+      username: {{ __wazuh_server_api_wui_user | to_json }}
+      password: {{ wazuh_server_api_wui_password | to_json }}
+      run_as: false

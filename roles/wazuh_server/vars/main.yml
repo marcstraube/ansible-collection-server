@@ -1,0 +1,88 @@
+---
+# Wazuh package repository (one repository per major version)
+__wazuh_server_repo_major: "{{ wazuh_server_version.split('.') | first }}.x"
+__wazuh_server_repo_key_url: 'https://packages.wazuh.com/key/GPG-KEY-WAZUH'
+
+# Service names (identical on every platform)
+__wazuh_server_indexer_service_name: 'wazuh-indexer'
+__wazuh_server_manager_service_name: 'wazuh-manager'
+__wazuh_server_filebeat_service_name: 'filebeat'
+__wazuh_server_dashboard_service_name: 'wazuh-dashboard'
+
+# System users created by the packages
+__wazuh_server_indexer_user: 'wazuh-indexer'
+__wazuh_server_dashboard_user: 'wazuh-dashboard'
+
+# Wazuh indexer
+__wazuh_server_indexer_config_dir: '/etc/wazuh-indexer'
+__wazuh_server_indexer_config_file: '{{ __wazuh_server_indexer_config_dir }}/opensearch.yml'
+__wazuh_server_indexer_jvm_options_dir: '{{ __wazuh_server_indexer_config_dir }}/jvm.options.d'
+__wazuh_server_indexer_heap_config_file: '{{ __wazuh_server_indexer_jvm_options_dir }}/heap.options'
+__wazuh_server_indexer_certs_dir: '{{ __wazuh_server_indexer_config_dir }}/certs'
+__wazuh_server_indexer_data_dir: '/var/lib/wazuh-indexer'
+__wazuh_server_indexer_log_dir: '/var/log/wazuh-indexer'
+__wazuh_server_indexer_home_dir: '/usr/share/wazuh-indexer'
+__wazuh_server_indexer_java_home: '{{ __wazuh_server_indexer_home_dir }}/jdk'
+__wazuh_server_indexer_security_config_dir: '{{ __wazuh_server_indexer_config_dir }}/opensearch-security'
+__wazuh_server_indexer_security_tools_dir: '{{ __wazuh_server_indexer_home_dir }}/plugins/opensearch-security/tools'
+__wazuh_server_indexer_url: 'https://{{ wazuh_server_indexer_network_host }}:{{ wazuh_server_indexer_http_port }}'
+
+# Wazuh manager API
+__wazuh_server_api_url: 'https://127.0.0.1:55000'
+__wazuh_server_api_wui_user: 'wazuh-wui'
+
+# Users the manager creates on installation, with their package default
+# passwords
+__wazuh_server_api_users:
+  - name: 'wazuh'
+    password: '{{ wazuh_server_api_wazuh_password }}'
+    default_password: 'wazuh'
+  - name: '{{ __wazuh_server_api_wui_user }}'
+    password: '{{ wazuh_server_api_wui_password }}'
+    default_password: 'wazuh-wui'
+
+# Wazuh API password policy: 8 to 64 characters with upper and lower case
+# letters, a digit and a symbol
+__wazuh_server_api_password_regex: '^(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9])(?=.*[^A-Za-z0-9]).{8,64}$'
+
+# Filebeat
+__wazuh_server_filebeat_config_dir: '/etc/filebeat'
+__wazuh_server_filebeat_config_file: '{{ __wazuh_server_filebeat_config_dir }}/filebeat.yml'
+__wazuh_server_filebeat_certs_dir: '{{ __wazuh_server_filebeat_config_dir }}/certs'
+__wazuh_server_filebeat_template_file: '{{ __wazuh_server_filebeat_config_dir }}/wazuh-template.json'
+__wazuh_server_filebeat_template_url: >-
+  https://raw.githubusercontent.com/wazuh/wazuh/v{{ wazuh_server_version
+  }}/extensions/elasticsearch/7.x/wazuh-template.json
+__wazuh_server_filebeat_module_parent_dir: '/usr/share/filebeat/module'
+__wazuh_server_filebeat_module_dir: '{{ __wazuh_server_filebeat_module_parent_dir }}/wazuh'
+__wazuh_server_filebeat_module_url: >-
+  https://packages.wazuh.com/{{ __wazuh_server_repo_major
+  }}/filebeat/wazuh-filebeat-{{ wazuh_server_filebeat_module_version }}.tar.gz
+
+# Wazuh dashboard
+__wazuh_server_dashboard_config_dir: '/etc/wazuh-dashboard'
+__wazuh_server_dashboard_config_file: '{{ __wazuh_server_dashboard_config_dir }}/opensearch_dashboards.yml'
+__wazuh_server_dashboard_certs_dir: '{{ __wazuh_server_dashboard_config_dir }}/certs'
+__wazuh_server_dashboard_keystore_bin: '/usr/share/wazuh-dashboard/bin/opensearch-dashboards-keystore'
+__wazuh_server_dashboard_plugin_config_dir: '/usr/share/wazuh-dashboard/data/wazuh/config'
+__wazuh_server_dashboard_plugin_config_file: '{{ __wazuh_server_dashboard_plugin_config_dir }}/wazuh.yml'
+
+# Certificate file names inside the component certificate directories
+__wazuh_server_ca_cert_name: 'root-ca.pem'
+__wazuh_server_node_cert_name: 'node.pem'
+__wazuh_server_node_key_name: 'node-key.pem'
+__wazuh_server_admin_cert_name: 'admin.pem'
+__wazuh_server_admin_key_name: 'admin-key.pem'
+__wazuh_server_dashboard_cert_name: 'dashboard.pem'
+__wazuh_server_dashboard_key_name: 'dashboard-key.pem'
+
+# RFC 4514 short names for the subject attributes of the node and admin
+# certificates; the security plugin compares the DNs in this notation
+__wazuh_server_dn_attribute_names:
+  commonName: 'CN'
+  organizationalUnitName: 'OU'
+  organizationName: 'O'
+  localityName: 'L'
+  stateOrProvinceName: 'ST'
+  countryName: 'C'
+  domainComponent: 'DC'
