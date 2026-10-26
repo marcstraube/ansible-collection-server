@@ -16,7 +16,7 @@ n8n_service_enabled: true
 # n8n release: the tag of the container image the role runs. The default
 # follows the npm `stable` channel and is bumped by the update-n8n-version
 # workflow once the image tag is published.
-n8n_version: '2.43.8'
+n8n_version: '2.44.7'
 
 # Container image and runtime settings
 n8n_podman_image: 'docker.io/n8nio/n8n'
