@@ -1,0 +1,30 @@
+---
+- name: Reload Wazuh systemd units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: wazuh_server_enabled | bool
+  failed_when: false
+
+- name: Restart Wazuh indexer
+  ansible.builtin.systemd_service:
+    name: '{{ __wazuh_server_indexer_service_name }}'
+    state: restarted
+  when: wazuh_server_indexer_service_enabled | bool
+
+- name: Restart Wazuh manager
+  ansible.builtin.systemd_service:
+    name: '{{ __wazuh_server_manager_service_name }}'
+    state: restarted
+  when: wazuh_server_manager_service_enabled | bool
+
+- name: Restart Filebeat
+  ansible.builtin.systemd_service:
+    name: '{{ __wazuh_server_filebeat_service_name }}'
+    state: restarted
+  when: wazuh_server_filebeat_service_enabled | bool
+
+- name: Restart Wazuh dashboard
+  ansible.builtin.systemd_service:
+    name: '{{ __wazuh_server_dashboard_service_name }}'
+    state: restarted
+  when: wazuh_server_dashboard_service_enabled | bool

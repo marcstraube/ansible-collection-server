@@ -15,6 +15,7 @@
         - dbus
         - procps
         - openssl
+        - curl
       RedHat:
         - systemd
         - dbus
@@ -84,6 +85,38 @@
           <body><h1>Apache Test Page</h1></body>
           </html>
         dest: /var/www/testsite/index.html
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Create address-bound document root
+      ansible.builtin.file:
+        path: /var/www/bound
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Create address-bound index page
+      ansible.builtin.copy:
+        content: |
+          <!DOCTYPE html>
+          <html>
+          <head><title>Bound Test</title></head>
+          <body><h1>Address Bound Page</h1></body>
+          </html>
+        dest: /var/www/bound/index.html
+        owner: root
+        group: root
+        mode: '0644'
+
+    # Served through the address-bound HTTP vhost, which carries its own
+    # PHP-FPM handler.
+    - name: Prepare | Deploy PHP test script for the HTTP vhost
+      ansible.builtin.copy:
+        content: |
+          <?php echo 'PHP-HTTP-EXECUTED-OK';
+        dest: /var/www/bound/index.php
         owner: root
         group: root
         mode: '0644'

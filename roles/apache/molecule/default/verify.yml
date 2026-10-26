@@ -63,7 +63,8 @@
           - "'ServerTokens Prod' in (__apache_config_content.content | b64decode)"
           - "'ServerSignature Off' in (__apache_config_content.content | b64decode)"
           - "'TraceEnable Off' in (__apache_config_content.content | b64decode)"
-        fail_msg: "Apache config missing expected security settings"
+          - (__apache_config_content.content | b64decode) is search('(?m)^\\s+ServerLimit\\s+20$')
+        fail_msg: "Apache config missing expected security settings or ServerLimit 20"
         success_msg: "Apache config contains expected security settings"
 
     #
@@ -266,6 +267,130 @@
         success_msg: "HTTP response contains expected content"
 
     #
+    # Address Binding (listen_address)
+    #
+
+    - name: Verify | Read the address-bound vhost config
+      ansible.builtin.slurp:
+        src: '{{ __apache_vhosts_dir }}/bound.example.local.conf'
+      register: __apache_bound_conf
+
+    - name: Verify | Assert the vhost is bound to its address
+      ansible.builtin.assert:
+        that:
+          - "'<VirtualHost 127.0.0.2:8081>' in (__apache_bound_conf.content | b64decode)"
+        fail_msg: "bound.example.local is not rendered as <VirtualHost 127.0.0.2:8081>"
+        success_msg: "bound.example.local is rendered as <VirtualHost 127.0.0.2:8081>"
+
+    - name: Verify | Request the address-bound vhost
+      ansible.builtin.uri:
+        url: http://127.0.0.2:8081/
+        return_content: true
+      register: __apache_bound_response
+
+    - name: Verify | Request the bound port on another address
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8081/
+        timeout: 5
+      register: __apache_unbound_response
+      failed_when: false
+
+    - name: Verify | Assert the vhost answers on its address only
+      ansible.builtin.assert:
+        that:
+          - "'Address Bound Page' in __apache_bound_response.content"
+          - __apache_unbound_response.status == -1
+        fail_msg: >-
+          Expected 127.0.0.2:8081 to serve the bound vhost and 127.0.0.1:8081 to
+          refuse the connection, got status {{ __apache_unbound_response.status }}
+          on 127.0.0.1:8081
+        success_msg: "The vhost answers on 127.0.0.2:8081 only"
+
+    - name: Verify | Read the redirect vhost config for a PHP handler
+      ansible.builtin.slurp:
+        src: '{{ __apache_vhosts_dir }}/zz-redirect-test.local.conf'
+      register: __apache_redirect_conf
+
+    - name: Verify | Request a PHP script through the HTTP vhost
+      ansible.builtin.uri:
+        url: http://127.0.0.2:8081/index.php
+        return_content: true
+      register: __apache_http_php_response
+
+    # The global handler would execute PHP as well, so the rendered config
+    # proves that the vhost carries its own handler.
+    - name: Verify | Assert the HTTP vhost hands PHP to its own FPM handler
+      ansible.builtin.assert:
+        that:
+          - "'SetHandler \"proxy:unix:' in (__apache_bound_conf.content | b64decode)"
+          - "'|fcgi://localhost\"' in (__apache_bound_conf.content | b64decode)"
+          - "'SetHandler' not in (__apache_redirect_conf.content | b64decode)"
+          - "'PHP-HTTP-EXECUTED-OK' in __apache_http_php_response.content"
+          - "'<?php' not in __apache_http_php_response.content"
+        fail_msg: >-
+          Expected a PHP-FPM handler in bound.example.local, none in the redirect
+          vhost, and executed PHP output; got
+          {{ __apache_http_php_response.content | truncate(80) }}
+        success_msg: "HTTP vhosts carry their own PHP-FPM handler"
+
+    #
+    # Client Address Behind a Reverse Proxy (mod_remoteip)
+    #
+    # 127.0.0.1 is the trusted proxy: its X-Forwarded-For must replace the
+    # client address in the access log. A request from 127.0.0.2 is not
+    # trusted, so its header must be ignored and the peer address logged.
+    #
+
+    - name: Verify | Send a request through the trusted proxy address
+      ansible.builtin.command:
+        argv:
+          - curl
+          - '--silent'
+          - '--fail'
+          - '--output'
+          - '/dev/null'
+          - '--interface'
+          - '127.0.0.1'
+          - '--header'
+          - 'X-Forwarded-For: 198.51.100.7'
+          - 'http://127.0.0.1/'
+      changed_when: false
+
+    - name: Verify | Send a request from an untrusted address
+      ansible.builtin.command:
+        argv:
+          - curl
+          - '--silent'
+          - '--fail'
+          - '--output'
+          - '/dev/null'
+          - '--interface'
+          - '127.0.0.2'
+          - '--header'
+          - 'X-Forwarded-For: 203.0.113.9'
+          - 'http://127.0.0.1/'
+      changed_when: false
+
+    - name: Verify | Read the default vhost access log
+      ansible.builtin.slurp:
+        src: '{{ __apache_log_dir }}/testsite.local-access.log'
+      register: __apache_access_log
+
+    - name: Verify | Assert only the trusted proxy can set the client address
+      ansible.builtin.assert:
+        that:
+          - __apache_log_lines | select('match', '^198\\.51\\.100\\.7 ') | list | length > 0
+          - __apache_log_lines | select('match', '^127\\.0\\.0\\.2 ') | list | length > 0
+          - __apache_log_lines | select('search', '203\\.0\\.113\\.9') | list | length == 0
+        fail_msg: >-
+          Expected 198.51.100.7 (trusted proxy) and 127.0.0.2 (untrusted, header
+          ignored) in the access log, and no 203.0.113.9. Last lines:
+          {{ __apache_log_lines[-3:] }}
+        success_msg: "mod_remoteip trusts the configured proxy only"
+      vars:
+        __apache_log_lines: '{{ (__apache_access_log.content | b64decode).splitlines() }}'
+
+    #
     # Version Verification
     #
 
@@ -334,6 +459,7 @@
           - 'proxy'
           - 'proxy_fcgi'
           - 'auth_basic'
+          - 'remoteip'
         __apache_unwanted:
           - 'autoindex'
           - 'access_compat'
@@ -354,7 +480,7 @@
         src: /root/apache-handler-test.json
       register: __apache_handler_test
 
-    - name: Verify | Assert reload keeps the main process and an MPM change restarts it
+    - name: Verify | Assert reload keeps the main process and MPM or ServerLimit changes restart it
       ansible.builtin.assert:
         that:
           - __apache_pids.before | int > 0
@@ -362,12 +488,45 @@
           - __apache_pids.restart != __apache_pids.reload
           - __apache_pids.reloads_reload | int > __apache_pids.reloads_before | int
           - __apache_pids.reloads_restart | int == __apache_pids.reloads_reload | int
+          - __apache_pids.server_limit != __apache_pids.unlimited
         fail_msg: >-
-          A configuration change must reload Apache (same main PID) and an MPM
-          change must restart it (new main PID) without a reload after the
-          restart. Recorded: {{ __apache_pids }}
+          A configuration change must reload Apache (same main PID); an MPM or
+          ServerLimit change must restart it (new main PID) without a reload
+          after the restart. Recorded: {{ __apache_pids }}
       vars:
         __apache_pids: "{{ __apache_handler_test.content | b64decode | from_json }}"
+
+    #
+    # Open File Limit (apache_limit_nofile: 40000 in the converge)
+    #
+
+    - name: Verify | Read the Apache main PID
+      ansible.builtin.systemd_service:
+        name: "{{ 'apache2' if ansible_facts['os_family'] == 'Debian' else 'httpd' }}"
+      register: __apache_service_state
+
+    - name: Verify | Read the open file limit of the main process
+      ansible.builtin.command:
+        argv: ['grep', 'Max open files', '/proc/{{ __apache_service_state.status.MainPID }}/limits']
+      register: __apache_nofile
+      changed_when: false
+
+    - name: Verify | Assert the drop-in limit applies and its removal restores the default
+      ansible.builtin.assert:
+        that:
+          - __apache_nofile.stdout.split()[3] == '40000'
+          - __apache_nofile.stdout.split()[4] == '40000'
+          - __apache_limit_test.dropin_removed | bool
+          - __apache_limit_test.nofile_without_dropin != '40000'
+        fail_msg: >-
+          Expected soft and hard limit 40000 on the main process
+          ('{{ __apache_nofile.stdout }}') and the default limit back after
+          removing the drop-in (recorded: {{ __apache_limit_test }})
+        success_msg: >-
+          Main process runs with 40000 open files; without the drop-in the soft
+          limit was {{ __apache_limit_test.nofile_without_dropin }}
+      vars:
+        __apache_limit_test: "{{ __apache_handler_test.content | b64decode | from_json }}"
 
     #
     # Sensitive Paths

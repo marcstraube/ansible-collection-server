@@ -50,6 +50,35 @@ See [defaults/main.yml](defaults/main.yml) for all available variables.
 | `apache_ssl_enabled`      | `false`                   | Enable SSL/TLS                    |
 | `apache_http2_enabled`    | `false`                   | Enable HTTP/2                     |
 
+### MPM Tuning
+
+| Variable                               | Default | Description                    |
+| -------------------------------------- | ------- | ------------------------------ |
+| `apache_mpm_start_servers`             | `3`     | StartServers (event/worker)    |
+| `apache_mpm_min_spare_threads`         | `25`    | MinSpareThreads                |
+| `apache_mpm_max_spare_threads`         | `75`    | MaxSpareThreads                |
+| `apache_mpm_threads_per_child`         | `25`    | ThreadsPerChild                |
+| `apache_mpm_max_request_workers`       | `400`   | MaxRequestWorkers              |
+| `apache_mpm_max_connections_per_child` | `1000`  | MaxConnectionsPerChild         |
+| `apache_mpm_server_limit`              | `''`    | ServerLimit; empty: no setting |
+
+Without `ServerLimit`, Apache sizes its scoreboard to
+`MaxRequestWorkers / ThreadsPerChild` server processes, with no free slot.
+A process that is shutting down keeps its slot until its last connection ends:
+after a graceful reload, when idle threads exceed `MaxSpareThreads`, and when it
+reaches `MaxConnectionsPerChild`. Apache then cannot start new processes and
+logs `AH03490: scoreboard is full, not at MaxRequestWorkers`. Set
+`apache_mpm_server_limit` above that ratio, for example to twice its value, to
+leave room for these processes.
+
+The role checks that `apache_mpm_server_limit` × `apache_mpm_threads_per_child`
+reaches `apache_mpm_max_request_workers`. Apache reads `ServerLimit` only at
+startup, so the role restarts Apache instead of reloading it when the value
+changes. A restart interrupts the service. On EL and Debian the unit stops
+Apache gracefully: it closes its listening sockets at once and starts again only
+after the open connections have finished. On Arch Linux the unit stops Apache
+immediately, aborting requests in progress.
+
 ### Security
 
 | Variable                          | Default  | Description                      |
@@ -140,6 +169,7 @@ The role loads only the modules its configuration needs. A fixed base set
 | `apache_acme_challenge_enabled`             | `alias`                          |
 | `apache_http2_enabled`                      | `http2`                          |
 | `apache_status_enabled`                     | `status`                         |
+| `apache_remoteip_header`                    | `remoteip`                       |
 | `apache_php_fpm_enabled`                    | `proxy`, `proxy_fcgi`            |
 | `apache_reverse_proxies`                    | `proxy`, `proxy_http`, `rewrite` |
 | a vhost with `redirect_to_https`            | `rewrite`                        |
@@ -180,8 +210,12 @@ suffix there would make Apache read the whole string as a hostname.
 
 - `global` writes a single block into the server configuration. Every vhost
   inherits it, including vhosts written by something other than this role.
-- `vhost` writes one `<FilesMatch>` block into every SSL vhost.
+- `vhost` writes one `<FilesMatch>` block into every vhost of
+  `apache_vhosts_ssl` and `apache_vhosts`. HTTP vhosts with
+  `redirect_to_https` are skipped, since they answer every request with a
+  redirect.
 
+Both HTTP and SSL vhosts accept `php_fpm_socket` and `php_fpm_timeout`.
 In `global` mode a vhost overrides the handler with its own `php_fpm_socket`,
 because a vhost-local `<FilesMatch>` takes precedence over the server-context one
 — so hosts running several PHP versions stay expressible. The same applies to
@@ -247,6 +281,74 @@ untouched. If the `ansible_managed` text changes between runs, configs deployed
 with the old text are no longer recognized and survive (fail-safe — remove them
 by hand or re-deploy first). List file names in `apache_vhosts_keep` to exempt
 unmanaged files explicitly.
+
+### Address Binding
+
+By default every vhost answers on all addresses (`<VirtualHost *:PORT>`). Set
+`listen_address` on an entry of `apache_vhosts`, `apache_vhosts_ssl` or
+`apache_reverse_proxies` to bind it to one address, for example a backend
+behind a reverse proxy that should only answer on its internal interface.
+IPv6 addresses go in brackets (`'[2001:db8::10]'`).
+
+`listen_address` only changes the `<VirtualHost>` line. Apache accepts
+connections on that address only if a matching `Listen` entry exists:
+`apache_listen_ports` and `apache_listen_ssl_ports` are rendered verbatim, so
+list the entries as `'ADDRESS:PORT'`. Two `Listen` entries for the same
+address and port make Apache refuse to start.
+
+```yaml
+apache_listen_ports:
+  - '192.0.2.10:8081'
+apache_vhosts:
+  - server_name: 'app.example.com'
+    document_root: '/var/www/app.example.com'
+    listen_address: '192.0.2.10'
+    listen_port: 8081
+```
+
+Binding to an address limits the interfaces Apache listens on; it does not
+restrict which clients may connect. Restrict the source addresses with the
+firewall, for example through the `marcstraube.common.firewalld` role.
+
+### Client Address Behind a Reverse Proxy
+
+| Variable                          | Default | Description                                  |
+| --------------------------------- | ------- | -------------------------------------------- |
+| `apache_remoteip_header`          | `''`    | Header with the client address; empty = off  |
+| `apache_remoteip_trusted_proxies` | `[]`    | Proxies whose header is trusted              |
+
+Behind a reverse proxy or load balancer, Apache sees the proxy as the client:
+access logs, `REMOTE_ADDR` in applications and `Require ip` all get the proxy
+address. With `apache_remoteip_header` set, the role loads `mod_remoteip` and
+renders `RemoteIPHeader` and `RemoteIPTrustedProxy` into the main
+configuration, so the client address from the header replaces the proxy
+address for every vhost. Only requests from the addresses or CIDR ranges in
+`apache_remoteip_trusted_proxies` are trusted; the role refuses an empty list,
+since any client could otherwise set an arbitrary address through the header.
+
+```yaml
+apache_remoteip_header: 'X-Forwarded-For'
+apache_remoteip_trusted_proxies:
+  - '192.0.2.1'
+```
+
+### Service Limits
+
+| Variable              | Default | Description                                                   |
+| --------------------- | ------- | ------------------------------------------------------------- |
+| `apache_limit_nofile` | `''`    | `LimitNOFILE` of the service; empty keeps the systemd default |
+
+Apache needs one file descriptor per log directive in a virtual host and one
+per distinct error log file ([File Descriptor Limits](https://httpd.apache.org/docs/2.4/vhosts/fd-limits.html)).
+With the systemd default soft limit of 1024 a host with many virtual hosts that
+log separately runs out: the configuration test passes, but the restart fails
+with `AH00019: Unable to open logs` and the service stops. Setting
+`apache_limit_nofile` (e.g. `65536`) deploys a systemd drop-in with
+`LimitNOFILE` and restarts Apache, since a reload keeps the running main
+process and its limit. Debian starts Apache through `apachectl`, which applies
+its own `ulimit -n` from `APACHE_ULIMIT_MAX_FILES` (8192 when unset); the role
+sets that line in `/etc/apache2/envvars` to the same value. Emptying the
+variable removes the drop-in and restores the commented distro line.
 
 ## Tags
 
