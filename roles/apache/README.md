@@ -282,6 +282,47 @@ with the old text are no longer recognized and survive (fail-safe — remove the
 by hand or re-deploy first). List file names in `apache_vhosts_keep` to exempt
 unmanaged files explicitly.
 
+### Document Roots
+
+| Variable                      | Default      | Description                                  |
+| ----------------------------- | ------------ | -------------------------------------------- |
+| `apache_document_root_policy` | `'disabled'` | How vhost document roots are created/managed |
+
+The policy applies to the `document_root` of every entry in `apache_vhosts`
+and `apache_vhosts_ssl`; an entry overrides it with its own
+`document_root_policy` key.
+
+| Policy     | Behavior                                                                     |
+| ---------- | ---------------------------------------------------------------------------- |
+| `managed`  | Create the directory and enforce `owner`, `group` and `mode` on every run    |
+| `seed`     | Create the directory only if nothing is at the path; never touch it later    |
+| `disabled` | Never create or change the directory                                         |
+
+`seed` suits a document root that a deploy process takes over: a fresh host
+gets an empty directory to work in, and once the deployment replaces it (for
+example with a symlink to the current release) or changes its owner, the role
+leaves it alone. Any existing entry counts as present — directory, file or
+symlink, even a symlink whose target does not exist yet. `managed` follows a
+symlink and enforces the settings on its target.
+
+The vhost keys `owner`, `group` and `mode` default to the Apache user, the
+Apache group and `'0755'`.
+
+```yaml
+apache_vhosts:
+  - server_name: 'app.example.com'
+    document_root: '/var/www/app.example.com/public'
+    document_root_policy: 'seed'
+    owner: 'deploy'
+    group: 'apache'
+    mode: '0775'
+```
+
+> **Deprecation:** the vhost key `create_document_root` is removed in v2.0.0.
+> Until then `true` maps to `document_root_policy: 'managed'` and `false` to
+> `'disabled'`, and every run prints a deprecation warning for each vhost that
+> still sets it.
+
 ### Address Binding
 
 By default every vhost answers on all addresses (`<VirtualHost *:PORT>`). Set

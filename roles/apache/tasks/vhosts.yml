@@ -13,6 +13,54 @@
     fail_msg: 'Only one vhost per list may set default_vhost: true.'
     success_msg: 'Default vhost configuration is valid.'
 
+- name: Vhosts | Warn about deprecated create_document_root
+  ansible.builtin.debug:
+    msg: >-
+      DEPRECATION: vhost '{{ item.server_name }}' sets create_document_root,
+      which is removed in v2.0.0. Replace it with document_root_policy:
+      '{{ 'managed' if item.create_document_root | bool else 'disabled' }}'.
+  loop: >-
+    {{ (apache_vhosts + apache_vhosts_ssl)
+       | selectattr('create_document_root', 'defined') | list }}
+  loop_control:
+    label: '{{ item.server_name }}'
+
+- name: Vhosts | Assert valid document root policies
+  ansible.builtin.assert:
+    that:
+      - __apache_document_root_policy in ['managed', 'seed', 'disabled']
+    fail_msg: >-
+      vhost '{{ item.server_name }}': document_root_policy must be 'managed',
+      'seed' or 'disabled', got '{{ __apache_document_root_policy }}'.
+    quiet: true
+  loop: "{{ apache_vhosts + apache_vhosts_ssl }}"
+  loop_control:
+    label: '{{ item.server_name }}'
+  vars:
+    __apache_document_root_policy: &apache_document_root_policy >-
+      {{ item.document_root_policy
+         | default(('managed' if item.create_document_root | bool else 'disabled')
+                   if item.create_document_root is defined
+                   else apache_document_root_policy) }}
+  when: item.document_root is defined
+
+# seed only creates a document root when nothing exists at the path. lstat
+# (follow: false) treats any existing entry as present, including a symlink
+# whose target a deploy process has not created yet.
+- name: Vhosts | Check existing document roots
+  ansible.builtin.stat:
+    path: '{{ item.document_root }}'
+    follow: false
+  register: __apache_document_root_stat
+  loop: "{{ apache_vhosts + apache_vhosts_ssl }}"
+  loop_control:
+    label: '{{ item.server_name }}'
+  vars:
+    __apache_document_root_policy: *apache_document_root_policy
+  when:
+    - item.document_root is defined
+    - __apache_document_root_policy == 'seed'
+
 - name: Vhosts | Create document root directories
   ansible.builtin.file:
     path: '{{ item.document_root }}'
@@ -23,9 +71,14 @@
   loop: "{{ apache_vhosts + apache_vhosts_ssl }}"
   loop_control:
     label: '{{ item.server_name }}'
+    index_var: __apache_vhost_index
+  vars:
+    __apache_document_root_policy: *apache_document_root_policy
   when:
     - item.document_root is defined
-    - item.create_document_root | default(false) | bool
+    - __apache_document_root_policy == 'managed'
+      or (__apache_document_root_policy == 'seed'
+          and not __apache_document_root_stat.results[__apache_vhost_index].stat.exists)
 
 - name: Vhosts | Create ACME challenge webroot
   ansible.builtin.file:
