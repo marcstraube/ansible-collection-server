@@ -64,6 +64,33 @@
         listen_address: '127.0.0.2'
         listen_port: 8081
         php_fpm_socket: '{{ apache_php_fpm_socket }}'
+      # One vhost per document root policy. prepare.yml plants the existing
+      # paths with owners and modes the role must keep or correct; verify.yml
+      # asserts each outcome. testsite.local and bound.example.local above set
+      # no policy and run with the default 'disabled'.
+      - server_name: 'docroot-managed.local'
+        document_root: '/var/www/docroot-managed'
+        document_root_policy: 'managed'
+        mode: '0750'
+      - server_name: 'docroot-seed-new.local'
+        document_root: '/var/www/docroot-seed-new'
+        document_root_policy: 'seed'
+      - server_name: 'docroot-seed-existing.local'
+        document_root: '/var/www/docroot-seed-existing'
+        document_root_policy: 'seed'
+      - server_name: 'docroot-seed-link.local'
+        document_root: '/var/www/docroot-seed-link'
+        document_root_policy: 'seed'
+      - server_name: 'docroot-seed-dangling.local'
+        document_root: '/var/www/docroot-seed-dangling'
+        document_root_policy: 'seed'
+      - server_name: 'docroot-disabled.local'
+        document_root: '/var/www/docroot-disabled'
+        document_root_policy: 'disabled'
+      # Deprecated key, maps to 'managed'.
+      - server_name: 'docroot-legacy.local'
+        document_root: '/var/www/docroot-legacy'
+        create_document_root: true
     # The client address from X-Forwarded-For replaces the peer address only for
     # requests from 127.0.0.1; verify.yml also sends one from 127.0.0.2, whose
     # header must be ignored.

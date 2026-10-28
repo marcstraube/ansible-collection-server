@@ -348,6 +348,19 @@ apache_vhosts_exclusive: false
 #   - 'legacy-site.conf'
 apache_vhosts_keep: []
 
+# How the role handles the document_root of HTTP and SSL vhosts. A vhost
+# overrides it with its own document_root_policy key.
+#   managed  - create the directory and enforce owner/group/mode on every run
+#   seed     - create the directory only when nothing exists at the path yet;
+#              an existing directory, file or symlink is left untouched, so a
+#              deploy process can take over ownership and layout afterwards
+#   disabled - never create or change the directory
+# The vhost keys owner, group and mode default to the Apache user, the Apache
+# group and '0755'.
+# DEPRECATED: the vhost key create_document_root (removed in v2.0.0) maps to
+# 'managed' (true) or 'disabled' (false); use document_root_policy instead.
+apache_document_root_policy: 'disabled'
+
 # HTTP virtual hosts
 # Set default_vhost: true on at most one entry per list to deploy its config as
 # 00-<name>.conf — it then loads first and becomes Apache's catch-all for
@@ -362,6 +375,7 @@ apache_vhosts_keep: []
 #     server_alias:
 #       - 'example.com'
 #     document_root: '/var/www/example.com'
+#     document_root_policy: 'seed'
 #     listen_port: 80
 #     default_vhost: true
 #     custom_config: |

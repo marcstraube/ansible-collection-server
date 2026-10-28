@@ -110,6 +110,31 @@
         group: root
         mode: '0644'
 
+    # Document root policy fixtures. 'managed' must correct the deliberately
+    # wrong mode and owner; the 'seed' paths stand in for a tree a deploy
+    # process already owns and must be left exactly as planted.
+    - name: Prepare | Create document root policy fixture directories
+      ansible.builtin.file:
+        path: '{{ item.path }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '{{ item.mode }}'
+      loop:
+        - {path: '/var/www/docroot-managed', mode: '0777'}
+        - {path: '/var/www/docroot-seed-existing', mode: '0775'}
+        - {path: '/var/www/docroot-seed-target', mode: '0700'}
+
+    - name: Prepare | Create document root policy fixture symlinks
+      ansible.builtin.file:
+        src: '{{ item.src }}'
+        dest: '{{ item.dest }}'
+        state: link
+        force: true
+      loop:
+        - {src: '/var/www/docroot-seed-target', dest: '/var/www/docroot-seed-link'}
+        - {src: '/var/www/docroot-seed-missing', dest: '/var/www/docroot-seed-dangling'}
+
     # Served through the address-bound HTTP vhost, which carries its own
     # PHP-FPM handler.
     - name: Prepare | Deploy PHP test script for the HTTP vhost

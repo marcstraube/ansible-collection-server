@@ -103,6 +103,54 @@
         success_msg: "Virtual host config contains expected settings"
 
     #
+    # Document Root Policy Verification
+    #
+
+    - name: Verify | Stat document root policy paths
+      ansible.builtin.stat:
+        path: '{{ item }}'
+        follow: false
+      loop:
+        - '/var/www/testsite'
+        - '/var/www/docroot-managed'
+        - '/var/www/docroot-seed-new'
+        - '/var/www/docroot-seed-existing'
+        - '/var/www/docroot-seed-link'
+        - '/var/www/docroot-seed-target'
+        - '/var/www/docroot-seed-dangling'
+        - '/var/www/docroot-seed-missing'
+        - '/var/www/docroot-disabled'
+        - '/var/www/docroot-legacy'
+      register: __apache_docroot_stat
+
+    - name: Verify | Assert document root policies took effect
+      ansible.builtin.assert:
+        that:
+          # Default policy 'disabled' keeps the prepare.yml owner.
+          - __docroot['/var/www/testsite'].pw_name == 'root'
+          - __docroot['/var/www/docroot-managed'].pw_name == __apache_user
+          - __docroot['/var/www/docroot-managed'].mode == '0750'
+          - __docroot['/var/www/docroot-seed-new'].isdir
+          - __docroot['/var/www/docroot-seed-new'].pw_name == __apache_user
+          - __docroot['/var/www/docroot-seed-new'].mode == '0755'
+          - __docroot['/var/www/docroot-seed-existing'].pw_name == 'root'
+          - __docroot['/var/www/docroot-seed-existing'].mode == '0775'
+          - __docroot['/var/www/docroot-seed-link'].islnk
+          - __docroot['/var/www/docroot-seed-target'].pw_name == 'root'
+          - __docroot['/var/www/docroot-seed-target'].mode == '0700'
+          - __docroot['/var/www/docroot-seed-dangling'].islnk
+          - not __docroot['/var/www/docroot-seed-missing'].exists
+          - not __docroot['/var/www/docroot-disabled'].exists
+          - __docroot['/var/www/docroot-legacy'].isdir
+          - __docroot['/var/www/docroot-legacy'].pw_name == __apache_user
+        fail_msg: 'Document root policies did not produce the expected state: {{ __docroot }}'
+        success_msg: 'managed corrects, seed creates only missing paths, disabled and default leave paths alone'
+      vars:
+        __docroot: >-
+          {{ dict(__apache_docroot_stat.results | map(attribute='item')
+                  | zip(__apache_docroot_stat.results | map(attribute='stat'))) }}
+
+    #
     # ACME Challenge Verification
     #
 
