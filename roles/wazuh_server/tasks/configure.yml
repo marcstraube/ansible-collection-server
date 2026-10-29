@@ -51,15 +51,24 @@
   no_log: true
   notify: Restart Filebeat
 
+# Fetched in check mode as well, so the deployment compares the content
 - name: Configure | Download Wazuh index template
-  ansible.builtin.get_url:
+  ansible.builtin.uri:
     url: '{{ __wazuh_server_filebeat_template_url }}'
+    return_content: true
+  register: __wazuh_server_filebeat_template
+  retries: 5
+  delay: 10
+  until: __wazuh_server_filebeat_template is not failed
+  check_mode: false
+
+- name: Configure | Deploy Wazuh index template
+  ansible.builtin.copy:
+    content: '{{ __wazuh_server_filebeat_template.content }}'
     dest: '{{ __wazuh_server_filebeat_template_file }}'
     owner: root
     group: root
     mode: '0644'
-  retries: 5
-  delay: 10
   notify: Restart Filebeat
 
 - name: Configure | Install Wazuh Filebeat module
@@ -98,6 +107,8 @@
       - '--allow-root'
   register: __wazuh_server_dashboard_keystore
   changed_when: false
+  # Read-only; check mode needs the entries
+  check_mode: false
 
 - name: Configure | Remove package credentials from the dashboard keystore
   ansible.builtin.command:
