@@ -1,0 +1,132 @@
+---
+name: Update Wazuh Server Version
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly Monday 6:00 UTC
+  workflow_dispatch:       # Manual trigger
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-wazuh-server:
+    name: Check for new Wazuh release
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      # Wazuh keeps releasing older minor series next to the current one,
+      # so the newest release is the highest version, not the latest
+      # published. Only releases of the pinned major series count; the
+      # package repository of the role is per major series. The bump waits
+      # until the packages are published.
+      - name: Get latest Wazuh release
+        id: wazuh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CURRENT=$(grep '^wazuh_server_version:' roles/wazuh_server/defaults/main.yml \
+            | sed "s/.*'\(.*\)'/\1/")
+          MAJOR="${CURRENT%%.*}"
+          LATEST=$(gh api --paginate 'repos/wazuh/wazuh/releases?per_page=100' \
+            --jq '.[] | select(.draft | not) | select(.prerelease | not) | .tag_name' \
+            | grep -E "^v${MAJOR}\.[0-9]+\.[0-9]+$" \
+            | sed 's/^v//' | sort -V | tail -n 1)
+          if ! [[ "$LATEST" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::No Wazuh ${MAJOR}.x release found: '$LATEST'"
+            exit 1
+          fi
+          REPO="https://packages.wazuh.com/${MAJOR}.x"
+          if curl -fsSL -o /dev/null -I \
+               "${REPO}/apt/pool/main/w/wazuh-manager/wazuh-manager_${LATEST}-1_amd64.deb" \
+             && curl -fsSL -o /dev/null -I \
+               "${REPO}/yum/wazuh-manager-${LATEST}-1.x86_64.rpm"; then
+            PACKAGES=true
+          else
+            PACKAGES=false
+            echo "::warning::Wazuh ${LATEST} packages not published yet"
+          fi
+          {
+            echo "latest=$LATEST"
+            echo "current=$CURRENT"
+            echo "packages=$PACKAGES"
+            echo "docs=${LATEST%.*}"
+            echo "series_changed=$([[ "${LATEST%.*}" != "${CURRENT%.*}" ]] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+          echo "Current: $CURRENT, Latest: $LATEST, packages published: $PACKAGES"
+
+      - name: Update defaults/main.yml
+        if: >-
+          steps.wazuh.outputs.latest != steps.wazuh.outputs.current
+          && steps.wazuh.outputs.packages == 'true'
+        run: |
+          sed -i "s/^wazuh_server_version: '.*'/wazuh_server_version: '${{ steps.wazuh.outputs.latest }}'/" \
+            roles/wazuh_server/defaults/main.yml
+
+      # The body lives outside the checkout, so the pull request does not
+      # commit it
+      - name: Write pull request body
+        if: >-
+          steps.wazuh.outputs.latest != steps.wazuh.outputs.current
+          && steps.wazuh.outputs.packages == 'true'
+        env:
+          CURRENT: ${{ steps.wazuh.outputs.current }}
+          LATEST: ${{ steps.wazuh.outputs.latest }}
+          DOCS: https://documentation.wazuh.com/${{ steps.wazuh.outputs.docs }}
+          SERIES_CHANGED: ${{ steps.wazuh.outputs.series_changed }}
+        run: |
+          {
+            echo "Automated update of \`wazuh_server_version\` in \`roles/wazuh_server/defaults/main.yml\`."
+            echo
+            echo "**Previous:** \`${CURRENT}\`"
+            echo "**New:** \`${LATEST}\`"
+            echo
+            echo "Release notes: https://github.com/wazuh/wazuh/releases/tag/v${LATEST}"
+            echo
+            echo "Before merging, check \`wazuh_server_filebeat_version\` and \`wazuh_server_filebeat_module_version\` against the Filebeat installation step of the installation guide: ${DOCS}/installation-guide/wazuh-server/step-by-step.html"
+            if [[ "$SERIES_CHANGED" == 'true' ]]; then
+              echo
+              echo "This is a new minor or major release: the role deploys the index template of the new release, so check the template changes and the upgrade guide: ${DOCS}/upgrade-guide/index.html"
+            fi
+            echo
+            echo "Release this update before the matching \`wazuh_agent_version\` update of marcstraube.common: agents must not be newer than the manager."
+            echo
+            echo "---"
+            echo "This PR was created automatically by the \`update-wazuh-server-version\` workflow."
+          } > "$RUNNER_TEMP/pr-body.md"
+
+      # Pull requests opened with github.token do not trigger the CI
+      # workflow; the release bot app token lets the bump PR run the
+      # wazuh_server molecule matrix.
+      - name: Generate release bot token
+        if: >-
+          steps.wazuh.outputs.latest != steps.wazuh.outputs.current
+          && steps.wazuh.outputs.packages == 'true'
+        uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
+      - name: Create Pull Request
+        if: >-
+          steps.wazuh.outputs.latest != steps.wazuh.outputs.current
+          && steps.wazuh.outputs.packages == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          commit-message: >-
+            chore(wazuh_server): update Wazuh version
+            ${{ steps.wazuh.outputs.current }} →
+            ${{ steps.wazuh.outputs.latest }}
+          branch: chore/update-wazuh-server-${{ steps.wazuh.outputs.latest }}
+          title: >-
+            chore(wazuh_server): update Wazuh version to
+            ${{ steps.wazuh.outputs.latest }}
+          body-path: ${{ runner.temp }}/pr-body.md
+          labels: dependencies
+          delete-branch: true
