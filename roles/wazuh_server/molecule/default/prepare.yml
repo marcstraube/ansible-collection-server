@@ -38,6 +38,31 @@
       retries: 3
       delay: 5
 
+    # systemd caps each service at DefaultTasksMax of the container's pids
+    # limit (podman: 2048). Debian ships 15%, which leaves the manager too few
+    # threads for wazuh-modulesd; EL ships 80%. Use 80% everywhere.
+    - name: Prepare | Create systemd manager drop-in directory
+      ansible.builtin.file:
+        path: /etc/systemd/system.conf.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Raise systemd DefaultTasksMax
+      ansible.builtin.copy:
+        content: |
+          [Manager]
+          DefaultTasksMax=80%
+        dest: /etc/systemd/system.conf.d/50-molecule-tasks-max.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Reload systemd manager configuration
+      ansible.builtin.systemd_service:
+        daemon_reexec: true
+
     # The certificates the role consumes, issued by a local CA through
     # marcstraube.common.pki — the documented way to provide them.
 
