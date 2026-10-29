@@ -36,6 +36,8 @@
   retries: 30
   delay: 10
   until: __wazuh_server_indexer_auth is not failed
+  # Read-only request; check mode needs the status codes
+  check_mode: false
   no_log: true
   when: wazuh_server_indexer_service_enabled | bool
 
@@ -152,6 +154,8 @@
   retries: 30
   delay: 10
   until: __wazuh_server_api_auth is not failed
+  # Only issues a token; check mode needs the status codes
+  check_mode: false
   no_log: true
   when: wazuh_server_manager_service_enabled | bool
 
