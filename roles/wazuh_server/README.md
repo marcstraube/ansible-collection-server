@@ -98,6 +98,13 @@ both `wazuh_server_api_*_password`. See [Credentials](#credentials-1).
 | `wazuh_server_dashboard_service_enabled` | `true`      | Enable and start the Wazuh dashboard service |
 | `wazuh_server_dashboard_server_host`     | `'0.0.0.0'` | Dashboard bind address                       |
 | `wazuh_server_dashboard_server_port`     | `443`       | Dashboard HTTPS port                         |
+| `wazuh_server_dashboard_enrollment_dns`  | `''`        | Agent enrollment address, empty for none     |
+
+The dashboard offers `wazuh_server_dashboard_enrollment_dns` in the
+"Deploy new agent" wizard and puts it into the generated install command.
+The role owns the dashboard plugin configuration (`wazuh.yml`), so set the
+address here instead of in the dashboard: the next run replaces a value set
+in the dashboard.
 
 ## Tags
 

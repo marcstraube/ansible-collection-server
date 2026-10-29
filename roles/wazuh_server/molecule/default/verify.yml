@@ -150,6 +150,31 @@
       delay: 10
       until: __verify_dashboard_status is not failed
 
+    - name: Verify | Read dashboard plugin configuration
+      ansible.builtin.slurp:
+        src: '{{ __wazuh_server_dashboard_plugin_config_file }}'
+      register: __verify_dashboard_plugin_config
+      no_log: true
+
+    - name: Verify | Assert enrollment address in dashboard plugin configuration
+      ansible.builtin.assert:
+        that:
+          - __verify_plugin_config['enrollment.dns'] == wazuh_server_dashboard_enrollment_dns
+        fail_msg: 'wazuh.yml does not set enrollment.dns to {{ wazuh_server_dashboard_enrollment_dns }}'
+      vars:
+        __verify_plugin_config: '{{ __verify_dashboard_plugin_config.content | b64decode | from_yaml }}'
+
+    # The scenario sets the address; the template without it covers the default
+    - name: Verify | Assert empty enrollment address is left out
+      ansible.builtin.assert:
+        that:
+          - "'enrollment.dns' not in (__verify_plugin_config_default | from_yaml)"
+        fail_msg: 'wazuh.yml renders enrollment.dns for an empty address'
+      vars:
+        __verify_plugin_config_default: >-
+          {{ lookup('ansible.builtin.template', playbook_dir ~ '/../../templates/wazuh.yml.j2',
+                    template_vars={'wazuh_server_dashboard_enrollment_dns': ''}) }}
+
     - name: Verify | Assert services are running
       ansible.builtin.systemd_service:
         name: '{{ item }}'
