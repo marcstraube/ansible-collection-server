@@ -7,3 +7,7 @@ hosts:
       username: {{ __wazuh_server_api_wui_user | to_json }}
       password: {{ wazuh_server_api_wui_password | to_json }}
       run_as: false
+{% if wazuh_server_dashboard_enrollment_dns | length > 0 %}
+# Server address the "Deploy new agent" wizard offers for agent enrollment
+enrollment.dns: {{ wazuh_server_dashboard_enrollment_dns | to_json }}
+{% endif %}

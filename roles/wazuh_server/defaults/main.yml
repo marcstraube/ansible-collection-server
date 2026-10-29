@@ -114,3 +114,7 @@ wazuh_server_dashboard_service_enabled: true
 # Address and port the dashboard listens on
 wazuh_server_dashboard_server_host: '0.0.0.0'
 wazuh_server_dashboard_server_port: 443
+
+# Server address the dashboard offers for agent enrollment in the
+# "Deploy new agent" wizard; empty leaves the setting out
+wazuh_server_dashboard_enrollment_dns: ''
