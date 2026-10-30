@@ -1,21 +1,6 @@
 ---
-# The PGDG repo file check (repos.yml) only exists on RedHat with
-# postgresql_repo 'pgdg'; everywhere else the gate falls through.
-- name: Install | PostgreSQL packages
-  ansible.builtin.package:
-    name: '{{ __postgresql_packages }}'
-    state: present
-  retries: 3
-  delay: 5
-  when: __postgresql_pgdg_repo_stat.stat.exists | default(true)
-
-# Guard against a cluster initialized by another major version than the
-# installed server: a rolling distro update (Arch Linux) or a changed EL
-# module stream replaces the binaries while the data directory keeps its
-# version, and the server refuses to start on it. Fail here with both
-# versions instead of at the service task. Tagged always so that every
-# stage sees the same precondition; the read-only command runs in check
-# mode as well.
+# Read by the major version guards below and by the initialization tasks.
+# Tagged always so that every stage sees the same precondition.
 - name: Install | Check if the cluster is initialized
   ansible.builtin.stat:
     path: '{{ __postgresql_data_dir }}/PG_VERSION'
@@ -31,6 +16,272 @@
   tags:
     - always
 
+#
+# Arch Linux
+#
+# A new major version from the rolling repository leaves the cluster
+# unusable until it is upgraded with pg_upgrade. A pacman IgnorePkg drop-in
+# keeps the system upgrade away from PostgreSQL; the role updates it with
+# postgresql_packages_state: latest, within the major version of the
+# cluster. Explicit installs are not affected by the drop-in.
+#
+
+- name: Install | pacman ignore drop-in directory (Arch)
+  ansible.builtin.file:
+    path: '{{ __postgresql_pacman_ignore_file | dirname }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: ansible_facts['os_family'] == 'Archlinux'
+
+- name: Install | pacman ignore drop-in (Arch)
+  ansible.builtin.template:
+    src: pacman-ignore.conf.j2
+    dest: '{{ __postgresql_pacman_ignore_file }}'
+    owner: root
+    group: root
+    mode: '0644'
+  when: ansible_facts['os_family'] == 'Archlinux'
+
+- name: Install | Read the packages pacman ignores (Arch)
+  ansible.builtin.command:
+    cmd: pacman-conf IgnorePkg
+  register: __postgresql_pacman_ignored
+  changed_when: false
+  check_mode: false
+  when: ansible_facts['os_family'] == 'Archlinux'
+
+# marcstraube.common.package_management adds the Include line
+- name: Install | Warn when pacman does not read the drop-in (Arch)
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: pacman.conf does not include {{ __postgresql_pacman_ignore_file | dirname }}/*.conf,
+      so the system upgrade also updates PostgreSQL and may move it to a new
+      major version.
+  when:
+    - ansible_facts['os_family'] == 'Archlinux'
+    - __postgresql_pacman_ignore_packages | difference(__postgresql_pacman_ignored.stdout_lines) | length > 0
+
+# The packages come from the package databases of the last system upgrade;
+# refreshing them here would turn the update into a partial upgrade.
+- name: Install | Read the repository version (Arch)
+  ansible.builtin.command:
+    argv:
+      - pacman
+      - -Si
+      - '{{ __postgresql_server_package }}'
+  register: __postgresql_repo_info
+  changed_when: false
+  check_mode: false
+  when:
+    - ansible_facts['os_family'] == 'Archlinux'
+    - postgresql_packages_state == 'latest'
+    - __postgresql_cluster_version_stat.stat.exists
+
+- name: Install | Assert the update keeps the major version of the cluster (Arch)
+  ansible.builtin.assert:
+    that:
+      - __postgresql_repo_major == __postgresql_cluster_major
+    fail_msg: |
+      The repository holds PostgreSQL {{ __postgresql_repo_major }}, the
+      cluster in {{ __postgresql_data_dir }} was initialized by PostgreSQL
+      {{ __postgresql_cluster_major }}. The role does not perform major
+      version upgrades. Upgrade the cluster by hand (pg_upgrade with the
+      previous binaries from postgresql-old-upgrade) and rerun the role.
+  vars:
+    __postgresql_cluster_major: >-
+      {{ (__postgresql_cluster_version_file.content | b64decode | trim).split('.')[0] }}
+    __postgresql_repo_major: >-
+      {{ __postgresql_repo_info.stdout | regex_search('(?m)^Version\s*:\s*([0-9]+)', '\1') | first }}
+  when:
+    - ansible_facts['os_family'] == 'Archlinux'
+    - postgresql_packages_state == 'latest'
+    - __postgresql_cluster_version_stat.stat.exists
+
+#
+# Debian, Rocky Linux
+#
+
+# A targeted update must see the current repository state; dnf otherwise
+# keeps cached metadata for up to metadata_expire. The cache is cleared
+# rather than refreshed: dnf on EL 9 keeps the cached mirror list on
+# makecache --refresh and stays on the mirror it picked first, even when
+# that mirror has stopped syncing. Clearing the cache fetches a new list.
+# check_mode: false — the metadata cache holds no package, and --check
+# must report the update the real run would install.
+- name: Install | Clear package metadata for update (RedHat)
+  ansible.builtin.command:
+    cmd: dnf clean metadata
+  changed_when: false
+  check_mode: false
+  when:
+    - postgresql_packages_state == 'latest'
+    - ansible_facts['os_family'] == 'RedHat'
+
+- name: Install | Refresh package metadata for update (RedHat)
+  ansible.builtin.command:
+    cmd: dnf makecache
+  changed_when: false
+  check_mode: false
+  when:
+    - postgresql_packages_state == 'latest'
+    - ansible_facts['os_family'] == 'RedHat'
+
+- name: Install | Refresh package metadata for update (Debian)
+  ansible.builtin.apt:
+    update_cache: true
+  changed_when: false
+  check_mode: false
+  when:
+    - postgresql_packages_state == 'latest'
+    - ansible_facts['os_family'] == 'Debian'
+
+# A targeted update covers every installed PostgreSQL package, not only the
+# configured ones: parts pulled in as dependencies (client, libraries,
+# postgresql-common) pin the exact version of the server package and must
+# move in the same transaction.
+- name: Install | Gather package facts for update
+  ansible.builtin.package_facts:
+  when:
+    - postgresql_packages_state == 'latest'
+    - ansible_facts['os_family'] in ['RedHat', 'Debian']
+
+- name: Install | Merge installed packages into the update
+  ansible.builtin.set_fact:
+    __postgresql_update_packages: >-
+      {{ (__postgresql_packages
+          + (ansible_facts['packages'] | list
+             | select('match', __postgresql_update_pattern) | list))
+         | unique | list }}
+  when:
+    - postgresql_packages_state == 'latest'
+    - ansible_facts['os_family'] in ['RedHat', 'Debian']
+
+# The PGDG repo file check (repos.yml) only exists on RedHat with
+# postgresql_repo 'pgdg'; everywhere else the gate falls through.
+- name: Install | PostgreSQL packages
+  ansible.builtin.package:
+    name: '{{ __postgresql_update_packages | default(__postgresql_packages) }}'
+    state: "{{ (ansible_facts['os_family'] == 'Archlinux') | ternary('present', postgresql_packages_state) }}"
+  register: __postgresql_packages_result
+  retries: 3
+  delay: 5
+  when: __postgresql_pgdg_repo_stat.stat.exists | default(true)
+
+# community.general.pacman leaves packages pacman ignores out of its upgrade
+# check, so the held packages are updated with an explicit sync, which
+# installs them despite IgnorePkg
+- name: Install | Update the held packages (Arch)
+  ansible.builtin.command:
+    argv: "{{ ['pacman', '-S', '--needed', '--noconfirm'] + __postgresql_pacman_ignore_packages }}"
+  environment:
+    LC_ALL: 'C'
+  register: __postgresql_arch_update
+  changed_when: "'there is nothing to do' not in __postgresql_arch_update.stdout"
+  retries: 3
+  delay: 5
+  until: __postgresql_arch_update is succeeded
+  when:
+    - ansible_facts['os_family'] == 'Archlinux'
+    - postgresql_packages_state == 'latest'
+
+- name: Install | Record package changes
+  ansible.builtin.set_fact:
+    __postgresql_packages_changed: >-
+      {{ __postgresql_packages_result is changed or __postgresql_arch_update is changed }}
+
+# A running server keeps executing the old binaries after an update. The
+# packages usually restart it themselves (dpkg maintainer scripts, rpm
+# scriptlets), but policy-rc.d or the systemd update helper can prevent
+# that. The role restarts the server only while the running postmaster
+# still executes a replaced binary, so an update never restarts it twice.
+- name: Install | Check for a running server after the update
+  ansible.builtin.stat:
+    path: '{{ __postgresql_data_dir }}/postmaster.pid'
+  register: __postgresql_postmaster_pid_stat
+  when:
+    - postgresql_packages_state == 'latest'
+    - __postgresql_packages_changed | bool
+
+- name: Install | Read the postmaster PID
+  ansible.builtin.slurp:
+    src: '{{ __postgresql_data_dir }}/postmaster.pid'
+  register: __postgresql_postmaster_pid
+  when:
+    - postgresql_packages_state == 'latest'
+    - __postgresql_packages_changed | bool
+    - __postgresql_postmaster_pid_stat.stat.exists | default(false)
+
+# readlink reports a replaced binary as "<path> (deleted)"
+- name: Install | Read the binary of the running server
+  ansible.builtin.command:
+    argv:
+      - readlink
+      - '/proc/{{ (__postgresql_postmaster_pid.content | b64decode).splitlines() | first | trim }}/exe'
+  register: __postgresql_postmaster_exe
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - postgresql_packages_state == 'latest'
+    - __postgresql_packages_changed | bool
+    - __postgresql_postmaster_pid_stat.stat.exists | default(false)
+
+# Check mode installs nothing, so the restart the update needs is reported
+- name: Install | Queue restart for a replaced server binary
+  ansible.builtin.debug:
+    msg: 'The running server executes a replaced binary, restarting it'
+  when:
+    - postgresql_packages_state == 'latest'
+    - __postgresql_packages_changed | bool
+    - __postgresql_postmaster_pid_stat.stat.exists | default(false)
+    - ansible_check_mode or (__postgresql_postmaster_exe.stdout | default('')) is search(' \(deleted\)$')
+  changed_when: true
+  notify: Restart PostgreSQL
+
+# Re-read the installed packages, the facts gathered before the update show
+# the old versions.
+- name: Install | Gather package facts for minimum version check
+  ansible.builtin.package_facts:
+  when:
+    - postgresql_packages_minimum | length > 0
+    - not ansible_check_mode
+  tags:
+    - always
+
+- name: Install | Check minimum version
+  ansible.builtin.assert:
+    that:
+      - __postgresql_installed_version | length > 0
+      - __postgresql_installed_version is version(postgresql_packages_minimum | string, '>=')
+    fail_msg: >-
+      {{ __postgresql_server_package }}
+      {{ __postgresql_installed_version | default('(not installed)', true) }}
+      is installed, postgresql_packages_minimum requires
+      {{ postgresql_packages_minimum }}. The repository does not carry the
+      required version yet.
+    success_msg: >-
+      {{ __postgresql_server_package }} {{ __postgresql_installed_version }}
+      meets the minimum {{ postgresql_packages_minimum }}
+  vars:
+    __postgresql_installed_version: >-
+      {{ (ansible_facts['packages'][__postgresql_server_package]
+          | default([{'version': ''}]) | first)['version']
+         | regex_search('^[0-9]+(\.[0-9]+)*') | default('', true) }}
+  when:
+    - postgresql_packages_minimum | length > 0
+    - not ansible_check_mode
+  tags:
+    - always
+
+# Guard against a cluster initialized by another major version than the
+# installed server: a rolling distro update (Arch Linux without the pacman
+# drop-in) or a changed EL module stream replaces the binaries while the
+# data directory keeps its version, and the server refuses to start on it.
+# Fail here with both versions instead of at the service task. Tagged
+# always so that every stage sees the same precondition; the read-only
+# command runs in check mode as well.
 - name: Install | Detect installed server version
   ansible.builtin.command:
     cmd: '{{ __postgresql_bin_dir }}/postgres --version'

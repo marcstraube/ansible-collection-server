@@ -1,0 +1,216 @@
+---
+# Targeted update: the pre_tasks roll the PostgreSQL packages back to an
+# older build, the role has to update them again, the server must run the
+# new binaries after exactly one restart, and the installed version must
+# meet the minimum. A second run with a minimum above the installed version
+# must fail, and on Arch Linux an update across a major version as well.
+- name: Side Effect
+  hosts: all
+  gather_facts: true
+
+  vars:
+    postgresql_enabled: true
+    postgresql_ssl_enabled: false
+    postgresql_firewalld_enabled: false
+    postgresql_shared_buffers: '64MB'
+    postgresql_effective_cache_size: '128MB'
+    postgresql_lc_messages: 'en_US.UTF-8'
+    postgresql_lc_monetary: 'en_US.UTF-8'
+    postgresql_lc_numeric: 'en_US.UTF-8'
+    postgresql_lc_time: 'en_US.UTF-8'
+    postgresql_databases:
+      - name: testdb
+        owner: testuser
+    postgresql_users:
+      - name: testuser
+        password: testpassword
+    postgresql_extensions:
+      - name: pgcrypto
+        database: testdb
+    postgresql_packages_state: 'latest'
+    postgresql_packages_minimum: '10.0'
+    # version-release of the server package from the latest package facts
+    # (Debian has no separate release field)
+    __side_effect_server_version: >-
+      {{ [(ansible_facts['packages'][__postgresql_server_package] | first).version,
+          (ansible_facts['packages'][__postgresql_server_package] | first).release | default('')]
+         | select | join('-') }}
+
+  pre_tasks:
+    - name: Side Effect | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Side Effect | Load OS-specific variables
+      ansible.builtin.include_vars: '{{ item }}'
+      with_first_found:
+        - files:
+            - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["distribution"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}.yml'
+          paths:
+            - '../../vars'
+
+    - name: Side Effect | Gather package facts before the rollback
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Record the current server package version
+      ansible.builtin.set_fact:
+        __side_effect_version_current: '{{ __side_effect_server_version }}'
+
+    # Debian: policy-rc.d keeps the maintainer scripts from restarting the
+    # server, so only the role can restart it. The EL packages restart it
+    # themselves, and the role must not restart it a second time.
+    - name: Side Effect | Block service restarts by packages (Debian)
+      ansible.builtin.copy:
+        content: "#!/bin/sh\nexit 101\n"
+        dest: /usr/sbin/policy-rc.d
+        mode: '0755'
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # The EL AppStream and the PGDG yum repositories keep the older builds
+    # of a release. When the repository holds only one build, nothing is
+    # rolled back and verify.yml skips the version comparison.
+    - name: Side Effect | Roll the PostgreSQL packages back (RedHat)
+      ansible.builtin.command:
+        cmd: dnf downgrade -y 'postgresql*'
+      changed_when: true
+      failed_when: false
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    # Every installed package built from the same source as the server
+    # (client, libpq5) carries its version and moves back with it.
+    - name: Side Effect | Roll the PostgreSQL packages back (Debian)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          server='{{ __postgresql_server_package }}'
+          installed=$(dpkg-query -W -f '${Version}' "${server}")
+          # madison lists the newest build first; take the first older one
+          old=$(apt-cache madison "${server}" \
+            | awk -F' [|] ' -v cur="${installed}" '$2 != cur { print $2; exit }')
+          [ -n "${old}" ] || exit 0
+          pkgs=$(dpkg-query -W -f '${Package} ${Version} ${db:Status-Abbrev}\n' 'postgresql*' 'libpq5' \
+            | awk -v cur="${installed}" '$2 == cur && $3 == "ii" { print $1 }')
+          args=''
+          for pkg in ${pkgs}; do args="${args} ${pkg}=${old}"; done
+          # shellcheck disable=SC2086
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades ${args}
+        executable: /bin/bash
+      changed_when: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # The Arch Linux Archive keeps every build; the newest one older than the
+    # installed build is installed from there.
+    - name: Side Effect | Roll the PostgreSQL packages back (Arch)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          archive='https://archive.archlinux.org/packages/p'
+          installed=$(pacman -Q postgresql | awk '{ print $2 }')
+          old=$(curl -fsSL "${archive}/postgresql/" \
+            | grep -oE "postgresql-${installed%%.*}\.[0-9.]+-[0-9]+-x86_64\.pkg\.tar\.zst\"" \
+            | sed -E 's/^postgresql-//; s/-x86_64.*$//' \
+            | sort -uV | awk -v cur="${installed}" '$0 == cur { exit } { prev = $0 } END { print prev }')
+          [ -n "${old}" ] || exit 0
+          pacman -U --noconfirm \
+            "${archive}/postgresql/postgresql-${old}-x86_64.pkg.tar.zst" \
+            "${archive}/postgresql-libs/postgresql-libs-${old}-x86_64.pkg.tar.zst"
+        executable: /bin/bash
+      changed_when: true
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Side Effect | Gather package facts after the rollback
+      ansible.builtin.package_facts:
+
+    # verify.yml runs as a separate playbook; the versions before and after
+    # the rollback and the time of the update reach it through this file.
+    - name: Side Effect | Record the server package versions around the rollback
+      ansible.builtin.copy:
+        content: |
+          {{ __side_effect_version_current }}
+          {{ __side_effect_server_version }}
+        dest: /root/postgresql-update-versions
+        mode: '0600'
+
+  tasks:
+    - name: Side Effect | Include postgresql role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+
+    - name: Side Effect | Run the queued handlers
+      ansible.builtin.meta: flush_handlers
+
+    - name: Side Effect | Allow service restarts by packages again (Debian)
+      ansible.builtin.file:
+        path: /usr/sbin/policy-rc.d
+        state: absent
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # A minimum above the installed version must fail the run with a message
+    # that names both versions.
+    - name: Side Effect | Run with a minimum above the installed version
+      block:
+        - name: Side Effect | Include postgresql role with an unmet minimum  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            postgresql_packages_state: 'present'
+            postgresql_packages_minimum: '99.0'
+      rescue:
+        - name: Side Effect | Record the minimum check failure
+          ansible.builtin.set_fact:
+            __side_effect_minimum_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Assert the unmet minimum failed the run
+      ansible.builtin.assert:
+        that:
+          - __side_effect_minimum_error is defined
+          - "'requires 99.0' in __side_effect_minimum_error"
+        fail_msg: 'A minimum of 99.0 did not fail the run'
+        success_msg: 'The minimum check rejects an older installed version'
+
+    # Arch Linux: an update to a new major version must stop before the
+    # packages change. The cluster is made to look one major version older
+    # than the repository and restored afterwards.
+    - name: Side Effect | Run an update across a major version (Arch)
+      when: ansible_facts['os_family'] == 'Archlinux'
+      block:
+        - name: Side Effect | Read the cluster version (Arch)
+          ansible.builtin.slurp:
+            src: '{{ __postgresql_data_dir }}/PG_VERSION'
+          register: __side_effect_pg_version
+
+        - name: Side Effect | Mark the cluster as one major version older (Arch)
+          ansible.builtin.copy:
+            content: "{{ (__side_effect_pg_version.content | b64decode | trim | int) - 1 }}\n"
+            dest: '{{ __postgresql_data_dir }}/PG_VERSION'
+            owner: '{{ __postgresql_user }}'
+            group: '{{ __postgresql_group }}'
+            mode: '0600'
+
+        - name: Side Effect | Include postgresql role across a major version (Arch)  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+      rescue:
+        - name: Side Effect | Record the major version check failure (Arch)
+          ansible.builtin.set_fact:
+            __side_effect_major_error: '{{ ansible_failed_result.msg | default("") }}'
+      always:
+        - name: Side Effect | Restore the cluster version (Arch)
+          ansible.builtin.copy:
+            content: '{{ __side_effect_pg_version.content | b64decode }}'
+            dest: '{{ __postgresql_data_dir }}/PG_VERSION'
+            owner: '{{ __postgresql_user }}'
+            group: '{{ __postgresql_group }}'
+            mode: '0600'
+
+    - name: Side Effect | Assert the major version check failed the run (Arch)
+      ansible.builtin.assert:
+        that:
+          - __side_effect_major_error is defined
+          - "'The repository holds PostgreSQL' in __side_effect_major_error"
+        fail_msg: 'An update across a major version did not fail the run'
+        success_msg: 'The update refuses a new major version'
+      when: ansible_facts['os_family'] == 'Archlinux'

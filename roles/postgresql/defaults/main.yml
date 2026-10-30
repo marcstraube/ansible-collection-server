@@ -37,6 +37,30 @@ postgresql_version: '17'
 postgresql_repo: 'distro'
 
 #
+# Package Updates
+#
+
+# State of the PostgreSQL packages:
+#   'present' installs missing packages and never updates (default).
+#   'latest'  updates the installed PostgreSQL packages in one transaction
+#             and restarts the PostgreSQL service.
+# Pass 'latest' for a targeted update instead of setting it in inventory:
+#   --tags postgresql -e postgresql_packages_state=latest
+# Arch Linux: a pacman IgnorePkg drop-in keeps the system upgrade away from
+# PostgreSQL, so a new major version cannot replace the server of an
+# existing cluster. 'latest' installs the version of the package databases
+# of the last system upgrade and fails when it is a new major version; run
+# it together with the system upgrade:
+#   --tags system-update,postgresql -e postgresql_packages_state=latest
+postgresql_packages_state: 'present'
+
+# Lowest acceptable server version, checked after the package task. Meant to
+# be passed with the update command to confirm that the repository already
+# carries a fix; the run fails when the installed version is older:
+#   -e postgresql_packages_minimum=17.7
+postgresql_packages_minimum: ''
+
+#
 # Network
 #
 

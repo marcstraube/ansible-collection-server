@@ -87,3 +87,116 @@
       check_mode: true
       register: __verify_ext_check
       failed_when: __verify_ext_check.changed
+
+    - name: Verify | Query pacman ignored packages (Arch)
+      ansible.builtin.command:
+        cmd: pacman-conf IgnorePkg
+      register: __verify_pacman_ignore
+      changed_when: false
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Verify | Assert the system upgrade leaves PostgreSQL alone (Arch)
+      ansible.builtin.assert:
+        that:
+          - "'postgresql' in __verify_pacman_ignore.stdout_lines"
+          - "'postgresql-libs' in __verify_pacman_ignore.stdout_lines"
+        fail_msg: 'pacman does not ignore postgresql and postgresql-libs: {{ __verify_pacman_ignore.stdout }}'
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    #
+    # Targeted package update (side_effect rolled the packages back and ran
+    # the role with postgresql_packages_state: latest)
+    #
+
+    - name: Verify | Read the server package versions around the rollback
+      ansible.builtin.slurp:
+        src: /root/postgresql-update-versions
+      register: __verify_update_versions
+
+    - name: Verify | Stat the version record
+      ansible.builtin.stat:
+        path: /root/postgresql-update-versions
+      register: __verify_update_stat
+
+    - name: Verify | Gather package facts after the update
+      ansible.builtin.package_facts:
+
+    - name: Verify | Set update version facts
+      ansible.builtin.set_fact:
+        __verify_version_latest: '{{ (__verify_update_versions.content | b64decode).splitlines()[0] | trim }}'
+        __verify_version_rolled_back: '{{ (__verify_update_versions.content | b64decode).splitlines()[1] | trim }}'
+        __verify_version_now: >-
+          {{ [(ansible_facts['packages'][__postgresql_server_package] | first).version,
+              (ansible_facts['packages'][__postgresql_server_package] | first).release | default('')]
+             | select | join('-') }}
+
+    - name: Verify | Assert the update restored the latest build
+      ansible.builtin.assert:
+        that:
+          - __verify_version_now == __verify_version_latest
+        fail_msg: >-
+          {{ __postgresql_server_package }} is at {{ __verify_version_now }}
+          after the update, expected {{ __verify_version_latest }} (rolled back
+          to {{ __verify_version_rolled_back }})
+        success_msg: >-
+          Updated from {{ __verify_version_rolled_back }} to {{ __verify_version_now }}
+      when:
+        - __verify_version_rolled_back != __verify_version_latest
+
+    # The third line of postmaster.pid holds the start time of the running
+    # server; a server started before the update still runs the old binaries.
+    - name: Verify | Read the postmaster PID file
+      ansible.builtin.slurp:
+        src: '{{ __postgresql_data_dir }}/postmaster.pid'
+      register: __verify_postmaster_pid
+      when:
+        - __verify_version_rolled_back != __verify_version_latest
+
+    - name: Verify | Assert the server was restarted after the update
+      ansible.builtin.assert:
+        that:
+          - __verify_postmaster_start | int > __verify_update_stat.stat.mtime | int
+        fail_msg: >-
+          The running server started at {{ __verify_postmaster_start }}, before
+          the package update at {{ __verify_update_stat.stat.mtime | int }}; it
+          still runs the old binaries
+        success_msg: 'The server was restarted after the package update'
+      vars:
+        __verify_postmaster_start: '{{ (__verify_postmaster_pid.content | b64decode).splitlines()[2] | trim }}'
+      when:
+        - __verify_version_rolled_back != __verify_version_latest
+
+    # pacman never restarts a service and side_effect blocks the package
+    # restart on Debian, so the role has to restart the server there; the
+    # EL packages restart it themselves, so the role must not restart it
+    # again.
+    - name: Verify | Read the server starts since the update
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - '--unit={{ __verify_cluster_unit }}'
+          - '--since=@{{ __verify_update_stat.stat.mtime }}'
+          - '--output=cat'
+          - '--no-pager'
+      register: __verify_update_journal
+      changed_when: false
+      vars:
+        __verify_cluster_unit: >-
+          {{ ('postgresql@' ~ __postgresql_version ~ '-main.service')
+             if ansible_facts['os_family'] == 'Debian' else __postgresql_service_name }}
+      when:
+        - __verify_version_rolled_back != __verify_version_latest
+
+    - name: Verify | Assert the update restarted the server once
+      ansible.builtin.assert:
+        that:
+          - __verify_update_starts | length == 1
+        fail_msg: >-
+          The server started {{ __verify_update_starts | length }} times after
+          the package update, expected once: {{ __verify_update_starts }}
+        success_msg: 'The server started once after the package update'
+      vars:
+        __verify_update_starts: >-
+          {{ __verify_update_journal.stdout_lines | select('match', '^Started ') | list }}
+      when:
+        - __verify_version_rolled_back != __verify_version_latest

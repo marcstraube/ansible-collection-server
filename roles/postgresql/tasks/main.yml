@@ -24,6 +24,19 @@
   tags:
     - always
 
+- name: Main | Validate package update settings
+  ansible.builtin.assert:
+    that:
+      - postgresql_packages_state in ['present', 'latest']
+      - postgresql_packages_minimum is string
+    fail_msg: >-
+      postgresql_packages_state must be 'present' or 'latest' (got
+      '{{ postgresql_packages_state }}'), postgresql_packages_minimum must be
+      a version string, e.g. '17.7'
+  when: postgresql_enabled | bool
+  tags:
+    - always
+
 # Guard against an unintended major-version upgrade: a cluster of another
 # version at a different path (a change of postgresql_repo or
 # postgresql_version on an installed host) would get a second, empty

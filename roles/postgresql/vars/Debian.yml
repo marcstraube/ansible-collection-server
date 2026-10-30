@@ -15,6 +15,12 @@ __postgresql_pgdg_packages:
   - 'postgresql-{{ __postgresql_version }}'
   - python3-psycopg2
 
+# Installed packages a targeted update moves along (server, client,
+# contrib, postgresql-common, libpq) and the package that carries the
+# server version
+__postgresql_update_pattern: '^(postgresql(-.+)?|libpq5)$'
+__postgresql_server_package: 'postgresql-{{ __postgresql_version }}'
+
 __postgresql_service_name: postgresql
 __postgresql_config_dir: '/etc/postgresql/{{ __postgresql_version }}/main'
 __postgresql_data_dir: '/var/lib/postgresql/{{ __postgresql_version }}/main'

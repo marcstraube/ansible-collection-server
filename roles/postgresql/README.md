@@ -109,6 +109,56 @@ Upgrade the cluster by hand (`pg_upgrade`, on Debian `pg_upgradecluster`,
 on Arch Linux with the previous binaries from `postgresql-old-upgrade`),
 remove the old data directory afterwards, then rerun the role.
 
+### Package Updates
+
+| Variable                      | Default     | Description                                                     |
+| ----------------------------- | ----------- | --------------------------------------------------------------- |
+| `postgresql_packages_state`   | `'present'` | `present` installs missing packages only, `latest` updates them |
+| `postgresql_packages_minimum` | `''`        | Lowest acceptable server version, checked after the packages    |
+
+A regular run never updates PostgreSQL. A targeted update, for example for a
+security release, is requested on the command line:
+
+```bash
+ansible-playbook site.yml --tags postgresql \
+  -e postgresql_packages_state=latest \
+  -e postgresql_packages_minimum=17.7
+```
+
+With `latest` the role refreshes the package metadata and updates every
+installed PostgreSQL package in one transaction. The packages usually
+restart the server themselves; when they did not, for example because of a
+`policy-rc.d`, the running server still executes the replaced binary and
+the role restarts it. The update covers the parts pulled in as
+dependencies: on Debian the `postgresql-*` packages and `libpq5`, on EL the
+AppStream `postgresql*` packages or, with `postgresql_repo: 'pgdg'`, the
+`postgresql<NN>*` packages of the configured version. Minor releases only:
+the major version stays as selected (see above).
+
+`postgresql_packages_minimum` then fails the run when the installed server
+is still older, which shows that the repository does not carry the fix yet.
+The check is skipped under `--check`.
+
+On Arch Linux the rolling repository moves to a new major version without
+notice, and the server does not start on the cluster of the previous one.
+The role therefore places a pacman drop-in
+(`/etc/pacman.d/ignore.d/postgresql.conf`, `IgnorePkg = postgresql
+postgresql-libs`) that keeps the system upgrade away from PostgreSQL.
+pacman reads it when `pacman.conf` includes `/etc/pacman.d/ignore.d/*.conf`,
+as `marcstraube.common.package_management` sets up; otherwise the role
+prints a warning. With `latest` the role installs the version of the
+package databases of the last system upgrade, so run the update together
+with it, and fails when that is a new major version:
+
+```bash
+ansible-playbook marcstraube.server.database_server --tags system-update,postgresql \
+  -e postgresql_packages_state=latest
+```
+
+A new major version needs a manual cluster upgrade (`pg_upgrade` with the
+previous binaries from `postgresql-old-upgrade`) before the role updates
+the packages.
+
 ### Authentication
 
 The default `pg_hba.conf` entries use `scram-sha-256` for host connections
