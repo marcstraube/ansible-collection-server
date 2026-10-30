@@ -175,6 +175,48 @@
           {{ lookup('ansible.builtin.template', playbook_dir ~ '/../../templates/wazuh.yml.j2',
                     template_vars={'wazuh_server_dashboard_enrollment_dns': ''}) }}
 
+    # Enrollment requests in the wazuh-authd protocol; the CA check of the
+    # TLS connection fails unless the manager serves the node certificate
+    - name: Verify | Wait for the enrollment service
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 1515
+        timeout: 120
+
+    - name: Verify | Request enrollment
+      ansible.builtin.command:
+        argv: >-
+          {{ ['timeout', '30', 'openssl', 's_client', '-connect', '127.0.0.1:1515', '-quiet',
+              '-CAfile', wazuh_server_enrollment_agent_ca_file, '-verify_return_error']
+             + (item.cert | ternary(['-cert', '/etc/ssl/certs/wazuh-agent.crt',
+                                     '-key', '/etc/ssl/private/wazuh-agent.key'], [])) }}
+        stdin: >-
+          {{ (item.password | length > 0) | ternary('OSSEC PASS: ' ~ item.password ~ ' ', '')
+             ~ "OSSEC A:'" ~ item.name ~ "'" }}
+      register: __verify_enrollment
+      changed_when: false
+      failed_when: false
+      loop:
+        - { name: 'no-password', password: '', cert: true }
+        - { name: 'wrong-password', password: 'Wrong-Pass1', cert: true }
+        - { name: 'no-certificate', password: '{{ wazuh_server_enrollment_password }}', cert: false }
+        - { name: 'enrolled', password: '{{ wazuh_server_enrollment_password }}', cert: true }
+      loop_control:
+        label: '{{ item.name }}'
+
+    - name: Verify | Assert enrollment needs password and certificate
+      ansible.builtin.assert:
+        that:
+          - ("OSSEC K:'" in item.stdout) == (item.item.name == 'enrolled')
+        fail_msg: >-
+          Enrollment {{ item.item.name }}: expected
+          {{ (item.item.name == 'enrolled') | ternary('a key', 'a rejection') }},
+          got rc={{ item.rc }} stdout={{ item.stdout | regex_replace('OSSEC K:.*', 'OSSEC K:<key>') }}
+          stderr={{ item.stderr | default('') | truncate(300) }}
+      loop: '{{ __verify_enrollment.results }}'
+      loop_control:
+        label: '{{ item.item.name }}'
+
     - name: Verify | Assert services are running
       ansible.builtin.systemd_service:
         name: '{{ item }}'

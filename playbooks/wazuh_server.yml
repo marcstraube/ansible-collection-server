@@ -10,7 +10,7 @@
 # Usage:
 #   ansible-playbook marcstraube.server.wazuh_server -i inventory/
 #   ansible-playbook marcstraube.server.wazuh_server -i inventory/ \
-#     --tags wazuh_server:security
+#     --tags wazuh-server:security
 #
 # Configure roles via inventory variables (group_vars/host_vars).
 # See each role's defaults/main.yml for available variables.

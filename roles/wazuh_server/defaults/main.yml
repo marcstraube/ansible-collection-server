@@ -98,6 +98,26 @@ wazuh_server_indexer_heap_size: ''
 wazuh_server_manager_service_enabled: true
 
 #
+# Agent Enrollment
+#
+# The enrollment service wazuh-authd (port 1515/tcp) registers new agents,
+# see marcstraube.common.wazuh_agent. It serves the node certificate, so
+# agents verify the manager with the CA of wazuh_server_ca_cert_file.
+
+# Password agents need to enroll. Empty accepts every agent. Keep it in an
+# Ansible Vault.
+wazuh_server_enrollment_password: ''
+
+# Path on the managed host to the CA certificate that issued the agent
+# certificates. When set, an agent has to present a certificate signed by
+# this CA to enroll. Empty enrolls agents without a certificate.
+wazuh_server_enrollment_agent_ca_file: ''
+
+# Also require the common name of the agent certificate to match the
+# agent's address; only applies with wazuh_server_enrollment_agent_ca_file
+wazuh_server_enrollment_verify_host: false
+
+#
 # Filebeat
 #
 

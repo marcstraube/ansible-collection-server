@@ -69,40 +69,40 @@
   ansible.builtin.import_tasks: repos.yml
   when: wazuh_server_enabled | bool
   tags:
-    - wazuh_server
-    - wazuh_server:install
+    - wazuh-server
+    - wazuh-server:install
 
 - name: Main | Import install tasks
   ansible.builtin.import_tasks: install.yml
   when: wazuh_server_enabled | bool
   tags:
-    - wazuh_server
-    - wazuh_server:install
+    - wazuh-server
+    - wazuh-server:install
 
 - name: Main | Import certificate tasks
   ansible.builtin.import_tasks: certs.yml
   when: wazuh_server_enabled | bool
   tags:
-    - wazuh_server
-    - wazuh_server:certs
+    - wazuh-server
+    - wazuh-server:certs
 
 - name: Main | Import configure tasks
   ansible.builtin.import_tasks: configure.yml
   when: wazuh_server_enabled | bool
   tags:
-    - wazuh_server
-    - wazuh_server:configure
+    - wazuh-server
+    - wazuh-server:configure
 
 - name: Main | Import service tasks
   ansible.builtin.import_tasks: service.yml
   when: wazuh_server_enabled | bool
   tags:
-    - wazuh_server
-    - wazuh_server:service
+    - wazuh-server
+    - wazuh-server:service
 
 - name: Main | Import security tasks
   ansible.builtin.import_tasks: security.yml
   when: wazuh_server_enabled | bool
   tags:
-    - wazuh_server
-    - wazuh_server:security
+    - wazuh-server
+    - wazuh-server:security
