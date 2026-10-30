@@ -1,7 +1,21 @@
 ---
+# postgresql-libs is listed explicitly: pacman installs a package from the
+# IgnorePkg drop-in when it is a target, but not as a dependency
 __postgresql_packages:
   - postgresql
+  - postgresql-libs
   - python-psycopg2
+
+# Package that carries the server version
+__postgresql_server_package: postgresql
+
+# Packages the system upgrade leaves alone (pacman IgnorePkg drop-in); pacman
+# reads the drop-in when the [options] section of pacman.conf includes
+# /etc/pacman.d/ignore.d/*.conf
+__postgresql_pacman_ignore_packages:
+  - postgresql
+  - postgresql-libs
+__postgresql_pacman_ignore_file: /etc/pacman.d/ignore.d/postgresql.conf
 __postgresql_service_name: postgresql.service
 __postgresql_config_dir: /var/lib/postgres/data
 __postgresql_data_dir: /var/lib/postgres/data
