@@ -67,6 +67,23 @@ __wazuh_server_dashboard_keystore_bin: '/usr/share/wazuh-dashboard/bin/opensearc
 __wazuh_server_dashboard_plugin_config_dir: '/usr/share/wazuh-dashboard/data/wazuh/config'
 __wazuh_server_dashboard_plugin_config_file: '{{ __wazuh_server_dashboard_plugin_config_dir }}/wazuh.yml'
 
+# Wazuh manager; wazuh-authd resolves relative paths from the installation
+# directory
+__wazuh_server_manager_dir: '/var/ossec'
+__wazuh_server_manager_group: 'wazuh'
+__wazuh_server_manager_config_file: '{{ __wazuh_server_manager_dir }}/etc/ossec.conf'
+__wazuh_server_enrollment_password_file: '{{ __wazuh_server_manager_dir }}/etc/authd.pass'
+__wazuh_server_enrollment_cert_path: 'etc/authd-node.pem'
+__wazuh_server_enrollment_key_path: 'etc/authd-node-key.pem'
+__wazuh_server_enrollment_agent_ca_path: 'etc/authd-agent-ca.pem'
+
+# <auth> elements of ossec.conf the role sets
+__wazuh_server_enrollment_options:
+  use_password: "{{ (wazuh_server_enrollment_password | length > 0) | ternary('yes', 'no') }}"
+  ssl_verify_host: "{{ wazuh_server_enrollment_verify_host | bool | ternary('yes', 'no') }}"
+  ssl_manager_cert: '{{ __wazuh_server_enrollment_cert_path }}'
+  ssl_manager_key: '{{ __wazuh_server_enrollment_key_path }}'
+
 # Certificate file names inside the component certificate directories
 __wazuh_server_ca_cert_name: 'root-ca.pem'
 __wazuh_server_node_cert_name: 'node.pem'

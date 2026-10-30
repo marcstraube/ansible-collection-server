@@ -38,6 +38,86 @@
   notify: Restart Wazuh indexer
 
 #
+# Wazuh Manager
+#
+# ossec.conf stays the package file; the role only sets the enrollment
+# options inside its <auth> section.
+#
+
+- name: Configure | Deploy enrollment password
+  ansible.builtin.copy:
+    content: "{{ wazuh_server_enrollment_password }}\n"
+    dest: '{{ __wazuh_server_enrollment_password_file }}'
+    owner: root
+    group: '{{ __wazuh_server_manager_group }}'
+    mode: '0640'
+  no_log: true
+  when: wazuh_server_enrollment_password | length > 0
+  notify: Restart Wazuh manager
+
+- name: Configure | Remove enrollment password
+  ansible.builtin.file:
+    path: '{{ __wazuh_server_enrollment_password_file }}'
+    state: absent
+  when: wazuh_server_enrollment_password | length == 0
+  notify: Restart Wazuh manager
+
+- name: Configure | Set enrollment options
+  ansible.builtin.replace:
+    path: '{{ __wazuh_server_manager_config_file }}'
+    after: '<auth>'
+    before: '</auth>'
+    regexp: '<{{ item.key }}>[^<]*</{{ item.key }}>'
+    replace: '<{{ item.key }}>{{ item.value }}</{{ item.key }}>'
+  loop: '{{ __wazuh_server_enrollment_options | dict2items }}'
+  loop_control:
+    label: '{{ item.key }}'
+  notify: Restart Wazuh manager
+
+# The package ships the element commented out; without an agent CA the
+# role restores that line
+- name: Configure | Set enrollment agent CA
+  ansible.builtin.replace:
+    path: '{{ __wazuh_server_manager_config_file }}'
+    after: '<auth>'
+    before: '</auth>'
+    regexp: '(<!-- )?<ssl_agent_ca>[^<]*</ssl_agent_ca>( -->)?'
+    replace: >-
+      {{ (wazuh_server_enrollment_agent_ca_file | length > 0)
+         | ternary('<ssl_agent_ca>' ~ __wazuh_server_enrollment_agent_ca_path ~ '</ssl_agent_ca>',
+                   '<!-- <ssl_agent_ca></ssl_agent_ca> -->') }}
+  notify: Restart Wazuh manager
+
+# replace leaves the file unchanged when a pattern finds nothing, for
+# example after a Wazuh release changed the <auth> section
+- name: Configure | Read manager configuration
+  ansible.builtin.slurp:
+    src: '{{ __wazuh_server_manager_config_file }}'
+  register: __wazuh_server_manager_config
+  when: not ansible_check_mode
+
+- name: Configure | Assert enrollment options are set
+  ansible.builtin.assert:
+    that:
+      - ('<' ~ item.key ~ '>' ~ item.value ~ '</' ~ item.key ~ '>') in __wazuh_server_auth_section
+    fail_msg: >-
+      The <auth> section of {{ __wazuh_server_manager_config_file }} has no
+      element {{ item.key }} with the value {{ item.value }}. The format of
+      ossec.conf may have changed with this Wazuh release.
+    quiet: true
+  loop: >-
+    {{ __wazuh_server_enrollment_options | dict2items
+       + ((wazuh_server_enrollment_agent_ca_file | length > 0)
+          | ternary([{'key': 'ssl_agent_ca', 'value': __wazuh_server_enrollment_agent_ca_path}], [])) }}
+  loop_control:
+    label: '{{ item.key }}'
+  vars:
+    __wazuh_server_auth_section: >-
+      {{ __wazuh_server_manager_config.content | b64decode
+         | regex_search('(?s)<auth>.*?</auth>') | default('', true) }}
+  when: not ansible_check_mode
+
+#
 # Filebeat
 #
 

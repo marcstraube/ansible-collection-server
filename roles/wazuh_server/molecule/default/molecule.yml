@@ -47,6 +47,8 @@ provisioner:
         wazuh_server_api_wazuh_password: 'Wazuh-Test-Pass1'
         wazuh_server_api_wui_password: 'Wui-Test-Pass1'
         wazuh_server_dashboard_enrollment_dns: 'wazuh.example.com'
+        wazuh_server_enrollment_password: 'Enroll-Test-Pass1'
+        wazuh_server_enrollment_agent_ca_file: '/etc/ssl/ca/certs/ca.crt'
     host_vars:
       wazuh-server-debian-trixie:
         ansible_python_interpreter: /usr/bin/python3

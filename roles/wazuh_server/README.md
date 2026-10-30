@@ -106,16 +106,26 @@ The role owns the dashboard plugin configuration (`wazuh.yml`), so set the
 address here instead of in the dashboard: the next run replaces a value set
 in the dashboard.
 
+### Agent Enrollment
+
+| Variable                                | Default | Description                                         |
+| --------------------------------------- | ------- | --------------------------------------------------- |
+| `wazuh_server_enrollment_password`      | `''`    | Enrollment password, empty accepts every agent      |
+| `wazuh_server_enrollment_agent_ca_file` | `''`    | CA of the agent certificates, empty for none        |
+| `wazuh_server_enrollment_verify_host`   | `false` | Match the agent certificate CN to the agent address |
+
+See [Enrollment Authentication](#enrollment-authentication) under Notes.
+
 ## Tags
 
 | Tag                      | Description                           |
 | ------------------------ | ------------------------------------- |
-| `wazuh_server`           | All wazuh_server tasks                |
-| `wazuh_server:install`   | Repository and package installation   |
-| `wazuh_server:certs`     | Certificate deployment                |
-| `wazuh_server:configure` | Configuration deployment              |
-| `wazuh_server:service`   | Systemd service management            |
-| `wazuh_server:security`  | Indexer users and Wazuh API passwords |
+| `wazuh-server`           | All wazuh_server tasks                |
+| `wazuh-server:install`   | Repository and package installation   |
+| `wazuh-server:certs`     | Certificate deployment                |
+| `wazuh-server:configure` | Configuration deployment              |
+| `wazuh-server:service`   | Systemd service management            |
+| `wazuh-server:security`  | Indexer users and Wazuh API passwords |
 
 ## Example Playbook
 
@@ -174,7 +184,8 @@ Driver: `podman` | Scenario: `default` (certificates issued by
 
 All certificates must come from one CA. The role copies them into the
 certificate directory of each component (`/etc/wazuh-indexer/certs`,
-`/etc/filebeat/certs`, `/etc/wazuh-dashboard/certs`), because the indexer
+`/etc/filebeat/certs`, `/etc/wazuh-dashboard/certs`, `/var/ossec/etc` for
+agent enrollment), because the indexer
 only reads certificates inside its configuration directory, and converts
 the indexer keys to PKCS#8. The subjects of the node and admin certificates
 become `plugins.security.nodes_dn` and `plugins.security.authcz.admin_dn`.
@@ -201,6 +212,29 @@ The keystores are not used: their values cannot be read back, so a changed
 password could not be detected. The role removes the default
 `kibanaserver` credentials the dashboard package seeds into its keystore,
 because keystore entries take precedence over `opensearch_dashboards.yml`.
+
+### Enrollment Authentication
+
+The enrollment service `wazuh-authd` accepts every agent by default. The
+role sets its options in the `<auth>` section of the package
+`/var/ossec/etc/ossec.conf` and leaves the rest of the file to the package:
+
+- With `wazuh_server_enrollment_password`, agents have to send the password
+  (`use_password`), which the role writes to `/var/ossec/etc/authd.pass`
+  (`0640 root:wazuh`). Set the same password in
+  `wazuh_agent_enrollment_password` of `marcstraube.common.wazuh_agent`.
+- With `wazuh_server_enrollment_agent_ca_file`, agents have to present a
+  certificate issued by this CA (`ssl_agent_ca`), set with
+  `wazuh_agent_enrollment_cert_file` and `wazuh_agent_enrollment_key_file`.
+  Password and certificate can be combined.
+- `wazuh-authd` serves the node certificate instead of the self-signed
+  certificate it generates on installation, so agents verify the manager
+  with `wazuh_agent_enrollment_ca_cert_file` set to the CA of
+  `wazuh_server_ca_cert_file`.
+
+A changed option restarts the Wazuh manager. After setting the options, the
+role checks that the `<auth>` section contains them and fails otherwise,
+for example when a Wazuh release changes the format of `ossec.conf`.
 
 ### Firewall
 

@@ -23,7 +23,7 @@
   ansible.builtin.import_role:
     name: marcstraube.common.pki
   tags:
-    - wazuh_server
+    - wazuh-server
     - pki
   when: wazuh_server_enabled | bool
 
@@ -31,5 +31,5 @@
   ansible.builtin.import_role:
     name: marcstraube.server.wazuh_server
   tags:
-    - wazuh_server
+    - wazuh-server
   when: wazuh_server_enabled | bool

@@ -100,6 +100,41 @@
   notify: Restart Wazuh indexer
 
 #
+# Wazuh Manager
+#
+# wazuh-authd serves the node certificate on enrollment instead of the
+# self-signed certificate it generates on installation, and verifies agent
+# certificates with the agent CA.
+#
+
+- name: Certs | Deploy enrollment certificates
+  ansible.builtin.copy:
+    src: '{{ item.src }}'
+    dest: '{{ __wazuh_server_manager_dir }}/{{ item.path }}'
+    remote_src: true
+    owner: root
+    group: '{{ __wazuh_server_manager_group }}'
+    mode: '0640'
+  loop:
+    - { src: '{{ wazuh_server_node_cert_file }}', path: '{{ __wazuh_server_enrollment_cert_path }}' }
+    - { src: '{{ wazuh_server_node_key_file }}', path: '{{ __wazuh_server_enrollment_key_path }}' }
+  loop_control:
+    label: '{{ item.path }}'
+  no_log: true
+  notify: Restart Wazuh manager
+
+- name: Certs | Deploy enrollment agent CA certificate
+  ansible.builtin.copy:
+    src: '{{ wazuh_server_enrollment_agent_ca_file }}'
+    dest: '{{ __wazuh_server_manager_dir }}/{{ __wazuh_server_enrollment_agent_ca_path }}'
+    remote_src: true
+    owner: root
+    group: '{{ __wazuh_server_manager_group }}'
+    mode: '0640'
+  when: wazuh_server_enrollment_agent_ca_file | length > 0
+  notify: Restart Wazuh manager
+
+#
 # Filebeat
 #
 # Filebeat authenticates with username and password; it only needs the CA

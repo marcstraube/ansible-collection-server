@@ -11,10 +11,12 @@
         - procps
         - gnupg
         - ca-certificates
+        - openssl
       RedHat:
         - systemd
         - dbus
         - procps-ng
+        - openssl
 
   tasks:
     - name: Prepare | Update package cache (Debian)
@@ -86,3 +88,5 @@
         pki_client_certs:
           - name: 'wazuh-admin'
             common_name: 'admin'
+          - name: 'wazuh-agent'
+            common_name: 'wazuh-agent-test'
