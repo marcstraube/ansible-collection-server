@@ -6,14 +6,20 @@ on:
     - cron: '0 6 * * 1'  # Weekly Monday 6:00 UTC
   workflow_dispatch:       # Manual trigger
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 jobs:
-  update-wazuh-server:
+  release:
     name: Check for new Wazuh release
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      current: ${{ steps.wazuh.outputs.current }}
+      latest: ${{ steps.wazuh.outputs.latest }}
+      docs: ${{ steps.wazuh.outputs.docs }}
+      series_changed: ${{ steps.wazuh.outputs.series_changed }}
+      update: ${{ steps.wazuh.outputs.update }}
 
     steps:
       - name: Checkout code
@@ -56,28 +62,142 @@ jobs:
             echo "packages=$PACKAGES"
             echo "docs=${LATEST%.*}"
             echo "series_changed=$([[ "${LATEST%.*}" != "${CURRENT%.*}" ]] && echo true || echo false)"
+            echo "update=$([[ "$LATEST" != "$CURRENT" && "$PACKAGES" == 'true' ]] && echo true || echo false)"
           } >> "$GITHUB_OUTPUT"
           echo "Current: $CURRENT, Latest: $LATEST, packages published: $PACKAGES"
 
-      - name: Update defaults/main.yml
-        if: >-
-          steps.wazuh.outputs.latest != steps.wazuh.outputs.current
-          && steps.wazuh.outputs.packages == 'true'
+  # The packages generate ossec.conf with gen_ossec.sh on a fresh
+  # installation and keep the existing file on an upgrade. This job runs
+  # the generator of both releases for every platform of the role and
+  # diffs the results. It executes upstream scripts, so it runs without
+  # permissions and secrets and hands the result over as an artifact.
+  config-diff:
+    name: Compare manager configuration
+    needs: release
+    if: needs.release.outputs.update == 'true'
+    runs-on: ubuntu-24.04
+    permissions: {}
+
+    steps:
+      - name: Generate manager configuration diff
+        env:
+          CURRENT: ${{ needs.release.outputs.current }}
+          LATEST: ${{ needs.release.outputs.latest }}
         run: |
-          sed -i "s/^wazuh_server_version: '.*'/wazuh_server_version: '${{ steps.wazuh.outputs.latest }}'/" \
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/wazuh"
+          for TAG in "$CURRENT" "$LATEST"; do
+            git -c advice.detachedHead=false clone --quiet --depth 1 --branch "v$TAG" \
+              --filter=blob:none --sparse https://github.com/wazuh/wazuh.git "$WORK/$TAG"
+            git -C "$WORK/$TAG" sparse-checkout set etc src/init
+          done
+
+          # Platforms with the same diff share one section
+          declare -A LABELS=() DIFFS=()
+          ORDER=() AUTH_CHANGED=()
+          for PLATFORM in 'Debian 13:debian:13' 'Rocky 9:rocky:9' 'Rocky 10:rocky:10'; do
+            IFS=: read -r LABEL OS VER <<< "$PLATFORM"
+            for TAG in "$CURRENT" "$LATEST"; do
+              (cd "$WORK/$TAG" && ./gen_ossec.sh conf manager "$OS" "$VER" /var/ossec) \
+                > "$WORK/$TAG-$OS-$VER.conf"
+            done
+            DIFF=$(diff -u --label "v$CURRENT" --label "v$LATEST" \
+              "$WORK/$CURRENT-$OS-$VER.conf" "$WORK/$LATEST-$OS-$VER.conf") || [[ $? -eq 1 ]]
+            if ! diff -q \
+                 <(sed -n '/<auth>/,/<\/auth>/p' "$WORK/$CURRENT-$OS-$VER.conf") \
+                 <(sed -n '/<auth>/,/<\/auth>/p' "$WORK/$LATEST-$OS-$VER.conf") > /dev/null; then
+              AUTH_CHANGED+=("$LABEL")
+            fi
+            [[ -z "$DIFF" ]] && continue
+            KEY=$(sha256sum <<< "$DIFF" | cut -d' ' -f1)
+            if [[ -z "${DIFFS[$KEY]+set}" ]]; then
+              ORDER+=("$KEY")
+              DIFFS[$KEY]="$DIFF"
+              LABELS[$KEY]="$LABEL"
+            else
+              LABELS[$KEY]+=", $LABEL"
+            fi
+          done
+
+          # Keeps the pull request body below the GitHub limit
+          MAX=15000
+          COMPARE="https://github.com/wazuh/wazuh/compare/v${CURRENT}...v${LATEST}"
+          mkdir -p "$RUNNER_TEMP/config-diff"
+          {
+            echo "### Manager configuration"
+            echo
+            echo "The packages generate \`ossec.conf\` with \`gen_ossec.sh\` on a fresh installation; on an upgrade the existing file stays in place. The comparison covers the generated defaults, which apply to new hosts."
+            echo
+            if [[ ${#AUTH_CHANGED[@]} -gt 0 ]]; then
+              AUTH_LABELS=$(printf '%s, ' "${AUTH_CHANGED[@]}")
+              echo "> [!WARNING]"
+              echo "> The \`<auth>\` section changed (${AUTH_LABELS%, }). The role sets the enrollment options in this section."
+              echo
+            fi
+            if [[ ${#ORDER[@]} -eq 0 ]]; then
+              echo "The generated manager configuration did not change."
+            fi
+            for KEY in "${ORDER[@]}"; do
+              echo "<details><summary>${LABELS[$KEY]}</summary>"
+              echo
+              DIFF="${DIFFS[$KEY]}"
+              echo '```diff'
+              if [[ ${#DIFF} -gt $MAX ]]; then
+                CUT="${DIFF:0:$MAX}"
+                echo "${CUT%$'\n'*}"
+                echo '```'
+                echo
+                echo "The diff is truncated; see the full changes: ${COMPARE}"
+              else
+                echo "$DIFF"
+                echo '```'
+              fi
+              echo
+              echo "</details>"
+              echo
+            done
+          } > "$RUNNER_TEMP/config-diff/config-diff.md"
+          cat "$RUNNER_TEMP/config-diff/config-diff.md"
+
+      - name: Upload manager configuration diff
+        uses: actions/upload-artifact@v7
+        with:
+          name: config-diff
+          path: ${{ runner.temp }}/config-diff/config-diff.md
+          retention-days: 1
+
+  update-wazuh-server:
+    name: Update Wazuh version
+    needs: [release, config-diff]
+    if: needs.release.outputs.update == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Update defaults/main.yml
+        run: |
+          sed -i "s/^wazuh_server_version: '.*'/wazuh_server_version: '${{ needs.release.outputs.latest }}'/" \
             roles/wazuh_server/defaults/main.yml
 
-      # The body lives outside the checkout, so the pull request does not
-      # commit it
+      # The diff and the body live outside the checkout, so the pull
+      # request does not commit them
+      - name: Download manager configuration diff
+        uses: actions/download-artifact@v8
+        with:
+          name: config-diff
+          path: ${{ runner.temp }}/config-diff
+
       - name: Write pull request body
-        if: >-
-          steps.wazuh.outputs.latest != steps.wazuh.outputs.current
-          && steps.wazuh.outputs.packages == 'true'
         env:
-          CURRENT: ${{ steps.wazuh.outputs.current }}
-          LATEST: ${{ steps.wazuh.outputs.latest }}
-          DOCS: https://documentation.wazuh.com/${{ steps.wazuh.outputs.docs }}
-          SERIES_CHANGED: ${{ steps.wazuh.outputs.series_changed }}
+          CURRENT: ${{ needs.release.outputs.current }}
+          LATEST: ${{ needs.release.outputs.latest }}
+          DOCS: https://documentation.wazuh.com/${{ needs.release.outputs.docs }}
+          SERIES_CHANGED: ${{ needs.release.outputs.series_changed }}
         run: |
           {
             echo "Automated update of \`wazuh_server_version\` in \`roles/wazuh_server/defaults/main.yml\`."
@@ -95,6 +215,7 @@ jobs:
             echo
             echo "Release this update before the matching \`wazuh_agent_version\` update of marcstraube.common: agents must not be newer than the manager."
             echo
+            cat "$RUNNER_TEMP/config-diff/config-diff.md"
             echo "---"
             echo "This PR was created automatically by the \`update-wazuh-server-version\` workflow."
           } > "$RUNNER_TEMP/pr-body.md"
@@ -103,9 +224,6 @@ jobs:
       # workflow; the release bot app token lets the bump PR run the
       # wazuh_server molecule matrix.
       - name: Generate release bot token
-        if: >-
-          steps.wazuh.outputs.latest != steps.wazuh.outputs.current
-          && steps.wazuh.outputs.packages == 'true'
         uses: actions/create-github-app-token@v3
         id: app-token
         with:
@@ -113,20 +231,17 @@ jobs:
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
 
       - name: Create Pull Request
-        if: >-
-          steps.wazuh.outputs.latest != steps.wazuh.outputs.current
-          && steps.wazuh.outputs.packages == 'true'
         uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ steps.app-token.outputs.token }}
           commit-message: >-
             chore(wazuh_server): update Wazuh version
-            ${{ steps.wazuh.outputs.current }} →
-            ${{ steps.wazuh.outputs.latest }}
-          branch: chore/update-wazuh-server-${{ steps.wazuh.outputs.latest }}
+            ${{ needs.release.outputs.current }} →
+            ${{ needs.release.outputs.latest }}
+          branch: chore/update-wazuh-server-${{ needs.release.outputs.latest }}
           title: >-
             chore(wazuh_server): update Wazuh version to
-            ${{ steps.wazuh.outputs.latest }}
+            ${{ needs.release.outputs.latest }}
           body-path: ${{ runner.temp }}/pr-body.md
           labels: dependencies
           delete-branch: true
