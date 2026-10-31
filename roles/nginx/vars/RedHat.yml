@@ -12,3 +12,7 @@ __nginx_user: 'nginx'
 __nginx_group: 'nginx'
 __nginx_default_root: '/usr/share/nginx/html'
 __nginx_htpasswd_package: 'httpd-tools'
+
+# Installed packages a targeted update moves along (nginx, nginx-core,
+# nginx-filesystem, dynamic modules)
+__nginx_update_pattern: '^nginx(-.+)?$'
