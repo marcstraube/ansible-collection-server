@@ -25,6 +25,33 @@ nginx_modules: []
 #   - 'mail'
 
 #
+# Package Updates
+#
+
+# State of the nginx packages:
+#   'present' installs missing packages and never updates (default).
+#   'latest'  updates the installed nginx packages in one transaction and
+#             restarts nginx when it still runs the replaced binary.
+# Pass 'latest' for a targeted update instead of setting it in inventory:
+#   --tags nginx -e nginx_packages_state=latest
+# Ignored on Arch Linux: updating single packages is a partial upgrade there,
+# nginx updates with the full system upgrade.
+nginx_packages_state: 'present'
+
+# Lowest acceptable nginx version, checked before the update (nothing changes
+# when the repository does not offer it yet) and again after it. Meant to be
+# passed with the update command to require a fix. Either an upstream
+# version, which accepts every distribution release of it:
+#   -e nginx_packages_minimum=1.28.1
+# or the full distribution version, which also covers fixes the distribution
+# backports without a new upstream version:
+#   -e nginx_packages_minimum=1.26.3-3+deb13u10
+# A mapping per platform (keys '<os_family>-<major>' or '<os_family>') covers
+# mixed hosts in one run; a host without a matching key fails:
+#   -e @nginx-minimum.yml
+nginx_packages_minimum: ''
+
+#
 # Worker Configuration
 #
 

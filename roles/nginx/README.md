@@ -45,6 +45,63 @@ See [defaults/main.yml](defaults/main.yml) for all available variables.
 | `nginx_mainline` | `false` | Use mainline instead of stable (Arch) |
 | `nginx_modules`  | `[]`    | Additional modules to install         |
 
+### Package Updates
+
+| Variable                 | Default     | Description                                                     |
+| ------------------------ | ----------- | --------------------------------------------------------------- |
+| `nginx_packages_state`   | `'present'` | `present` installs missing packages only, `latest` updates them |
+| `nginx_packages_minimum` | `''`        | Lowest acceptable nginx version, string or mapping per platform |
+
+A regular run never updates nginx. A targeted update, for example for a
+security release, is requested on the command line:
+
+```bash
+ansible-playbook site.yml --tags nginx \
+  -e nginx_packages_state=latest \
+  -e nginx_packages_minimum=1.28.1
+```
+
+With `latest` the role refreshes the package metadata and updates every
+installed nginx package in one transaction, including the parts pulled in as
+dependencies and the dynamic modules (on Debian `nginx*` and
+`libnginx-mod-*`, on EL `nginx*`). The role reports the version change.
+
+`nginx_packages_minimum` is checked twice. Before the update the role asks
+the package manager which version the update would install and fails without
+a change when it is older than the minimum, which shows that the repository
+does not carry the fix yet. After the update it checks the installed version
+again; this check is skipped under `--check`.
+
+The minimum is an upstream version (`1.28.1`, any distribution release of it)
+or the full distribution version (`1.26.3-3+deb13u10`,
+`2:1.20.1-28.el9_8.6`). Debian and EL ship many fixes as backports that only
+raise the release, so only the full version proves such a fix. Versions are
+compared with the rules of the distribution (`dpkg --compare-versions`, rpm,
+`vercmp`); a minimum without an epoch takes the epoch of the package. For
+mixed hosts in one run, pass a mapping per platform; the keys are
+`<os_family>-<major>` or `<os_family>`, and a host without a matching key
+fails before any change:
+
+```yaml
+# nginx-minimum.yml, passed with -e @nginx-minimum.yml
+nginx_packages_minimum:
+  Debian: '1.26.3-3+deb13u10'
+  RedHat-9: '2:1.20.1-28.el9_8.6'
+  RedHat-10: '2:1.26.3-6.el10_2.7'
+  Archlinux: '1.28.1'
+```
+
+The packages usually restart nginx themselves. When they did not, for example
+because of a `policy-rc.d`, the running master still executes the replaced
+binary; the role then tests the configuration with `nginx -t` and restarts
+nginx. When the test fails, the run fails without a restart and the running
+master keeps serving; the next run with `latest` restarts it.
+
+On Arch Linux `nginx_packages_state` is ignored: updating single packages is
+a partial upgrade there, nginx updates with the full system upgrade. Run the
+role with `latest` together with the system upgrade (`--tags
+system-update,nginx`) to restart nginx after it.
+
 ### HTTP Core
 
 | Variable                     | Default  | Description                         |

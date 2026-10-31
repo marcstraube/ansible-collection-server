@@ -12,3 +12,7 @@ __nginx_user: 'www-data'
 __nginx_group: 'www-data'
 __nginx_default_root: '/var/www/html'
 __nginx_htpasswd_package: 'apache2-utils'
+
+# Installed packages a targeted update moves along (nginx, nginx-common,
+# dynamic modules)
+__nginx_update_pattern: '^(nginx(-.+)?|libnginx-mod-.+)$'
