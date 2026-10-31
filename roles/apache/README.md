@@ -38,6 +38,65 @@ See [defaults/main.yml](defaults/main.yml) for all available variables.
 | `apache_enabled`         | `false` | Enable the apache role              |
 | `apache_service_enabled` | `true`  | Enable and start the Apache service |
 
+### Package Updates
+
+| Variable                  | Default     | Description                                                      |
+| ------------------------- | ----------- | ---------------------------------------------------------------- |
+| `apache_packages_state`   | `'present'` | `present` installs missing packages only, `latest` updates them  |
+| `apache_packages_minimum` | `''`        | Lowest acceptable Apache version, string or mapping per platform |
+
+A regular run never updates Apache. A targeted update, for example for a
+security release, is requested on the command line:
+
+```bash
+ansible-playbook site.yml --tags apache \
+  -e apache_packages_state=latest \
+  -e apache_packages_minimum=2.4.66
+```
+
+With `latest` the role refreshes the package metadata and updates every
+installed Apache package in one transaction, including the parts pulled in
+as dependencies (on Debian `apache2*`, on EL `httpd*` and `mod_ssl`). Module
+packages of other roles, such as the PHP module, stay with those roles. The
+role reports the version change.
+
+`apache_packages_minimum` is checked twice. Before the update the role asks
+the package manager which version the update would install and fails
+without a change when it is older than the minimum, which shows that the
+repository does not carry the fix yet. After the update it checks the
+installed version again; this check is skipped under `--check`.
+
+The minimum is an upstream version (`2.4.66`, any distribution release of
+it) or the full distribution version (`2.4.69-1~deb13u1`,
+`2.4.62-13.el9_8.9`). Debian and EL ship many fixes as backports that only
+raise the release, so only the full version proves such a fix. Versions are
+compared with the rules of the distribution (`dpkg --compare-versions`, rpm,
+`vercmp`); a minimum without an epoch takes the epoch of the package. For
+mixed hosts in one run, pass a mapping per platform; the keys are
+`<os_family>-<major>` or `<os_family>`, and a host without a matching key
+fails before any change:
+
+```yaml
+# apache-minimum.yml, passed with -e @apache-minimum.yml
+apache_packages_minimum:
+  Debian: '2.4.69-1~deb13u1'
+  RedHat-9: '2.4.62-13.el9_8.9'
+  RedHat-10: '2.4.63-13.el10_2.8'
+  Archlinux: '2.4.66'
+```
+
+The packages usually restart Apache themselves. When they did not, for
+example because of a `policy-rc.d`, the running main process still executes
+the replaced binary; the role then tests the configuration with `apachectl
+configtest` and restarts Apache. When the test fails, the run fails without
+a restart and the running main process keeps serving; the next run with
+`latest` restarts it.
+
+On Arch Linux `apache_packages_state` is ignored: updating single packages
+is a partial upgrade there, Apache updates with the full system upgrade.
+Run the role with `latest` together with the system upgrade (`--tags
+system-update,apache`) to restart Apache after it.
+
 ### Essential Variables
 
 | Variable                  | Default                   | Description                       |

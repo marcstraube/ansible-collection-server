@@ -56,3 +56,11 @@ __apache_modules_package_defaults:
 # Additional packages
 __apache_utils_packages:
   - apache2-utils
+
+# Main process PID (APACHE_PID_FILE in /etc/apache2/envvars)
+__apache_pid_file: '/var/run/apache2/apache2.pid'
+
+# Installed packages a targeted update moves along (apache2, apache2-bin,
+# apache2-data, apache2-utils); module packages of other roles keep their
+# own names (libapache2-mod-*)
+__apache_update_pattern: '^apache2(-.+)?$'
