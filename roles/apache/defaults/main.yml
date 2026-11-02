@@ -10,6 +10,34 @@ apache_enabled: false
 apache_service_enabled: true
 
 #
+# Package Updates
+#
+
+# State of the Apache packages:
+#   'present' installs missing packages and never updates (default).
+#   'latest'  updates the installed Apache packages in one transaction and
+#             restarts Apache when it still runs the replaced binary.
+# Pass 'latest' for a targeted update instead of setting it in inventory:
+#   --tags apache -e apache_packages_state=latest
+# Module packages of other roles, such as the PHP module, stay with those
+# roles. Ignored on Arch Linux: updating single packages is a partial
+# upgrade there, Apache updates with the full system upgrade.
+apache_packages_state: 'present'
+
+# Lowest acceptable Apache version, checked before the update (nothing
+# changes when the repository does not offer it yet) and again after it.
+# Meant to be passed with the update command to require a fix. Either an
+# upstream version, which accepts every distribution release of it:
+#   -e apache_packages_minimum=2.4.66
+# or the full distribution version, which also covers fixes the
+# distribution backports without a new upstream version:
+#   -e apache_packages_minimum=2.4.62-13.el9_8.9
+# A mapping per platform (keys '<os_family>-<major>' or '<os_family>')
+# covers mixed hosts in one run; a host without a matching key fails:
+#   -e @apache-minimum.yml
+apache_packages_minimum: ''
+
+#
 # Modules
 #
 
