@@ -63,7 +63,8 @@
     - ansible_facts['os_family'] in ['RedHat', 'Debian']
 
 # Full version of the main package as the package manager writes it:
-# [epoch:]version[-release]
+# [epoch:]version[-release]. package_facts reports a missing rpm epoch as
+# None, which counts as no epoch like 0.
 - name: Install | Record the installed nginx version
   ansible.builtin.set_fact:
     __nginx_version_package: '{{ __nginx_main_package }}'
@@ -75,7 +76,8 @@
          else __nginx_packages | first }}
     __nginx_pkg: "{{ ansible_facts['packages'][__nginx_main_package] | default([{}]) | first }}"
     __nginx_installed_version: >-
-      {{ ((__nginx_pkg.epoch ~ ':') if (__nginx_pkg.epoch | default(none, true)) else '')
+      {{ ((__nginx_pkg.epoch ~ ':')
+          if ((__nginx_pkg.epoch | default('', true) | string) not in ['', 'None', '0']) else '')
          ~ (__nginx_pkg.version | default(''))
          ~ (('-' ~ __nginx_pkg.release) if (__nginx_pkg.release | default('', true)) else '') }}
   when: nginx_packages_state == 'latest' or __nginx_minimum | length > 0
@@ -198,7 +200,8 @@
 - name: Install | Record the updated nginx version
   ansible.builtin.set_fact:
     __nginx_version_after: >-
-      {{ ((__nginx_pkg.epoch ~ ':') if (__nginx_pkg.epoch | default(none, true)) else '')
+      {{ ((__nginx_pkg.epoch ~ ':')
+          if ((__nginx_pkg.epoch | default('', true) | string) not in ['', 'None', '0']) else '')
          ~ (__nginx_pkg.version | default(''))
          ~ (('-' ~ __nginx_pkg.release) if (__nginx_pkg.release | default('', true)) else '') }}
   vars:
