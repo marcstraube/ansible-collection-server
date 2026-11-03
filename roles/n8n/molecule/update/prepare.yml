@@ -38,12 +38,14 @@
         - /var/lib/n8n/.local/share
         - /var/lib/n8n/.local/share/containers
 
+    # The update holds two releases with their user namespace copies at
+    # the same time, about twice the size of the default scenario
     - name: Prepare | Mount a tmpfs on the podman storage directory
       ansible.posix.mount:
         path: /var/lib/n8n/.local/share/containers
         src: tmpfs
         fstype: tmpfs
-        opts: 'size=6g,uid={{ __prepare_n8n_user.uid }},gid={{ __prepare_n8n_user.group }},mode=0700'
+        opts: 'size=10g,uid={{ __prepare_n8n_user.uid }},gid={{ __prepare_n8n_user.group }},mode=0700'
         state: ephemeral
 
     # Sudo PAM bypass — required for tasks using `become_user` on
