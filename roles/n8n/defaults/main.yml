@@ -64,6 +64,13 @@ n8n_update_restore: ''
 # migrations run before the endpoint reports ready
 n8n_ready_timeout: 300
 
+# Start timeout of the n8n and task runner units (TimeoutStartSec). The
+# first start after an image change copies the image layers into the user
+# namespace of the n8n user, which takes minutes on a host whose audit
+# rules throttle the chown of every file; the runner unit waits for that
+# start in its pre-start command.
+n8n_service_start_timeout: 300
+
 #
 # User and Directory
 #

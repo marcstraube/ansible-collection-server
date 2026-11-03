@@ -123,6 +123,7 @@ The role then:
 | `n8n_update_backup_keep`     | `3`                   | Backup sets to keep                           |
 | `n8n_update_restore`         | `''`                  | Backup set to restore (see below)             |
 | `n8n_ready_timeout`          | `300`                 | Seconds to wait for readiness after a start   |
+| `n8n_service_start_timeout`  | `300`                 | Start timeout of both units (seconds)         |
 
 **Downgrades** are refused: n8n migrates its database on start and the
 migrations are forward-only, so an older release does not start on a
