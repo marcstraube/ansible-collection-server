@@ -36,8 +36,8 @@ n8n_subid_count: 65536
 # Updates
 #
 # A change of n8n_version on a host with a deployed n8n is an update: the
-# role stops the service, backs up the data, pulls the new image and waits
-# for /healthz/readiness.
+# role stops the service, backs up the data, pulls the new image, waits
+# for /healthz/readiness and removes the images of the replaced release.
 # n8n migrates its database on start, and migrations are forward-only, so
 # a lower version is refused unless the backup set taken before the
 # upgrade is restored with it (n8n_update_restore).
@@ -70,6 +70,14 @@ n8n_ready_timeout: 300
 # rules throttle the chown of every file; the runner unit waits for that
 # start in its pre-start command.
 n8n_service_start_timeout: 300
+
+# Remove the images of other releases from the podman storage of the n8n
+# user after a version change, once n8n and the task runner launcher
+# report healthy: every tag of n8n_podman_image and n8n_runners_podman_image
+# except the two the services run. Images of other containers stay. A
+# failed update keeps the previous image; a restore pulls the image of
+# the backup set again.
+n8n_update_remove_old_images: true
 
 #
 # User and Directory

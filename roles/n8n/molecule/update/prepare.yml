@@ -118,3 +118,25 @@
         name: '{{ playbook_dir }}/../..'
       vars:
         n8n_version: '{{ n8n_update_previous_version }}'
+
+    # An image of another repository in the storage of the n8n user; the
+    # image cleanup of the update must leave it alone. A second tag of the
+    # previous n8n image costs no pull.
+    - name: Prepare | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Prepare | Load role defaults
+      ansible.builtin.include_vars:
+        file: '../../defaults/main.yml'
+        name: __prepare_defaults
+
+    - name: Prepare | Tag an unrelated image
+      containers.podman.podman_tag:
+        image: '{{ __prepare_defaults.n8n_podman_image }}:{{ n8n_update_previous_version }}'
+        target_names:
+          - '{{ n8n_update_unrelated_image }}'
+      become: true
+      become_user: n8n
+      environment:
+        XDG_RUNTIME_DIR: '{{ __n8n_runtime_dir }}'
