@@ -3,6 +3,18 @@
 # Wazuh Indexer
 #
 
+# The snapshot repository location has to exist before the indexer verifies
+# the repository. The directory stays with its data when the path is
+# emptied.
+- name: Configure | Create indexer snapshot directory
+  ansible.builtin.file:
+    path: '{{ wazuh_server_indexer_snapshot_path }}'
+    state: directory
+    owner: '{{ __wazuh_server_indexer_user }}'
+    group: '{{ __wazuh_server_indexer_user }}'
+    mode: '0750'
+  when: wazuh_server_indexer_snapshot_path | length > 0
+
 - name: Configure | Deploy indexer configuration
   ansible.builtin.template:
     src: opensearch.yml.j2

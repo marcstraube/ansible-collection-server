@@ -89,6 +89,18 @@ both `wazuh_server_api_*_password`. See [Credentials](#credentials-1).
 | `wazuh_server_indexer_cluster_name`    | `'wazuh'`     | Cluster name                                            |
 | `wazuh_server_indexer_heap_size`       | `''`          | JVM heap (`Xms`/`Xmx`), empty keeps the package default |
 
+### Indexer Snapshots
+
+| Variable                                   | Default       | Description                                         |
+| ------------------------------------------ | ------------- | --------------------------------------------------- |
+| `wazuh_server_indexer_snapshot_path`       | `''`          | Snapshot directory (`path.repo`), empty disables    |
+| `wazuh_server_indexer_snapshot_repository` | `'local'`     | Name of the filesystem snapshot repository          |
+| `wazuh_server_indexer_snapshot_schedule`   | `'0 2 * * *'` | Cron schedule of the snapshot management policy     |
+| `wazuh_server_indexer_snapshot_timezone`   | `'UTC'`       | Time zone of the schedule                           |
+| `wazuh_server_indexer_snapshot_max_count`  | `14`          | Snapshots to keep, the oldest beyond it are deleted |
+
+See [Snapshots](#snapshots) under Notes.
+
 ### Wazuh Manager, Filebeat and Dashboard
 
 | Variable                                 | Default     | Description                                  |
@@ -136,6 +148,7 @@ See [Outgoing Proxy](#outgoing-proxy-1) under Notes.
 | `wazuh-server:configure` | Configuration deployment              |
 | `wazuh-server:service`   | Systemd service management            |
 | `wazuh-server:security`  | Indexer users and Wazuh API passwords |
+| `wazuh-server:snapshots` | Snapshot repository and policy        |
 
 ## Example Playbook
 
@@ -273,6 +286,35 @@ The manager starts without contacting the proxy; a content download that
 fails is logged in `/var/ossec/logs/ossec.log` and retried with the next
 update interval.
 
+### Snapshots
+
+With `wazuh_server_indexer_snapshot_path` the role creates the directory
+for the indexer user, renders it as `path.repo` in `opensearch.yml` (a
+changed path restarts the indexer), registers it as the filesystem
+snapshot repository `wazuh_server_indexer_snapshot_repository` and creates
+the snapshot management policy `wazuh` with the schedule and the retention.
+The policy takes a snapshot of all indices on every run of the schedule,
+including the saved objects of the dashboard, and deletes the oldest
+snapshots beyond `wazuh_server_indexer_snapshot_max_count` on the same
+schedule. Snapshot names start with `wazuh-` followed by the date. The
+indexer API requests authenticate with the admin certificate.
+
+- A file-level backup of the snapshot directory must not run while a
+  snapshot is in progress: the repository is only consistent between
+  snapshots. Schedule the backup apart from the policy or check
+  `GET _snapshot/<repository>/_current` first.
+- An empty path deletes the policy and deregisters the repository named
+  by the current variables; `path.repo` is left out. The directory and
+  the snapshots in it stay on disk; remove them manually when they are no
+  longer needed.
+- Renaming the repository registers a new one; the previously registered
+  repository with its snapshots stays in place. Deregister it manually
+  with `DELETE _snapshot/<old name>` when the old snapshots are no longer
+  needed.
+- The role restores nothing. Restore a snapshot with
+  `POST _snapshot/<repository>/<snapshot>/_restore` and the indices to
+  restore; see the OpenSearch documentation under References.
+
 ### Firewall
 
 The role does not manage firewall rules. Open the Wazuh ports through the
@@ -296,6 +338,8 @@ binds to loopback by default.
 - [Wazuh Documentation](https://documentation.wazuh.com/current/)
 - [Wazuh Installation Guide](https://documentation.wazuh.com/current/installation-guide/)
 - [Wazuh Ansible Deployment](https://documentation.wazuh.com/current/deployment-options/deploying-with-ansible/guide/index.html)
+- [OpenSearch Snapshots](https://docs.opensearch.org/latest/tuning-your-cluster/availability-and-recovery/snapshots/snapshot-restore/)
+- [OpenSearch Snapshot Management API](https://docs.opensearch.org/latest/tuning-your-cluster/availability-and-recovery/snapshots/sm-api/)
 
 ## License
 

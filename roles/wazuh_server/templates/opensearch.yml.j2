@@ -7,6 +7,9 @@ cluster.name: "{{ wazuh_server_indexer_cluster_name }}"
 
 path.data: {{ __wazuh_server_indexer_data_dir }}
 path.logs: {{ __wazuh_server_indexer_log_dir }}
+{% if wazuh_server_indexer_snapshot_path | length > 0 %}
+path.repo: ["{{ wazuh_server_indexer_snapshot_path }}"]
+{% endif %}
 
 plugins.security.ssl.http.pemcert_filepath: {{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_node_cert_name }}
 plugins.security.ssl.http.pemkey_filepath: {{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_node_key_name }}

@@ -1,0 +1,184 @@
+---
+# Runs after the security setup: the snapshot APIs need the running indexer
+# with its security configuration uploaded. The requests authenticate with
+# the admin certificate, like securityadmin. With a snapshot path the role
+# registers the filesystem repository and keeps the snapshot management
+# policy in the desired state; with an empty path it removes both, the
+# snapshot directory and its data stay.
+
+# A changed path.repo has queued an indexer restart. The repository can only
+# be registered once the running indexer allows the location, so the
+# pending handlers run now instead of at the end of the play.
+- name: Snapshots | Flush handlers to apply a changed indexer configuration
+  ansible.builtin.meta: flush_handlers
+
+- name: Snapshots | Wait for the indexer
+  ansible.builtin.uri:
+    url: '{{ __wazuh_server_indexer_url }}/_cluster/health?wait_for_status=yellow&timeout=30s'
+    client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+    client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+    ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+  register: __wazuh_server_indexer_health
+  retries: 30
+  delay: 10
+  until: __wazuh_server_indexer_health is not failed
+  # Read-only request; check mode needs the running indexer as well
+  check_mode: false
+
+#
+# Snapshot Repository
+#
+
+- name: Snapshots | Read snapshot repository
+  ansible.builtin.uri:
+    url: '{{ __wazuh_server_indexer_snapshot_repository_url }}'
+    client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+    client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+    ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+    status_code: [200, 404]
+  register: __wazuh_server_snapshot_repository
+  retries: 5
+  delay: 10
+  # Read-only request; check mode needs the status code
+  check_mode: false
+
+# Registering verifies that the indexer can write to the location
+- name: Snapshots | Register snapshot repository
+  ansible.builtin.uri:
+    url: '{{ __wazuh_server_indexer_snapshot_repository_url }}'
+    method: PUT
+    body_format: json
+    body:
+      type: 'fs'
+      settings:
+        location: '{{ wazuh_server_indexer_snapshot_path }}'
+    client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+    client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+    ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+  vars:
+    __wazuh_server_snapshot_repository_current: >-
+      {{ (__wazuh_server_snapshot_repository.json | default({}))[wazuh_server_indexer_snapshot_repository]
+         | default({}) }}
+  retries: 5
+  delay: 10
+  changed_when: true
+  when:
+    - wazuh_server_indexer_snapshot_path | length > 0
+    - __wazuh_server_snapshot_repository.status == 404
+      or __wazuh_server_snapshot_repository_current.type | default('') != 'fs'
+      or __wazuh_server_snapshot_repository_current.settings.location | default('')
+         != wazuh_server_indexer_snapshot_path
+
+#
+# Snapshot Management Policy
+#
+# A stored policy is only replaced when one of the fields the role sets
+# differs. The update needs the sequence number and primary term of the
+# stored policy.
+#
+
+- name: Snapshots | Read snapshot management policy
+  ansible.builtin.uri:
+    url: '{{ __wazuh_server_indexer_snapshot_policy_url }}'
+    client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+    client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+    ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+    status_code: [200, 404]
+  register: __wazuh_server_snapshot_policy
+  retries: 5
+  delay: 10
+  # Read-only request; check mode needs the status code
+  check_mode: false
+
+- name: Snapshots | Create snapshot management policy
+  ansible.builtin.uri:
+    url: '{{ __wazuh_server_indexer_snapshot_policy_url }}'
+    method: POST
+    body_format: json
+    body: '{{ __wazuh_server_indexer_snapshot_policy }}'
+    client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+    client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+    ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+    status_code: [200, 201]
+  retries: 5
+  delay: 10
+  changed_when: true
+  when:
+    - wazuh_server_indexer_snapshot_path | length > 0
+    - __wazuh_server_snapshot_policy.status == 404
+
+- name: Snapshots | Update snapshot management policy
+  ansible.builtin.uri:
+    url: >-
+      {{ __wazuh_server_indexer_snapshot_policy_url
+      }}?if_seq_no={{ __wazuh_server_snapshot_policy.json._seq_no
+      }}&if_primary_term={{ __wazuh_server_snapshot_policy.json._primary_term }}
+    method: PUT
+    body_format: json
+    body: '{{ __wazuh_server_indexer_snapshot_policy }}'
+    client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+    client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+    ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+  vars:
+    # The fields of the stored policy the role sets, in the shape of the
+    # desired policy
+    __wazuh_server_sm_policy: '{{ __wazuh_server_snapshot_policy.json.sm_policy | default({}) }}'
+    __wazuh_server_sm_policy_current:
+      description: "{{ __wazuh_server_sm_policy.description | default('') }}"
+      enabled: '{{ __wazuh_server_sm_policy.enabled | default(false) | bool }}'
+      creation:
+        schedule:
+          cron:
+            expression: "{{ __wazuh_server_sm_policy.creation.schedule.cron.expression | default('') }}"
+            timezone: "{{ __wazuh_server_sm_policy.creation.schedule.cron.timezone | default('') }}"
+      deletion:
+        schedule:
+          cron:
+            expression: "{{ __wazuh_server_sm_policy.deletion.schedule.cron.expression | default('') }}"
+            timezone: "{{ __wazuh_server_sm_policy.deletion.schedule.cron.timezone | default('') }}"
+        condition:
+          max_count: '{{ __wazuh_server_sm_policy.deletion.condition.max_count | default(0) | int }}'
+      snapshot_config:
+        repository: "{{ __wazuh_server_sm_policy.snapshot_config.repository | default('') }}"
+  retries: 5
+  delay: 10
+  changed_when: true
+  when:
+    - wazuh_server_indexer_snapshot_path | length > 0
+    - __wazuh_server_snapshot_policy.status == 200
+    - __wazuh_server_sm_policy_current != __wazuh_server_indexer_snapshot_policy
+
+#
+# Removal
+#
+# With an empty path the role removes the policy before the repository it
+# refers to. Deregistering leaves the snapshots in the directory.
+#
+
+- name: Snapshots | Delete snapshot management policy
+  ansible.builtin.uri:
+    url: '{{ __wazuh_server_indexer_snapshot_policy_url }}'
+    method: DELETE
+    client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+    client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+    ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+  retries: 5
+  delay: 10
+  changed_when: true
+  when:
+    - wazuh_server_indexer_snapshot_path | length == 0
+    - __wazuh_server_snapshot_policy.status == 200
+
+- name: Snapshots | Deregister snapshot repository
+  ansible.builtin.uri:
+    url: '{{ __wazuh_server_indexer_snapshot_repository_url }}'
+    method: DELETE
+    client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+    client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+    ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+  retries: 5
+  delay: 10
+  changed_when: true
+  when:
+    - wazuh_server_indexer_snapshot_path | length == 0
+    - __wazuh_server_snapshot_repository.status == 200
