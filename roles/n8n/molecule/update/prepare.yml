@@ -4,6 +4,48 @@
   gather_facts: true
 
   tasks:
+    # The podman storage of the n8n user lives on a tmpfs (test container
+    # only): the root file system of the container is an overlay, and
+    # extracting an image layer there fails because the whiteouts of the
+    # layer are character devices an overlay refuses to create. The user
+    # and group are the ones the role creates, so the role finds them in
+    # place.
+
+    - name: Prepare | Create n8n system group
+      ansible.builtin.group:
+        name: n8n
+        system: true
+
+    - name: Prepare | Create n8n system user
+      ansible.builtin.user:
+        name: n8n
+        group: n8n
+        home: /var/lib/n8n
+        shell: /usr/sbin/nologin
+        system: true
+        create_home: true
+      register: __prepare_n8n_user
+
+    - name: Prepare | Create the podman storage directory of the n8n user
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: directory
+        owner: n8n
+        group: n8n
+        mode: '0700'
+      loop:
+        - /var/lib/n8n/.local
+        - /var/lib/n8n/.local/share
+        - /var/lib/n8n/.local/share/containers
+
+    - name: Prepare | Mount a tmpfs on the podman storage directory
+      ansible.posix.mount:
+        path: /var/lib/n8n/.local/share/containers
+        src: tmpfs
+        fstype: tmpfs
+        opts: 'size=6g,uid={{ __prepare_n8n_user.uid }},gid={{ __prepare_n8n_user.group }},mode=0700'
+        state: ephemeral
+
     # Sudo PAM bypass — required for tasks using `become_user` on
     # geerlingguy Rocky containers under GitHub-hosted runners
     # (test container only).
