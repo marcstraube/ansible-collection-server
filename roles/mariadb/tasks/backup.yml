@@ -1,0 +1,30 @@
+---
+- name: Backup | Create backup directory
+  ansible.builtin.file:
+    path: '{{ mariadb_backup_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Backup | Deploy backup script
+  ansible.builtin.template:
+    src: backup.sh.j2
+    dest: /usr/local/bin/mariadb-backup.sh
+    owner: root
+    group: root
+    mode: '0700'
+
+# Runs as root: the unix_socket plugin authenticates the dump without a
+# password file
+- name: Backup | Configure backup cron job
+  ansible.builtin.cron:
+    name: MariaDB backup
+    minute: '{{ mariadb_backup_schedule.split()[0] }}'
+    hour: '{{ mariadb_backup_schedule.split()[1] }}'
+    day: '{{ mariadb_backup_schedule.split()[2] }}'
+    month: '{{ mariadb_backup_schedule.split()[3] }}'
+    weekday: '{{ mariadb_backup_schedule.split()[4] }}'
+    job: /usr/local/bin/mariadb-backup.sh
+    user: root
+    state: present

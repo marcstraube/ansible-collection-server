@@ -1,0 +1,40 @@
+#!/bin/bash
+{{ ansible_managed | comment }}
+#
+# One compressed mariadb-dump per database. Keeps the newest
+# {{ mariadb_backup_retention }} dumps of every database (count-based, so a
+# failing schedule never removes the last good set).
+
+set -euo pipefail
+
+BACKUP_DIR="{{ mariadb_backup_dir }}"
+RETENTION="{{ mariadb_backup_retention }}"
+SOCKET="{{ __mariadb_socket }}"
+DATE=$(date +%Y%m%d_%H%M%S)
+
+{% if mariadb_backup_databases | length > 0 %}
+DATABASES="{{ mariadb_backup_databases | join(' ') }}"
+{% else %}
+DATABASES=$(mariadb --protocol=socket --socket="${SOCKET}" --batch --skip-column-names \
+    --execute="SELECT schema_name FROM information_schema.schemata
+               WHERE schema_name NOT IN ({{ __mariadb_backup_system_schemas | map('regex_replace', '^(.*)$', "'\\1'") | join(', ') }})")
+{% endif %}
+
+mkdir -p "${BACKUP_DIR}"
+
+for DB in ${DATABASES}; do
+    BACKUP_FILE="${BACKUP_DIR}/${DB}_${DATE}.sql.gz"
+    echo "Backing up ${DB} to ${BACKUP_FILE}"
+    mariadb-dump --protocol=socket --socket="${SOCKET}" \
+        --single-transaction --routines --triggers --events "${DB}" \
+        | gzip > "${BACKUP_FILE}"
+
+    # Rotation: keep the newest ${RETENTION} dumps of this database
+    find "${BACKUP_DIR}" -maxdepth 1 -name "${DB}_*.sql.gz" -printf '%T@ %p\n' \
+        | sort -rn \
+        | tail -n +$((RETENTION + 1)) \
+        | cut -d' ' -f2- \
+        | xargs -r rm -f --
+done
+
+echo "Backup completed: $(date)"

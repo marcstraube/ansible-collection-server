@@ -1,0 +1,28 @@
+---
+- name: Databases | Remove the test database
+  ansible.mariadb.mariadb_db:
+    name: test
+    login_unix_socket: '{{ __mariadb_socket }}'
+    state: absent
+
+# The initial grants let every user into test and test_* databases; the
+# grants outlive the database and would apply to one created later.
+- name: Databases | Remove the test database grants
+  ansible.mariadb.mariadb_query:
+    query:
+      - "DELETE FROM mysql.db WHERE Db = 'test' OR Db = 'test\\_%'"
+      - FLUSH PRIVILEGES
+    login_unix_socket: '{{ __mariadb_socket }}'
+  register: __mariadb_test_grants
+  changed_when: __mariadb_test_grants.rowcount[0] | default(0) | int > 0
+
+- name: Databases | Create databases
+  ansible.mariadb.mariadb_db:
+    name: '{{ item.name }}'
+    encoding: '{{ item.encoding | default(mariadb_character_set_server) }}'
+    collation: '{{ item.collation | default(mariadb_collation_server) }}'
+    login_unix_socket: '{{ __mariadb_socket }}'
+    state: present
+  loop: '{{ mariadb_databases }}'
+  loop_control:
+    label: '{{ item.name }}'

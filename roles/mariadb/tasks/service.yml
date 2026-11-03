@@ -1,0 +1,22 @@
+---
+- name: Service | Manage MariaDB service
+  ansible.builtin.systemd_service:
+    name: '{{ __mariadb_service_name }}'
+    enabled: "{{ mariadb_service_enabled | bool }}"
+    state: "{{ mariadb_service_enabled | bool | ternary('started', 'stopped') }}"
+    daemon_reload: true
+
+# On Arch Linux the rolling repository moves MariaDB to a new major version
+# with the system upgrade, and the package scripts do not update the system
+# tables (Debian and EL do that in theirs). mariadb-upgrade checks the
+# version stamp in the data directory and only works when the server runs a
+# newer version than the stamp, so it is safe on every run. Root
+# authenticates over the socket.
+- name: Service | Upgrade the system tables after a version change (Arch)
+  ansible.builtin.command:
+    cmd: 'mariadb-upgrade --socket={{ __mariadb_socket }}'
+  register: __mariadb_upgrade
+  changed_when: "'already upgraded' not in __mariadb_upgrade.stdout"
+  when:
+    - ansible_facts['os_family'] == 'Archlinux'
+    - mariadb_service_enabled | bool

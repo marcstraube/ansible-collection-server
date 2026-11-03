@@ -1,0 +1,289 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Verify | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Verify | Load OS-specific variables
+      ansible.builtin.include_vars: '{{ item }}'
+      with_first_found:
+        - files:
+            - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["distribution"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}.yml'
+          paths:
+            - '../../vars'
+
+    #
+    # Service
+    #
+
+    - name: Verify | Check MariaDB service status
+      ansible.builtin.systemd_service:
+        name: '{{ __mariadb_service_name }}'
+      register: __verify_service
+
+    - name: Verify | Assert MariaDB service is active and enabled
+      ansible.builtin.assert:
+        that:
+          - __verify_service.status.ActiveState == 'active'
+          - __verify_service.status.UnitFileState == 'enabled'
+        fail_msg: 'MariaDB service is not active or enabled'
+        success_msg: 'MariaDB service is active and enabled'
+
+    - name: Verify | Assert MariaDB listens on the loopback port
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 3306
+        timeout: 10
+        state: started
+
+    #
+    # Configuration
+    #
+
+    - name: Verify | Stat the configuration drop-in
+      ansible.builtin.stat:
+        path: '{{ __mariadb_config_file }}'
+      register: __verify_config
+
+    - name: Verify | Assert the configuration drop-in exists with correct permissions
+      ansible.builtin.assert:
+        that:
+          - __verify_config.stat.exists
+          - __verify_config.stat.mode == '0644'
+          - __verify_config.stat.pw_name == 'root'
+        fail_msg: '{{ __mariadb_config_file }} is missing or has wrong permissions'
+        success_msg: '{{ __mariadb_config_file }} exists with correct permissions'
+
+    - name: Verify | Read the configuration drop-in
+      ansible.builtin.slurp:
+        src: '{{ __mariadb_config_file }}'
+      register: __verify_config_content
+
+    - name: Verify | Assert the configuration drop-in contains expected settings
+      ansible.builtin.assert:
+        that:
+          - "'bind-address = 127.0.0.1' in __verify_config_text"
+          - "'character-set-server = utf8mb4' in __verify_config_text"
+          - "'innodb_buffer_pool_size = 64M' in __verify_config_text"
+          - "'slow_query_log = ON' in __verify_config_text"
+          - "'long_query_time = 5' in __verify_config_text"
+          - "'sql_mode = STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION' in __verify_config_text"
+          - "'ssl_cert' not in __verify_config_text"
+        fail_msg: 'The configuration drop-in misses expected settings'
+        success_msg: 'The configuration drop-in contains the expected settings'
+      vars:
+        __verify_config_text: '{{ __verify_config_content.content | b64decode }}'
+
+    # The server reads the drop-in: the values must be live, not only on disk
+    - name: Verify | Query the running server settings
+      ansible.mariadb.mariadb_query:
+        query:
+          - >-
+            SHOW VARIABLES WHERE Variable_name IN
+            ('character_set_server', 'collation_server', 'bind_address', 'slow_query_log', 'sql_mode')
+        login_unix_socket: '{{ __mariadb_socket }}'
+      register: __verify_variables
+
+    - name: Verify | Assert the running server uses the deployed settings
+      ansible.builtin.assert:
+        that:
+          - __verify_settings['character_set_server'] == 'utf8mb4'
+          - __verify_settings['collation_server'] == 'utf8mb4_unicode_ci'
+          - __verify_settings['bind_address'] == '127.0.0.1'
+          - __verify_settings['slow_query_log'] == 'ON'
+          - __verify_settings['sql_mode'] == 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'
+        fail_msg: 'The running server does not use the deployed settings: {{ __verify_settings }}'
+        success_msg: 'The running server uses the deployed settings'
+      vars:
+        __verify_settings: >-
+          {{ dict(__verify_variables.query_result[0] | map(attribute='Variable_name')
+                  | zip(__verify_variables.query_result[0] | map(attribute='Value'))) }}
+
+    #
+    # Security
+    #
+
+    - name: Verify | Query the authentication state
+      ansible.mariadb.mariadb_query:
+        query:
+          - SELECT plugin FROM mysql.user WHERE User = 'root' AND Host = 'localhost'
+          - SELECT COUNT(*) AS anonymous FROM mysql.user WHERE User = ''
+          - SHOW DATABASES LIKE 'test'
+          - SELECT COUNT(*) AS test_grants FROM mysql.db WHERE Db = 'test' OR Db = 'test\\_%'
+          - SELECT COUNT(*) AS users FROM mysql.user WHERE User = 'testuser' AND Host = '127.0.0.1'
+        login_unix_socket: '{{ __mariadb_socket }}'
+      register: __verify_auth
+
+    - name: Verify | Assert root uses the unix socket, no anonymous users and no test database
+      ansible.builtin.assert:
+        that:
+          - __verify_auth.query_result[0][0]['plugin'] == 'unix_socket'
+          - __verify_auth.query_result[1][0]['anonymous'] | int == 0
+          - __verify_auth.query_result[2] | length == 0
+          - __verify_auth.query_result[3][0]['test_grants'] | int == 0
+          - __verify_auth.query_result[4][0]['users'] | int == 1
+        fail_msg: 'Unexpected authentication state: {{ __verify_auth.query_result }}'
+        success_msg: 'root authenticates through the unix socket, anonymous users and the test database are gone'
+
+    - name: Verify | Assert the test database exists
+      ansible.mariadb.mariadb_db:
+        name: testdb
+        login_unix_socket: '{{ __mariadb_socket }}'
+        state: present
+      check_mode: true
+      register: __verify_db
+      failed_when: __verify_db.changed
+
+    # The user must reach its database over TCP with the password and the
+    # granted privileges
+    - name: Verify | Connect as the test user over TCP
+      ansible.mariadb.mariadb_query:
+        query:
+          - CREATE TABLE IF NOT EXISTS verify (id INT PRIMARY KEY)
+          - DROP TABLE verify
+        login_user: testuser
+        login_password: testpassword
+        login_host: 127.0.0.1
+        login_db: testdb
+      changed_when: false
+
+    #
+    # Targeted package update (side_effect rolled the packages back and ran
+    # the converge playbook with mariadb_packages_state: latest)
+    #
+
+    #
+    # System Tables (Arch Linux)
+    #
+
+    - name: Verify | Read the version stamp of the data directory (Arch)
+      ansible.builtin.slurp:
+        src: '{{ __mariadb_data_dir }}/mariadb_upgrade_info'
+      register: __verify_upgrade_info
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Verify | Read the server version (Arch)
+      ansible.builtin.command:
+        cmd: mariadbd --version
+      register: __verify_server_version
+      changed_when: false
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    # mariadb-upgrade writes the server version into the stamp, so a stamp
+    # of the running major version shows that the role ran it
+    - name: Verify | Assert the system tables match the server version (Arch)
+      ansible.builtin.assert:
+        that:
+          - __verify_upgrade_major == __verify_server_major
+        fail_msg: >-
+          mariadb_upgrade_info holds {{ __verify_upgrade_major }}, the server
+          runs {{ __verify_server_major }}
+      vars:
+        __verify_upgrade_major: >-
+          {{ __verify_upgrade_info.content | b64decode | regex_search('^[0-9]+\.[0-9]+') }}
+        __verify_server_major: >-
+          {{ __verify_server_version.stdout | regex_search('Ver ([0-9]+\.[0-9]+)', '\1') | first }}
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Verify | Read the server package versions around the rollback
+      ansible.builtin.slurp:
+        src: /root/mariadb-update-versions
+      register: __verify_update_versions
+
+    - name: Verify | Stat the version record
+      ansible.builtin.stat:
+        path: /root/mariadb-update-versions
+      register: __verify_update_stat
+
+    - name: Verify | Gather package facts after the update
+      ansible.builtin.package_facts:
+
+    - name: Verify | Set update version facts
+      ansible.builtin.set_fact:
+        __verify_version_latest: '{{ (__verify_update_versions.content | b64decode).splitlines()[0] | trim }}'
+        __verify_version_rolled_back: '{{ (__verify_update_versions.content | b64decode).splitlines()[1] | trim }}'
+        __verify_version_now: >-
+          {{ ((__verify_pkg.epoch ~ ':')
+              if ((__verify_pkg.epoch | default('', true) | string) not in ['', 'None', '0']) else '')
+             ~ (__verify_pkg.version | default(''))
+             ~ (('-' ~ __verify_pkg.release) if (__verify_pkg.release | default('', true)) else '') }}
+      vars:
+        __verify_pkg: "{{ ansible_facts['packages'][__mariadb_server_package] | default([{}]) | first }}"
+
+    - name: Verify | Assert the update restored the latest build
+      ansible.builtin.assert:
+        that:
+          - __verify_version_now == __verify_version_latest
+        fail_msg: >-
+          {{ __mariadb_server_package }} is at {{ __verify_version_now }} after
+          the update, expected {{ __verify_version_latest }} (rolled back to
+          {{ __verify_version_rolled_back }})
+        success_msg: >-
+          Updated from {{ __verify_version_rolled_back }} to {{ __verify_version_now }}
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    - name: Verify | Read the main PID of the running server
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - '--property=MainPID'
+          - '--value'
+          - '{{ __mariadb_service_name }}'
+      register: __verify_main_pid
+      changed_when: false
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    # readlink reports a replaced binary as "<path> (deleted)"
+    - name: Verify | Read the binary of the running server
+      ansible.builtin.command:
+        argv:
+          - readlink
+          - '/proc/{{ __verify_main_pid.stdout | trim }}/exe'
+      register: __verify_server_exe
+      changed_when: false
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    - name: Verify | Assert the server runs the updated binary
+      ansible.builtin.assert:
+        that:
+          - __verify_main_pid.stdout | trim not in ['', '0']
+          - __verify_server_exe.stdout is not search(' \(deleted\)$')
+        fail_msg: 'The server still runs the replaced binary: {{ __verify_server_exe.stdout }}'
+        success_msg: 'The server runs the updated binary'
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    # side_effect blocks the package restart on Debian, so the role has to
+    # restart the server there; where the package restarts it, the role
+    # must not restart it again.
+    - name: Verify | Read the server starts since the update
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - '--unit={{ __mariadb_service_name }}'
+          - '--since=@{{ __verify_update_stat.stat.mtime }}'
+          - '--output=cat'
+          - '--no-pager'
+      register: __verify_update_journal
+      changed_when: false
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    - name: Verify | Assert the update restarted the server at most once
+      ansible.builtin.assert:
+        that:
+          - __verify_update_starts | length <= 1
+        fail_msg: >-
+          The server started {{ __verify_update_starts | length }} times after
+          the package update: {{ __verify_update_starts }}
+        success_msg: 'The server started {{ __verify_update_starts | length }} time(s) after the package update'
+      vars:
+        __verify_update_starts: >-
+          {{ __verify_update_journal.stdout_lines | select('match', '^Started ') | list }}
+      when: __verify_version_rolled_back != __verify_version_latest

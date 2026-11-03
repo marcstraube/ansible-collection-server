@@ -1,0 +1,72 @@
+---
+# Service, configuration, security, database and user: same checks as the
+# default scenario, resolved against the upstream package names.
+- name: Import default verify
+  ansible.builtin.import_playbook: ../default/verify.yml
+
+- name: Verify upstream packages
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Verify | Gather installed packages
+      ansible.builtin.package_facts:
+
+    # Debian: the package name is the same for both sources, the upstream
+    # build carries "maria" in its version string (1:11.8.x+maria~deb13).
+    - name: Verify | Assert MariaDB comes from the upstream repository (Debian)
+      ansible.builtin.assert:
+        that:
+          - "'mariadb-server' in ansible_facts.packages"
+          - >-
+            ansible_facts.packages['mariadb-server']
+            | map(attribute='version') | select('search', 'maria') | list | length > 0
+        fail_msg: >-
+          mariadb-server is missing or not the upstream build:
+          {{ ansible_facts.packages['mariadb-server'] | default([]) }}
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Verify | Assert the upstream MariaDB-* packages are installed (RedHat)
+      ansible.builtin.assert:
+        that:
+          - "'MariaDB-server' in ansible_facts.packages"
+          - "'MariaDB-client' in ansible_facts.packages"
+          - "'mariadb-server' not in ansible_facts.packages"
+        fail_msg: >-
+          Expected MariaDB-server and MariaDB-client from the upstream
+          repository and no AppStream mariadb-server.
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Verify | Read the AppStream mariadb module state (EL 9)
+      ansible.builtin.command:
+        argv:
+          - dnf
+          - --quiet
+          - module
+          - list
+          - mariadb
+      environment:
+        LC_ALL: C
+      register: __verify_module_list
+      changed_when: false
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['distribution_major_version'] == '9'
+
+    - name: Verify | Assert the AppStream mariadb module is disabled (EL 9)
+      ansible.builtin.assert:
+        that:
+          - __verify_module_list.stdout is search('(?m)^mariadb\s+\S+\s+\[x\]')
+        fail_msg: 'The AppStream mariadb module is not disabled: {{ __verify_module_list.stdout }}'
+        success_msg: 'The AppStream mariadb module is disabled'
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['distribution_major_version'] == '9'
+
+    - name: Verify | Assert the LTS variant is installed (Arch)
+      ansible.builtin.assert:
+        that:
+          - "'mariadb-lts' in ansible_facts.packages"
+          - "'mariadb' not in ansible_facts.packages"
+        fail_msg: 'Expected mariadb-lts and no mariadb package'
+      when: ansible_facts['os_family'] == 'Archlinux'
