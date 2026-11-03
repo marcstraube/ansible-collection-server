@@ -37,6 +37,7 @@ provisioner:
   playbooks:
     prepare: prepare.yml
     converge: converge.yml
+    side_effect: side_effect.yml
     verify: verify.yml
   inventory:
     group_vars:
@@ -49,6 +50,9 @@ provisioner:
         wazuh_server_dashboard_enrollment_dns: 'wazuh.example.com'
         wazuh_server_enrollment_password: 'Enroll-Test-Pass1'
         wazuh_server_enrollment_agent_ca_file: '/etc/ssl/ca/certs/ca.crt'
+        # Never contacted: nothing listens there, the manager has to start
+        # anyway. side_effect.yml removes the proxy and sets it again.
+        wazuh_server_http_proxy: 'http://127.0.0.1:3128'
     host_vars:
       wazuh-server-debian-trixie:
         ansible_python_interpreter: /usr/bin/python3
@@ -70,5 +74,6 @@ scenario:
     - idempotence
     # Run the role once in check mode against the converged instance
     - check
+    - side_effect
     - verify
     - destroy

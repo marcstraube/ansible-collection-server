@@ -117,6 +117,39 @@
          | regex_search('(?s)<auth>.*?</auth>') | default('', true) }}
   when: not ansible_check_mode
 
+# ossec.conf has no proxy option: the manager daemons take the proxy from
+# the environment of their service, which the drop-in sets. The environment
+# only reaches freshly started daemons, so a change restarts the manager.
+- name: Configure | Create manager systemd drop-in directory
+  ansible.builtin.file:
+    path: '{{ __wazuh_server_manager_dropin_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: wazuh_server_http_proxy | length > 0
+
+- name: Configure | Deploy manager proxy drop-in
+  ansible.builtin.template:
+    src: proxy.conf.j2
+    dest: '{{ __wazuh_server_manager_proxy_dropin_file }}'
+    owner: root
+    group: root
+    mode: '0644'
+  when: wazuh_server_http_proxy | length > 0
+  notify:
+    - Reload Wazuh systemd units
+    - Restart Wazuh manager
+
+- name: Configure | Remove manager proxy drop-in
+  ansible.builtin.file:
+    path: '{{ __wazuh_server_manager_proxy_dropin_file }}'
+    state: absent
+  when: wazuh_server_http_proxy | length == 0
+  notify:
+    - Reload Wazuh systemd units
+    - Restart Wazuh manager
+
 #
 # Filebeat
 #

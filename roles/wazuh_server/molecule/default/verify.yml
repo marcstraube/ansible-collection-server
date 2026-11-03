@@ -227,3 +227,45 @@
         - '{{ __wazuh_server_manager_service_name }}'
         - '{{ __wazuh_server_filebeat_service_name }}'
         - '{{ __wazuh_server_dashboard_service_name }}'
+
+    # The scenario sets a proxy: the drop-in is in place and the manager
+    # daemons inherit the environment of the service
+    - name: Verify | Stat the manager proxy drop-in
+      ansible.builtin.stat:
+        path: '{{ __wazuh_server_manager_proxy_dropin_file }}'
+      register: __verify_proxy_dropin
+
+    - name: Verify | Assert the manager proxy drop-in is deployed
+      ansible.builtin.assert:
+        that:
+          - __verify_proxy_dropin.stat.exists
+          - __verify_proxy_dropin.stat.mode == '0644'
+        fail_msg: '{{ __wazuh_server_manager_proxy_dropin_file }} is missing or has the wrong mode'
+
+    - name: Verify | Read the PID of wazuh-modulesd
+      ansible.builtin.command:
+        argv: ['pidof', '-s', 'wazuh-modulesd']
+      register: __verify_modulesd_pid
+      changed_when: false
+
+    - name: Verify | Read the environment of wazuh-modulesd
+      ansible.builtin.slurp:
+        src: '/proc/{{ __verify_modulesd_pid.stdout | trim }}/environ'
+      register: __verify_modulesd_environ
+
+    - name: Verify | Assert the manager runs with the proxy
+      ansible.builtin.assert:
+        that:
+          - item in __verify_modulesd_environ_entries
+        fail_msg: 'wazuh-modulesd runs without {{ item }}'
+      loop:
+        - 'http_proxy={{ wazuh_server_http_proxy }}'
+        - 'HTTP_PROXY={{ wazuh_server_http_proxy }}'
+        - 'https_proxy={{ wazuh_server_http_proxy }}'
+        - 'HTTPS_PROXY={{ wazuh_server_http_proxy }}'
+        - 'no_proxy=localhost,127.0.0.1'
+        - 'NO_PROXY=localhost,127.0.0.1'
+      vars:
+        # NUL-separated entries
+        __verify_modulesd_environ_entries: >-
+          {{ __verify_modulesd_environ.content | b64decode | regex_findall('[^\x00]+') }}
