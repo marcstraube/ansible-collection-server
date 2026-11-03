@@ -72,3 +72,52 @@
   when:
     - n8n_service_enabled | bool
     - not ansible_check_mode
+
+#
+# Images of the replaced release
+#
+# Every release leaves its n8n and runners images in the podman storage
+# of the n8n user. After a version change, once both health checks have
+# passed (a failed update keeps the previous image), every tag of the two
+# repositories except the ones the services run is removed. Other
+# repositories are not touched, so the images of other containers stay.
+# The version change fact comes from update.yml; a run limited to the
+# service tag has not set it and removes nothing.
+
+- name: Service | List the images of the n8n user
+  containers.podman.podman_image_info:
+  register: __n8n_images
+  become: true
+  become_user: '{{ n8n_user }}'
+  environment:
+    XDG_RUNTIME_DIR: '{{ __n8n_runtime_dir }}'
+  when:
+    - n8n_update_remove_old_images | bool
+    - __n8n_version_changed | default(false) | bool
+    - n8n_service_enabled | bool
+    - not ansible_check_mode
+
+# Removing a tag untags the image and deletes it with its last tag.
+- name: Service | Remove the images of other n8n releases
+  containers.podman.podman_image:
+    name: '{{ item }}'
+    state: absent
+  loop: >-
+    {{ __n8n_images.images | default([])
+       | map(attribute='RepoTags') | map('default', [], true) | flatten | unique
+       | select('match', '^(' ~ (n8n_podman_image | regex_escape)
+                         ~ '|' ~ (n8n_runners_podman_image | regex_escape) ~ '):')
+       | reject('in', __n8n_current_images) | list }}
+  vars:
+    __n8n_current_images:
+      - '{{ n8n_podman_image }}:{{ n8n_version }}'
+      - '{{ n8n_runners_podman_image }}:{{ n8n_version }}{{ n8n_runners_podman_image_tag_suffix }}'
+  become: true
+  become_user: '{{ n8n_user }}'
+  environment:
+    XDG_RUNTIME_DIR: '{{ __n8n_runtime_dir }}'
+  when:
+    - n8n_update_remove_old_images | bool
+    - __n8n_version_changed | default(false) | bool
+    - n8n_service_enabled | bool
+    - not ansible_check_mode

@@ -22,6 +22,10 @@ RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 Environment="XDG_RUNTIME_DIR={{ __n8n_runtime_dir }}"
 
+# The first start after an image change copies the image layers into the
+# user namespace of the n8n user, which can take minutes
+TimeoutStartSec={{ n8n_service_start_timeout }}
+
 # Remove any existing container before starting
 ExecStartPre=-/usr/bin/podman rm -f {{ n8n_podman_container_name }}
 

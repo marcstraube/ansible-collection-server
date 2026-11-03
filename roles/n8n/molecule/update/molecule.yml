@@ -56,6 +56,13 @@ provisioner:
             ignore_chown_errors: 'true'
         # Release installed by prepare; converge updates to the role default
         n8n_update_previous_version: '2.42.0'
+        # A first start copies the image layers into the user namespace of the
+        # n8n user; on a host whose audit rules throttle the chown of every
+        # file that takes longer than the role defaults allow
+        n8n_service_start_timeout: 900
+        n8n_ready_timeout: 900
+        # Tag of another repository that the image cleanup must keep
+        n8n_update_unrelated_image: 'localhost/molecule/unrelated:1'
     host_vars:
       n8n-update-debian-trixie:
         ansible_python_interpreter: /usr/bin/python3

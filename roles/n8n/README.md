@@ -114,15 +114,27 @@ The role then:
 3. pulls the pinned image,
 4. starts the service and waits up to `n8n_ready_timeout` seconds for
    `/healthz/readiness`, which answers 200 once the database is connected
-   and migrated.
+   and migrated, and for `/healthz` of the task runner launcher,
+5. removes the images of the other releases from the Podman storage of
+   the `n8n` user (`n8n_update_remove_old_images`): every tag of
+   `n8n_podman_image` and `n8n_runners_podman_image` except the two the
+   services run. Images of other containers are not touched, and there is
+   no `podman image prune`.
 
-| Variable                     | Default               | Description                                   |
-| ---------------------------- | --------------------- | --------------------------------------------- |
-| `n8n_update_backup_enabled`  | `true`                | Backup before a version change or a restore   |
-| `n8n_update_backup_dir`      | `'/var/backups/n8n'`  | Directory for the backup sets                 |
-| `n8n_update_backup_keep`     | `3`                   | Backup sets to keep                           |
-| `n8n_update_restore`         | `''`                  | Backup set to restore (see below)             |
-| `n8n_ready_timeout`          | `300`                 | Seconds to wait for readiness after a start   |
+Each release keeps about 1.7 GB of images, so without the removal the
+storage grows with every update. The removal runs only after both health
+checks have passed: a failed update keeps the previous image. A restore
+needs no local copy of the older image, the role pulls it again.
+
+| Variable                       | Default               | Description                                   |
+| ------------------------------ | --------------------- | --------------------------------------------- |
+| `n8n_update_backup_enabled`    | `true`                | Backup before a version change or a restore   |
+| `n8n_update_backup_dir`        | `'/var/backups/n8n'`  | Directory for the backup sets                 |
+| `n8n_update_backup_keep`       | `3`                   | Backup sets to keep                           |
+| `n8n_update_restore`           | `''`                  | Backup set to restore (see below)             |
+| `n8n_update_remove_old_images` | `true`                | Remove the images of other releases           |
+| `n8n_ready_timeout`            | `300`                 | Seconds to wait for readiness after a start   |
+| `n8n_service_start_timeout`    | `300`                 | Start timeout of both units (seconds)         |
 
 **Downgrades** are refused: n8n migrates its database on start and the
 migrations are forward-only, so an older release does not start on a
@@ -136,9 +148,11 @@ n8n_update_restore: 'n8n-2.42.0-20261014T120000'
 
 The role backs up the current state first, replaces the data directory
 from the set, recreates the PostgreSQL database from `db.dump`, pulls the
-pinned image and starts n8n. The version in the set name must match
-the pin. `n8n_update_restore` is a one-shot setting: remove it after the
-run, otherwise the next run restores the set again.
+pinned image again (the update removed it) and starts n8n; once it is
+healthy, the images of the newer release are removed in turn. The version
+in the set name must match the pin. `n8n_update_restore` is a one-shot
+setting: remove it after the run, otherwise the next run restores the set
+again.
 
 ### Task Runners
 
@@ -247,14 +261,14 @@ default of 365 days.
 
 ## Tags
 
-| Tag              | Description                        |
-|------------------|------------------------------------|
-| `n8n`            | All n8n tasks                      |
-| `n8n:install`    | User, directories and image pulls  |
-| `n8n:database`   | PostgreSQL user and database setup |
-| `n8n:configure`  | Configuration deployment           |
-| `n8n:service`    | Systemd service management         |
-| `n8n:firewall`   | Firewalld rule management          |
+| Tag              | Description                                        |
+|------------------|----------------------------------------------------|
+| `n8n`            | All n8n tasks                                      |
+| `n8n:install`    | User, directories and image pulls                  |
+| `n8n:database`   | PostgreSQL user and database setup                 |
+| `n8n:configure`  | Configuration deployment                           |
+| `n8n:service`    | Systemd services, health checks and image cleanup  |
+| `n8n:firewall`   | Firewalld rule management                          |
 
 ## Example Playbook
 
@@ -289,7 +303,7 @@ default of 365 days.
 # Run full test (one platform at a time)
 molecule test -p n8n-debian-trixie
 
-# Update, downgrade guard and restore
+# Update, image cleanup, downgrade guard and restore
 molecule test -s update
 ```
 

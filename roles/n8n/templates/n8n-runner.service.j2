@@ -14,6 +14,10 @@ Group={{ n8n_group }}
 # Shares the podman runtime directory that n8n.service creates
 Environment="XDG_RUNTIME_DIR={{ __n8n_runtime_dir }}"
 
+# The pre-start command waits for the podman storage lock while the n8n
+# container copies its image layers on a first start
+TimeoutStartSec={{ n8n_service_start_timeout }}
+
 # Remove any existing container before starting
 ExecStartPre=-/usr/bin/podman rm -f {{ n8n_runners_podman_container_name }}
 
