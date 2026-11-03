@@ -1,0 +1,61 @@
+---
+# EL 9 ships 10.5 as the non-modular default and 10.11 and 11.8 as AppStream
+# module streams; every stream installs the same package names (mariadb,
+# mariadb-server) into the same paths.
+__mariadb_distro_versions:
+  - '10.5'
+  - '10.11'
+  - '11.8'
+# Oldest version the MariaDB Foundation repository carries for EL; any
+# newer release resolves through the repository
+__mariadb_upstream_minimum_version: '10.11'
+
+# Package name prefix of each version (server: <prefix>-server, client:
+# <prefix>); one set on EL 9, the stream decides the version
+__mariadb_distro_package_prefix:
+  '10.5': 'mariadb'
+  '10.11': 'mariadb'
+  '11.8': 'mariadb'
+
+# Versions that are AppStream module streams (10.5 needs no stream)
+__mariadb_module_streams:
+  - '10.11'
+  - '11.8'
+
+# The upstream MariaDB-* packages conflict with the AppStream packages; the
+# role never switches an installed host (see the major version guard).
+__mariadb_packages: >-
+  {{ __mariadb_upstream_packages if __mariadb_upstream | bool
+     else __mariadb_distro_packages }}
+__mariadb_distro_packages:
+  - '{{ __mariadb_distro_package_prefix[__mariadb_version] | default("mariadb") }}-server'
+  - '{{ __mariadb_distro_package_prefix[__mariadb_version] | default("mariadb") }}'
+  - python3-PyMySQL
+__mariadb_upstream_packages:
+  - MariaDB-server
+  - MariaDB-client
+  - python3-PyMySQL
+
+# Package that carries the server version
+__mariadb_server_package: >-
+  {{ 'MariaDB-server' if __mariadb_upstream | bool
+     else __mariadb_distro_package_prefix[__mariadb_version] | default('mariadb') ~ '-server' }}
+
+# Installed server packages of either source the major version guard reads
+__mariadb_installed_server_pattern: '^(MariaDB-server|mariadb[0-9.]*-server)$'
+
+# Installed packages a targeted update moves along: the AppStream packages
+# with their subpackages (common, errmsg, utils, backup) or the upstream
+# MariaDB-* packages
+__mariadb_update_pattern: >-
+  {{ '^MariaDB-.+$' if __mariadb_upstream | bool else '^mariadb[0-9.]*(-.+)?$' }}
+
+__mariadb_service_name: mariadb.service
+__mariadb_config_dir: /etc/my.cnf.d
+__mariadb_config_file: '/etc/my.cnf.d/{{ __mariadb_config_name }}'
+__mariadb_socket: /var/lib/mysql/mysql.sock
+
+# TLS fallback paths — EL has no system-wide snakeoil certificate, the
+# operator sets mariadb_ssl_cert_file and mariadb_ssl_key_file.
+__mariadb_ssl_cert_file: ''
+__mariadb_ssl_key_file: ''

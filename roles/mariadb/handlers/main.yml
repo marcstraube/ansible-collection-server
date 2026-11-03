@@ -1,0 +1,24 @@
+---
+- name: Restart MariaDB
+  ansible.builtin.systemd_service:
+    name: '{{ __mariadb_service_name }}'
+    state: restarted
+  when: mariadb_service_enabled | bool
+
+# Also subscribes to the 'Reload cert services' topic of the certbot role and
+# marcstraube.common.pki. MariaDB rereads certificate and key on FLUSH SSL
+# (the service unit has no reload action, and SIGHUP does not reload TLS
+# material), so a certificate issued or renewed in the same play takes
+# effect without a restart.
+- name: Reload MariaDB TLS material
+  ansible.builtin.command:
+    argv:
+      - mariadb
+      - '--protocol=socket'
+      - '--socket={{ __mariadb_socket }}'
+      - '--execute=FLUSH SSL'
+  changed_when: true
+  listen: Reload cert services
+  when:
+    - mariadb_service_enabled | bool
+    - mariadb_ssl_enabled | bool

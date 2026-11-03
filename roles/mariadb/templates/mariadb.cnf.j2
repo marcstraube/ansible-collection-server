@@ -1,0 +1,65 @@
+{{ ansible_managed | comment }}
+#
+# MariaDB server settings. Read after the files the packages ship, so the
+# settings here take precedence.
+#
+
+[mysqld]
+
+# Network
+bind-address = {{ mariadb_bind_address }}
+port = {{ mariadb_port }}
+max_connections = {{ mariadb_max_connections }}
+{% if mariadb_skip_name_resolve | bool %}
+skip-name-resolve
+{% endif %}
+
+# Character set
+character-set-server = {{ mariadb_character_set_server }}
+collation-server = {{ mariadb_collation_server }}
+
+# InnoDB
+innodb_buffer_pool_size = {{ mariadb_innodb_buffer_pool_size }}
+innodb_log_file_size = {{ mariadb_innodb_log_file_size }}
+innodb_flush_log_at_trx_commit = {{ mariadb_innodb_flush_log_at_trx_commit }}
+innodb_flush_method = {{ mariadb_innodb_flush_method }}
+innodb_file_per_table = {{ mariadb_innodb_file_per_table | bool | ternary('ON', 'OFF') }}
+
+# Connections
+max_allowed_packet = {{ mariadb_max_allowed_packet }}
+wait_timeout = {{ mariadb_wait_timeout }}
+interactive_timeout = {{ mariadb_interactive_timeout }}
+thread_cache_size = {{ mariadb_thread_cache_size }}
+table_open_cache = {{ mariadb_table_open_cache }}
+tmp_table_size = {{ mariadb_tmp_table_size }}
+max_heap_table_size = {{ mariadb_max_heap_table_size }}
+
+# Logging
+{% if mariadb_log_error | length > 0 %}
+log_error = {{ mariadb_log_error }}
+{% endif %}
+slow_query_log = {{ mariadb_slow_query_log | bool | ternary('ON', 'OFF') }}
+{% if mariadb_slow_query_log_file | length > 0 %}
+slow_query_log_file = {{ mariadb_slow_query_log_file }}
+{% endif %}
+long_query_time = {{ mariadb_long_query_time }}
+log_queries_not_using_indexes = {{ mariadb_log_queries_not_using_indexes | bool | ternary('ON', 'OFF') }}
+general_log = {{ mariadb_general_log | bool | ternary('ON', 'OFF') }}
+{% if mariadb_ssl_enabled | bool %}
+
+# TLS
+ssl_cert = {{ __mariadb_ssl_cert_path }}
+ssl_key = {{ __mariadb_ssl_key_path }}
+{% if mariadb_ssl_ca_file | length > 0 %}
+ssl_ca = {{ mariadb_ssl_ca_file }}
+{% endif %}
+tls_version = {{ mariadb_tls_version }}
+require_secure_transport = {{ mariadb_require_secure_transport | bool | ternary('ON', 'OFF') }}
+{% endif %}
+{% if mariadb_extra_config | length > 0 %}
+
+# Extra settings
+{% for key, value in mariadb_extra_config.items() %}
+{{ key }} = {{ value }}
+{% endfor %}
+{% endif %}

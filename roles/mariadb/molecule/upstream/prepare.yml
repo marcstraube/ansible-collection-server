@@ -1,0 +1,5 @@
+---
+# Same container preparation as the default scenario: the role adds the
+# upstream repository itself.
+- name: Import default prepare
+  ansible.builtin.import_playbook: ../default/prepare.yml

@@ -5,16 +5,16 @@
 # Task file for database server deployment — single source of truth.
 # Import it from a play with `ansible.builtin.import_tasks`.
 #
-# Stack: pki, postgresql.
+# Stack: pki, postgresql, mariadb.
 #
 # pki runs first so a certificate from pki_server_certs exists before the
-# postgresql role asserts postgresql_ssl_cert_file and postgresql_ssl_key_file.
-# PostgreSQL rereads cert and key on a configuration reload, and its reload
-# handler listens on the `Reload cert services` topic that pki notifies, so a
-# certificate issued in this play takes effect in the same run. A certificate
-# deployed by an earlier play (the base play) cannot notify across plays; pki
-# records it as pki_cert_material_changed and the forward task at the end
-# notifies the topic again within this play.
+# database roles assert their certificate and key files. PostgreSQL rereads
+# cert and key on a configuration reload and MariaDB on FLUSH SSL; both
+# handlers listen on the `Reload cert services` topic that pki notifies, so
+# a certificate issued in this play takes effect in the same run. A
+# certificate deployed by an earlier play (the base play) cannot notify
+# across plays; pki records it as pki_cert_material_changed and the forward
+# task at the end notifies the topic again within this play.
 #
 # Roles are imported statically (import_role) so their internal sub-tags are
 # exposed to --tags / --list-tags. Run `ansible-playbook … --list-tags` to see
@@ -28,7 +28,7 @@
     - database
     - db
     - pki
-  when: postgresql_enabled | bool
+  when: postgresql_enabled | default(false) | bool or mariadb_enabled | default(false) | bool
 
 - name: Database | Import postgresql role
   ansible.builtin.import_role:
@@ -38,6 +38,15 @@
     - db
     - postgresql
   when: postgresql_enabled | bool
+
+- name: Database | Import mariadb role
+  ansible.builtin.import_role:
+    name: marcstraube.server.mariadb
+  tags:
+    - database
+    - db
+    - mariadb
+  when: mariadb_enabled | bool
 
 - name: Database | Forward certificate changes from an earlier play
   ansible.builtin.debug:

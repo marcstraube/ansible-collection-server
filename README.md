@@ -7,7 +7,7 @@
 ## Description
 
 Ansible roles for self-hosted server infrastructure: web servers, Let's
-Encrypt certificates, PostgreSQL, and n8n workflow automation. The roles
+Encrypt certificates, PostgreSQL, MariaDB, and n8n workflow automation. The roles
 build on [marcstraube.common](https://github.com/marcstraube/ansible-collection-common)
 for the base system (podman, pki, firewalld, fail2ban).
 
@@ -22,8 +22,8 @@ for the base system (podman, pki, firewalld, fail2ban).
 
 - ansible-core >= 2.19
 - Collections: `marcstraube.common`, `community.crypto`, `community.general`,
-  `community.postgresql`, `containers.podman`, `ansible.posix`
-  (installed automatically with the collection)
+  `community.postgresql`, `ansible.mariadb`, `containers.podman`,
+  `ansible.posix` (installed automatically with the collection)
 
 ## Included Roles
 
@@ -37,9 +37,10 @@ for the base system (podman, pki, firewalld, fail2ban).
 
 ### Databases
 
-| Role           | Description                                               |
-| -------------- | --------------------------------------------------------- |
-| **postgresql** | PostgreSQL server with TLS and the PGDG repository option |
+| Role           | Description                                                 |
+| -------------- | ----------------------------------------------------------- |
+| **postgresql** | PostgreSQL server with TLS and the PGDG repository option   |
+| **mariadb**    | MariaDB server with TLS and the upstream repository option  |
 
 ### Applications
 
@@ -88,7 +89,7 @@ package database. Other platforms skip the upgrade.
 | Playbook                             | Host group      | Stack                               |
 | ------------------------------------ | --------------- | ----------------------------------- |
 | `marcstraube.server.web_server`      | `web_servers`   | nginx or apache, certbot            |
-| `marcstraube.server.database_server` | `db_servers`    | pki, postgresql                     |
+| `marcstraube.server.database_server` | `db_servers`    | pki, postgresql, mariadb            |
 | `marcstraube.server.n8n`             | `n8n_servers`   | podman, postgresql, pki, n8n, nginx |
 | `marcstraube.server.wazuh_server`    | `wazuh_servers` | pki, wazuh_server                   |
 

@@ -1,0 +1,27 @@
+---
+__mariadb_user: mysql
+__mariadb_group: mysql
+
+# Requested major version and source as the task files use them
+__mariadb_version: '{{ mariadb_version | string }}'
+__mariadb_upstream: "{{ mariadb_repo == 'upstream' }}"
+
+# Every OS deploys one drop-in next to the files the packages ship; the name
+# sorts after them, so its settings win over the package defaults
+__mariadb_config_name: zz-ansible.cnf
+__mariadb_data_dir: /var/lib/mysql
+
+# Default of the MariaDB Foundation repositories: the dynamic mirror names
+# redirect to a mirror that carries the release
+__mariadb_upstream_apt_uri: 'https://deb.mariadb.org/{{ __mariadb_version }}/debian'
+__mariadb_upstream_apt_key_url: https://mariadb.org/mariadb_release_signing_key.pgp
+__mariadb_upstream_yum_base: https://rpm.mariadb.org
+__mariadb_upstream_rpm_key_url: https://rpm.mariadb.org/RPM-GPG-KEY-MariaDB
+__mariadb_upstream_repo_file: /etc/yum.repos.d/mariadb.repo
+
+# Schemas the backup script leaves out when mariadb_backup_databases is empty
+__mariadb_backup_system_schemas:
+  - information_schema
+  - performance_schema
+  - mysql
+  - sys
