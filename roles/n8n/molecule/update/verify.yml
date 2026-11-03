@@ -58,16 +58,20 @@
     - name: Verify | Assert the images of the previous release are removed
       ansible.builtin.assert:
         that:
-          - __verify_image ~ ':' ~ __verify_version in __verify_images.stdout_lines
+          - __verify_image ~ ':' ~ __verify_expected_version in __verify_images.stdout_lines
           - __verify_images.stdout_lines | select('match', '^' ~ __verify_image ~ ':') | list | length == 1
-          - __verify_runner_image ~ ':' ~ __verify_version ~ __verify_suffix in __verify_images.stdout_lines
+          - >-
+            __verify_runner_image ~ ':' ~ __verify_expected_version ~ __verify_suffix
+            in __verify_images.stdout_lines
           - __verify_images.stdout_lines | select('match', '^' ~ __verify_runner_image ~ ':') | list | length == 1
           - n8n_update_unrelated_image in __verify_images.stdout_lines
         fail_msg: 'Images: {{ __verify_images.stdout_lines }}'
+      # __verify_version is the registered image of the running container
+      # above; a task var of that name would be shadowed by it
       vars:
         __verify_image: '{{ __verify_defaults.n8n_podman_image }}'
         __verify_runner_image: '{{ __verify_defaults.n8n_runners_podman_image }}'
-        __verify_version: '{{ __verify_defaults.n8n_version }}'
+        __verify_expected_version: '{{ __verify_defaults.n8n_version }}'
         __verify_suffix: '{{ __verify_defaults.n8n_runners_podman_image_tag_suffix }}'
 
     - name: Verify | List backup sets
