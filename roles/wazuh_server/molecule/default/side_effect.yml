@@ -1,9 +1,97 @@
 ---
-# Outgoing proxy: converge.yml runs with wazuh_server_http_proxy set, so the
-# manager runs with the proxy drop-in. The first play runs the role with an
-# empty proxy, which has to remove the drop-in and restart the manager
-# without it. The last play runs converge.yml again, so verify.yml checks
-# the manager with the proxy.
+# Two things change between converge and verify. Snapshots: converge.yml runs
+# with wazuh_server_indexer_snapshot_path set; the first play asserts the
+# enabled state, later plays run the role with an empty path and assert the
+# removal and that a second disabled run changes nothing. Outgoing proxy:
+# converge.yml runs with wazuh_server_http_proxy set; one play runs the role
+# with an empty proxy, which has to remove the drop-in and restart the
+# manager without it, and the next role run restores the proxy. verify.yml
+# therefore checks the manager with the proxy and the snapshots disabled.
+- name: Side Effect | Snapshots enabled
+  hosts: all
+  gather_facts: false
+
+  vars:
+    # vars/main.yml builds the indexer URL from these role defaults, which a
+    # play outside the role does not load
+    wazuh_server_indexer_network_host: '127.0.0.1'
+    wazuh_server_indexer_http_port: 9200
+
+  tasks:
+    - name: Side Effect | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Side Effect | Read indexer configuration
+      ansible.builtin.slurp:
+        src: '{{ __wazuh_server_indexer_config_file }}'
+      register: __side_effect_indexer_config
+
+    - name: Side Effect | Assert path.repo is rendered
+      ansible.builtin.assert:
+        that:
+          - "('path.repo: [\"' ~ wazuh_server_indexer_snapshot_path ~ '\"]') in __side_effect_indexer_config_text"
+        fail_msg: 'opensearch.yml does not set path.repo to {{ wazuh_server_indexer_snapshot_path }}'
+      vars:
+        __side_effect_indexer_config_text: '{{ __side_effect_indexer_config.content | b64decode }}'
+
+    - name: Side Effect | Stat snapshot directory
+      ansible.builtin.stat:
+        path: '{{ wazuh_server_indexer_snapshot_path }}'
+      register: __side_effect_snapshot_dir
+
+    - name: Side Effect | Assert snapshot directory is owned by the indexer
+      ansible.builtin.assert:
+        that:
+          - __side_effect_snapshot_dir.stat.isdir | default(false)
+          - __side_effect_snapshot_dir.stat.pw_name == __wazuh_server_indexer_user
+          - __side_effect_snapshot_dir.stat.gr_name == __wazuh_server_indexer_user
+          - __side_effect_snapshot_dir.stat.mode == '0750'
+        fail_msg: '{{ wazuh_server_indexer_snapshot_path }} is not a directory owned by the indexer'
+
+    - name: Side Effect | Read snapshot repository
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_indexer_snapshot_repository_url }}'
+        client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+        client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+        ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+      register: __side_effect_repository
+
+    - name: Side Effect | Assert snapshot repository is registered
+      ansible.builtin.assert:
+        that:
+          - __side_effect_repository_current.type == 'fs'
+          - __side_effect_repository_current.settings.location == wazuh_server_indexer_snapshot_path
+        fail_msg: >-
+          Repository {{ wazuh_server_indexer_snapshot_repository }} is not a
+          filesystem repository at {{ wazuh_server_indexer_snapshot_path }}:
+          {{ __side_effect_repository.json }}
+      vars:
+        __side_effect_repository_current: >-
+          {{ __side_effect_repository.json[wazuh_server_indexer_snapshot_repository] }}
+
+    - name: Side Effect | Read snapshot management policy
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_indexer_snapshot_policy_url }}'
+        client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+        client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+        ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+      register: __side_effect_policy
+
+    - name: Side Effect | Assert snapshot management policy matches the variables
+      ansible.builtin.assert:
+        that:
+          - __side_effect_sm_policy.enabled | bool
+          - __side_effect_sm_policy.creation.schedule.cron.expression == wazuh_server_indexer_snapshot_schedule
+          - __side_effect_sm_policy.creation.schedule.cron.timezone == wazuh_server_indexer_snapshot_timezone
+          - __side_effect_sm_policy.deletion.schedule.cron.expression == wazuh_server_indexer_snapshot_schedule
+          - __side_effect_sm_policy.deletion.schedule.cron.timezone == wazuh_server_indexer_snapshot_timezone
+          - __side_effect_sm_policy.deletion.condition.max_count | int == wazuh_server_indexer_snapshot_max_count | int
+          - __side_effect_sm_policy.snapshot_config.repository == wazuh_server_indexer_snapshot_repository
+        fail_msg: 'The snapshot management policy differs from the variables: {{ __side_effect_sm_policy }}'
+      vars:
+        __side_effect_sm_policy: '{{ __side_effect_policy.json.sm_policy }}'
+
 - name: Side Effect | Remove the proxy
   ansible.builtin.import_playbook: converge.yml
   vars:
@@ -62,5 +150,65 @@
           - 'no_proxy'
           - 'NO_PROXY'
 
-- name: Side Effect | Restore the proxy
+- name: Side Effect | Disable snapshots
   ansible.builtin.import_playbook: converge.yml
+  vars:
+    wazuh_server_indexer_snapshot_path: ''
+
+- name: Side Effect | Record the state after disabling snapshots
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Side Effect | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Side Effect | Stat indexer configuration
+      ansible.builtin.stat:
+        path: '{{ __wazuh_server_indexer_config_file }}'
+      register: __side_effect_config_stat
+
+    - name: Side Effect | Read the indexer start time
+      ansible.builtin.systemd_service:
+        name: '{{ __wazuh_server_indexer_service_name }}'
+      register: __side_effect_indexer_service
+
+    - name: Side Effect | Record configuration mtime and indexer start time
+      ansible.builtin.set_fact:
+        __side_effect_config_mtime: '{{ __side_effect_config_stat.stat.mtime }}'
+        __side_effect_indexer_started: '{{ __side_effect_indexer_service.status.ActiveEnterTimestamp }}'
+
+- name: Side Effect | Disable snapshots again
+  ansible.builtin.import_playbook: converge.yml
+  vars:
+    wazuh_server_indexer_snapshot_path: ''
+
+- name: Side Effect | Second disabled run
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Side Effect | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Side Effect | Stat indexer configuration after the second run
+      ansible.builtin.stat:
+        path: '{{ __wazuh_server_indexer_config_file }}'
+      register: __side_effect_config_stat_after
+
+    - name: Side Effect | Read the indexer start time after the second run
+      ansible.builtin.systemd_service:
+        name: '{{ __wazuh_server_indexer_service_name }}'
+      register: __side_effect_indexer_service_after
+
+    - name: Side Effect | Assert the second disabled run changed nothing
+      ansible.builtin.assert:
+        that:
+          - (__side_effect_config_stat_after.stat.mtime | string) == (__side_effect_config_mtime | string)
+          - __side_effect_indexer_service_after.status.ActiveEnterTimestamp == __side_effect_indexer_started
+        fail_msg: >-
+          The second run with an empty snapshot path rewrote opensearch.yml
+          or restarted the indexer
+        success_msg: 'A second run with an empty snapshot path changes nothing'

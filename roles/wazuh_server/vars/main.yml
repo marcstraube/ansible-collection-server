@@ -27,6 +27,36 @@ __wazuh_server_indexer_security_config_dir: '{{ __wazuh_server_indexer_config_di
 __wazuh_server_indexer_security_tools_dir: '{{ __wazuh_server_indexer_home_dir }}/plugins/opensearch-security/tools'
 __wazuh_server_indexer_url: 'https://{{ wazuh_server_indexer_network_host }}:{{ wazuh_server_indexer_http_port }}'
 
+# Snapshot management policy that takes the scheduled snapshots; snapshot
+# names start with the policy name
+__wazuh_server_indexer_snapshot_policy_name: 'wazuh'
+__wazuh_server_indexer_snapshot_policy_url: >-
+  {{ __wazuh_server_indexer_url }}/_plugins/_sm/policies/{{ __wazuh_server_indexer_snapshot_policy_name }}
+__wazuh_server_indexer_snapshot_repository_url: >-
+  {{ __wazuh_server_indexer_url }}/_snapshot/{{ wazuh_server_indexer_snapshot_repository }}
+
+# Desired snapshot management policy; the role compares the same fields of
+# the stored policy with it. The retention keeps the newest
+# wazuh_server_indexer_snapshot_max_count snapshots (count-based, never
+# age-based) and runs on the creation schedule.
+__wazuh_server_indexer_snapshot_policy:
+  description: 'Scheduled snapshots of the Wazuh indexer, managed by Ansible'
+  enabled: true
+  creation:
+    schedule:
+      cron:
+        expression: '{{ wazuh_server_indexer_snapshot_schedule }}'
+        timezone: '{{ wazuh_server_indexer_snapshot_timezone }}'
+  deletion:
+    schedule:
+      cron:
+        expression: '{{ wazuh_server_indexer_snapshot_schedule }}'
+        timezone: '{{ wazuh_server_indexer_snapshot_timezone }}'
+    condition:
+      max_count: '{{ wazuh_server_indexer_snapshot_max_count | int }}'
+  snapshot_config:
+    repository: '{{ wazuh_server_indexer_snapshot_repository }}'
+
 # Wazuh manager API
 __wazuh_server_api_url: 'https://127.0.0.1:55000'
 __wazuh_server_api_wui_user: 'wazuh-wui'

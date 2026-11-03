@@ -106,3 +106,12 @@
   tags:
     - wazuh-server
     - wazuh-server:security
+
+- name: Main | Import snapshot tasks
+  ansible.builtin.import_tasks: snapshots.yml
+  when:
+    - wazuh_server_enabled | bool
+    - wazuh_server_indexer_service_enabled | bool
+  tags:
+    - wazuh-server
+    - wazuh-server:snapshots

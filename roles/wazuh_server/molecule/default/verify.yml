@@ -3,6 +3,12 @@
   hosts: all
   gather_facts: false
 
+  vars:
+    # vars/main.yml builds the indexer URL from these role defaults, which a
+    # play outside the role does not load
+    wazuh_server_indexer_network_host: '127.0.0.1'
+    wazuh_server_indexer_http_port: 9200
+
   tasks:
     - name: Verify | Load shared variables
       ansible.builtin.include_vars:
@@ -70,6 +76,28 @@
       vars:
         __verify_indexer_config_text: '{{ __verify_indexer_config.content | b64decode }}'
 
+    # side_effect.yml disabled the snapshots after asserting the enabled
+    # state: no path.repo, no repository, no policy, the directory stays
+    - name: Verify | Assert path.repo is left out
+      ansible.builtin.assert:
+        that:
+          - "'path.repo' not in __verify_indexer_config_text"
+        fail_msg: 'opensearch.yml still sets path.repo with an empty snapshot path'
+      vars:
+        __verify_indexer_config_text: '{{ __verify_indexer_config.content | b64decode }}'
+
+    - name: Verify | Stat snapshot directory
+      ansible.builtin.stat:
+        path: '{{ wazuh_server_indexer_snapshot_path }}'
+      register: __verify_snapshot_dir
+
+    - name: Verify | Assert snapshot directory is kept
+      ansible.builtin.assert:
+        that:
+          - __verify_snapshot_dir.stat.isdir | default(false)
+          - __verify_snapshot_dir.stat.pw_name == __wazuh_server_indexer_user
+        fail_msg: '{{ wazuh_server_indexer_snapshot_path }} was removed with the snapshots disabled'
+
     - name: Verify | Wait for the indexer HTTPS port
       ansible.builtin.wait_for:
         host: 127.0.0.1
@@ -101,6 +129,22 @@
         force_basic_auth: true
         ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
         status_code: 401
+
+    - name: Verify | Assert snapshot repository is deregistered
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_indexer_snapshot_repository_url }}'
+        client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+        client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+        ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+        status_code: 404
+
+    - name: Verify | Assert snapshot management policy is deleted
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_indexer_snapshot_policy_url }}'
+        client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+        client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+        ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+        status_code: 404
 
     - name: Verify | Test Filebeat connection to the indexer
       ansible.builtin.command:

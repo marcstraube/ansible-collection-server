@@ -90,6 +90,25 @@ wazuh_server_indexer_cluster_name: 'wazuh'
 # Upstream recommends half of the RAM, at most 32g.
 wazuh_server_indexer_heap_size: ''
 
+# Snapshots
+
+# Directory for indexer snapshots, rendered as path.repo in opensearch.yml
+# and created for the indexer user. Empty disables snapshots: the role
+# removes the policy and the repository below and keeps the directory with
+# its data.
+wazuh_server_indexer_snapshot_path: ''
+
+# Name of the filesystem snapshot repository
+wazuh_server_indexer_snapshot_repository: 'local'
+
+# Cron schedule and time zone of the snapshot management policy; the
+# retention check runs on the same schedule
+wazuh_server_indexer_snapshot_schedule: '0 2 * * *'
+wazuh_server_indexer_snapshot_timezone: 'UTC'
+
+# Number of snapshots to keep, the oldest beyond it are deleted
+wazuh_server_indexer_snapshot_max_count: 14
+
 #
 # Wazuh Manager
 #
