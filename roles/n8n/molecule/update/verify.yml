@@ -58,12 +58,10 @@
     - name: Verify | Assert the images of the previous release are removed
       ansible.builtin.assert:
         that:
-          - >-
-            (__verify_images.stdout_lines | select('match', '^' ~ __verify_image ~ ':') | list)
-            == [__verify_image ~ ':' ~ __verify_version]
-          - >-
-            (__verify_images.stdout_lines | select('match', '^' ~ __verify_runner_image ~ ':') | list)
-            == [__verify_runner_image ~ ':' ~ __verify_version ~ __verify_suffix]
+          - __verify_image ~ ':' ~ __verify_version in __verify_images.stdout_lines
+          - __verify_images.stdout_lines | select('match', '^' ~ __verify_image ~ ':') | list | length == 1
+          - __verify_runner_image ~ ':' ~ __verify_version ~ __verify_suffix in __verify_images.stdout_lines
+          - __verify_images.stdout_lines | select('match', '^' ~ __verify_runner_image ~ ':') | list | length == 1
           - n8n_update_unrelated_image in __verify_images.stdout_lines
         fail_msg: 'Images: {{ __verify_images.stdout_lines }}'
       vars:
@@ -192,12 +190,12 @@
     - name: Verify | Assert only the images of the restored release remain
       ansible.builtin.assert:
         that:
+          - __verify_image ~ ':' ~ n8n_update_previous_version in __verify_images_after.stdout_lines
+          - __verify_images_after.stdout_lines | select('match', '^' ~ __verify_image ~ ':') | list | length == 1
           - >-
-            (__verify_images_after.stdout_lines | select('match', '^' ~ __verify_image ~ ':') | list)
-            == [__verify_image ~ ':' ~ n8n_update_previous_version]
-          - >-
-            (__verify_images_after.stdout_lines | select('match', '^' ~ __verify_runner_image ~ ':') | list)
-            == [__verify_runner_image ~ ':' ~ n8n_update_previous_version ~ __verify_suffix]
+            __verify_runner_image ~ ':' ~ n8n_update_previous_version ~ __verify_suffix
+            in __verify_images_after.stdout_lines
+          - __verify_images_after.stdout_lines | select('match', '^' ~ __verify_runner_image ~ ':') | list | length == 1
           - n8n_update_unrelated_image in __verify_images_after.stdout_lines
         fail_msg: 'Images: {{ __verify_images_after.stdout_lines }}'
       vars:
