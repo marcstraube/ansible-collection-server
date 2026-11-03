@@ -118,6 +118,25 @@ wazuh_server_enrollment_agent_ca_file: ''
 wazuh_server_enrollment_verify_host: false
 
 #
+# Outgoing Proxy
+#
+# The manager downloads vulnerability content from the Wazuh CTI API
+# (cti.wazuh.com). ossec.conf has no proxy option, so the role sets the
+# proxy in the environment of the wazuh-manager service through a systemd
+# drop-in. The connection to the indexer has to bypass the proxy.
+
+# HTTP proxy for outgoing requests of the manager (empty = no proxy)
+# Example: http://proxy.example.com:3128
+wazuh_server_http_proxy: ''
+
+# HTTPS proxy, defaults to wazuh_server_http_proxy
+wazuh_server_https_proxy: '{{ wazuh_server_http_proxy }}'
+
+# Comma-separated hosts and addresses that bypass the proxy. Add the
+# indexer address when it is not local (wazuh_server_indexer_network_host).
+wazuh_server_no_proxy: 'localhost,127.0.0.1'
+
+#
 # Filebeat
 #
 

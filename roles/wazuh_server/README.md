@@ -116,6 +116,16 @@ in the dashboard.
 
 See [Enrollment Authentication](#enrollment-authentication) under Notes.
 
+### Outgoing Proxy
+
+| Variable                   | Default                   | Description                                      |
+| -------------------------- | ------------------------- | ------------------------------------------------ |
+| `wazuh_server_http_proxy`  | `''`                      | HTTP proxy of the manager, empty for none        |
+| `wazuh_server_https_proxy` | `wazuh_server_http_proxy` | HTTPS proxy of the manager                       |
+| `wazuh_server_no_proxy`    | `'localhost,127.0.0.1'`   | Comma-separated hosts that bypass the proxy      |
+
+See [Outgoing Proxy](#outgoing-proxy-1) under Notes.
+
 ## Tags
 
 | Tag                      | Description                           |
@@ -176,7 +186,9 @@ molecule converge -p wazuh-server-rocky-10
 ```
 
 Driver: `podman` | Scenario: `default` (certificates issued by
-`marcstraube.common.pki` in `prepare.yml`).
+`marcstraube.common.pki` in `prepare.yml`). The scenario runs with an
+outgoing proxy that is never contacted; `side_effect.yml` removes the
+proxy, checks that the drop-in is gone and sets it again.
 
 ## Notes
 
@@ -235,6 +247,31 @@ role sets its options in the `<auth>` section of the package
 A changed option restarts the Wazuh manager. After setting the options, the
 role checks that the `<auth>` section contains them and fails otherwise,
 for example when a Wazuh release changes the format of `ossec.conf`.
+
+### Outgoing Proxy
+
+The manager downloads vulnerability content from the Wazuh CTI API
+(`cti.wazuh.com`). `ossec.conf` has no proxy option; the manager daemons
+take `http_proxy`, `https_proxy` and `no_proxy` from the environment of
+the `wazuh-manager` service. With `wazuh_server_http_proxy` set, the role
+deploys the drop-in `/etc/systemd/system/wazuh-manager.service.d/proxy.conf`
+with the three variables in upper and lower case, reloads systemd and
+restarts the manager. An empty proxy removes the drop-in and restarts the
+manager without it.
+
+The manager also connects to the indexer, and that connection must not go
+through the proxy. The default `wazuh_server_no_proxy` covers an indexer
+on `localhost` or `127.0.0.1`; when the indexer listens on another address
+(`wazuh_server_indexer_network_host`), add that address:
+
+```yaml
+wazuh_server_http_proxy: 'http://proxy.example.com:3128'
+wazuh_server_no_proxy: 'localhost,127.0.0.1,192.0.2.10'
+```
+
+The manager starts without contacting the proxy; a content download that
+fails is logged in `/var/ossec/logs/ossec.log` and retried with the next
+update interval.
 
 ### Firewall
 

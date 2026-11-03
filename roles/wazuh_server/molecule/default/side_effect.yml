@@ -1,0 +1,66 @@
+---
+# Outgoing proxy: converge.yml runs with wazuh_server_http_proxy set, so the
+# manager runs with the proxy drop-in. The first play runs the role with an
+# empty proxy, which has to remove the drop-in and restart the manager
+# without it. The last play runs converge.yml again, so verify.yml checks
+# the manager with the proxy.
+- name: Side Effect | Remove the proxy
+  ansible.builtin.import_playbook: converge.yml
+  vars:
+    wazuh_server_http_proxy: ''
+
+- name: Side Effect | Manager without the proxy
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Side Effect | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Side Effect | Stat the manager proxy drop-in
+      ansible.builtin.stat:
+        path: '{{ __wazuh_server_manager_proxy_dropin_file }}'
+      register: __side_effect_proxy_dropin
+
+    - name: Side Effect | Assert the manager proxy drop-in is removed
+      ansible.builtin.assert:
+        that:
+          - not __side_effect_proxy_dropin.stat.exists
+        fail_msg: '{{ __wazuh_server_manager_proxy_dropin_file }} is still there without a proxy'
+
+    # The handlers restarted the manager at the end of the converge play;
+    # the daemons inherit the environment of the service
+    - name: Side Effect | Read the PID of wazuh-modulesd
+      ansible.builtin.command:
+        argv: ['pidof', '-s', 'wazuh-modulesd']
+      register: __side_effect_modulesd_pid
+      changed_when: false
+
+    - name: Side Effect | Read the environment of wazuh-modulesd
+      ansible.builtin.slurp:
+        src: '/proc/{{ __side_effect_modulesd_pid.stdout | trim }}/environ'
+      register: __side_effect_modulesd_environ
+
+    - name: Side Effect | Assert the manager runs without the proxy
+      ansible.builtin.assert:
+        that:
+          - __side_effect_modulesd_environ_names | intersect(__side_effect_proxy_names) | length == 0
+        fail_msg: >-
+          wazuh-modulesd still runs with a proxy:
+          {{ __side_effect_modulesd_environ_names | intersect(__side_effect_proxy_names) | join(', ') }}
+      vars:
+        # NUL-separated entries, reduced to the variable names
+        __side_effect_modulesd_environ_names: >-
+          {{ __side_effect_modulesd_environ.content | b64decode | regex_findall('[^\x00]+')
+             | map('regex_replace', '(?s)=.*$', '') | list }}
+        __side_effect_proxy_names:
+          - 'http_proxy'
+          - 'HTTP_PROXY'
+          - 'https_proxy'
+          - 'HTTPS_PROXY'
+          - 'no_proxy'
+          - 'NO_PROXY'
+
+- name: Side Effect | Restore the proxy
+  ansible.builtin.import_playbook: converge.yml
