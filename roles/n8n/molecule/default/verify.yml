@@ -86,10 +86,37 @@
         url: 'http://127.0.0.1:5680/healthz'
         status_code: 200
 
+    # The URL path prefix (n8n_endpoints_rest) reaches the editor only: n8n
+    # keeps its backend routes at the root, so readiness answers unprefixed
+    # on every platform while the editor requests its assets under the
+    # prefix of the platform.
     - name: Verify | Assert n8n reports ready
       ansible.builtin.uri:
         url: 'http://127.0.0.1:5678/healthz/readiness'
         status_code: 200
+
+    - name: Verify | Fetch the editor page
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1:5678/'
+        return_content: true
+      register: __verify_editor
+
+    - name: Verify | Fetch the base path script of the editor
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1:5678/static/base-path.js'
+        return_content: true
+      register: __verify_base_path
+
+    - name: Verify | Assert the editor is served under the URL path prefix
+      ansible.builtin.assert:
+        that:
+          - __verify_editor.content is search('=.' ~ (__verify_prefix | regex_escape) ~ 'static/base-path\.js')
+          - ("window.BASE_PATH = '" ~ __verify_prefix ~ "';") in __verify_base_path.content
+        fail_msg: >-
+          prefix={{ __verify_prefix }}
+          base-path.js={{ __verify_base_path.content | trim }}
+      vars:
+        __verify_prefix: "{{ n8n_endpoints_rest | default(__verify_defaults.n8n_endpoints_rest) }}"
 
     # n8n writes its instance settings on first start; the keep-id mapping
     # keeps the files owned by the n8n user on the host.

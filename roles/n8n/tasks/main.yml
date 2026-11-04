@@ -42,6 +42,20 @@
   tags:
     - always
 
+# n8n inserts the prefix verbatim in front of every editor URL, so a value
+# without both slashes produces broken asset paths ('/n8nstatic/...').
+- name: Main | Validate the URL path prefix
+  ansible.builtin.assert:
+    that:
+      - n8n_endpoints_rest is match('^/([^/]+/)*$')
+    fail_msg: |
+      n8n_endpoints_rest must start and end with a slash, e.g. '/' or
+      '/n8n/': n8n puts it verbatim in front of every editor URL.
+  when:
+    - n8n_enabled | bool
+  tags:
+    - always
+
 - name: Main | Import update tasks
   ansible.builtin.import_tasks: update.yml
   when: n8n_enabled | bool

@@ -244,6 +244,66 @@ TLS certificates are managed by the `marcstraube.common.pki` role. Configure
 `pki_server_certs` in the inventory to generate certificates for n8n. The
 orchestrator playbook includes the pki role automatically.
 
+### URL Path Prefix
+
+n8n can share a virtual host with another application that owns `/`: the
+editor is then served under a path prefix such as `/n8n/`. n8n inserts
+`n8n_endpoints_rest` (`N8N_PATH`) verbatim in front of every URL the editor
+requests, so the value starts and ends with a slash; the role refuses other
+values. The backend routes (`/rest`, `/webhook`, `/healthz`, …) stay at the
+root of `n8n_host:n8n_port` whatever the prefix is, so the reverse proxy
+strips the prefix before it passes a request on. The readiness check of the
+role is not affected.
+
+| Variable              | Default | Description                                      |
+| --------------------- | ------- | ------------------------------------------------ |
+| `n8n_endpoints_rest`  | `'/'`   | URL path prefix of the editor (`N8N_PATH`)       |
+| `n8n_editor_base_url` | `''`    | Public URL of the editor, with the prefix        |
+| `n8n_webhook_url`     | `''`    | Public base URL of the webhooks, with the prefix |
+
+Host variables for an instance at `https://www.example.com/n8n/`:
+
+```yaml
+n8n_endpoints_rest: '/n8n/'
+n8n_editor_base_url: 'https://www.example.com/n8n/'
+n8n_webhook_url: 'https://www.example.com/n8n/'
+```
+
+n8n appends `webhook/<path>` to `n8n_webhook_url` for the URLs it shows in
+the editor. `n8n_editor_base_url` is the URL n8n puts into invitation emails
+and OAuth callback URLs; without it n8n falls back to `n8n_webhook_url`.
+
+The matching nginx `location` block, with the trailing slash of `proxy_pass`
+replacing the matched `/n8n/` by `/`:
+
+```nginx
+location /n8n/ {
+    proxy_pass http://127.0.0.1:5678/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Port $server_port;
+
+    # The editor keeps a WebSocket open for push updates (executions,
+    # collaboration); with N8N_PUSH_BACKEND=sse the updates arrive as
+    # server-sent events, which proxy buffering would hold back.
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 3600s;
+    proxy_buffering off;
+}
+```
+
+With `marcstraube.server.nginx` the directives go into the `locations` list
+of the site that owns the host name (`path: '/n8n/'`); that role defines the
+`$connection_upgrade` map, so `Connection $connection_upgrade` works there
+as well. n8n documents a prefix behind a reverse proxy with the caveat that
+parts of the editor may navigate wrongly; a dedicated host name
+(`n8n.example.com`) remains the simpler setup.
+
 ### OpenTelemetry (n8n >= 2.15)
 
 Set `n8n_otel_enabled: true` and point `n8n_otel_exporter_otlp_endpoint` at
@@ -312,6 +372,10 @@ set `n8n_subid_start` and `n8n_subid_count` to a range inside the IDs the
 instance maps, and `ignore_chown_errors` in the podman storage options
 because that range cannot map the UID 65532 owning `/home/nonroot` in the
 distroless runner image.
+
+The Debian platform of the default scenario serves the editor under the URL
+path prefix `/n8n/` (host variables in `molecule.yml`); verify checks the
+base path of the editor on every platform and readiness at the root.
 
 ## Notes
 

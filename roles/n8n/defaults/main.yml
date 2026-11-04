@@ -111,11 +111,12 @@ n8n_port: 5678
 n8n_protocol: 'http'
 
 # Webhook URL (REQUIRED for webhooks to work)
-# MUST use HTTPS for production webhooks
+# MUST use HTTPS for production webhooks; includes the URL path prefix
+# (n8n_endpoints_rest), if any
 # Example: https://n8n.example.com
 n8n_webhook_url: ''
 
-# Editor URL (for accessing n8n UI)
+# Editor URL (for accessing n8n UI); includes the URL path prefix, if any
 n8n_editor_base_url: ''
 
 #
@@ -388,8 +389,13 @@ n8n_nodes_include: ''
 # Endpoints
 #
 
-# Disable specific endpoints for security
+# URL path prefix the editor is served under (N8N_PATH), with leading and
+# trailing slash, e.g. '/n8n/'. n8n keeps its backend routes at the root;
+# the prefix only shapes the URLs of the editor, so the reverse proxy strips
+# it (see README)
 n8n_endpoints_rest: '/'
+
+# Paths of the webhook endpoints below the root
 n8n_endpoints_webhook: 'webhook'
 n8n_endpoints_webhook_test: 'webhook-test'
 n8n_endpoints_webhook_waiting: 'webhook-waiting'
