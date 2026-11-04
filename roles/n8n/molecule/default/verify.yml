@@ -138,6 +138,75 @@
              else n8n_endpoints_rest if n8n_endpoints_rest is defined
              else __verify_defaults.n8n_path }}
 
+    #
+    # Scheduled backup: side_effect ran the service twice with
+    # n8n_backup_keep 1, so exactly one scheduled set with the archive of
+    # the data directory remains (SQLite, so no db.dump).
+    #
+
+    - name: Verify | Stat the backup script
+      ansible.builtin.stat:
+        path: '{{ __n8n_backup_script }}'
+      register: __verify_backup_script
+
+    - name: Verify | Assert the backup script is deployed
+      ansible.builtin.assert:
+        that:
+          - __verify_backup_script.stat.exists
+          - __verify_backup_script.stat.mode == '0750'
+          - __verify_backup_script.stat.pw_name == 'root'
+
+    - name: Verify | Read the backup timer state
+      ansible.builtin.systemd_service:
+        name: '{{ __n8n_backup_timer_name }}'
+      register: __verify_backup_timer
+
+    - name: Verify | Assert the backup timer is enabled and active
+      ansible.builtin.assert:
+        that:
+          - __verify_backup_timer.status.UnitFileState == 'enabled'
+          - __verify_backup_timer.status.ActiveState == 'active'
+        fail_msg: >-
+          UnitFileState={{ __verify_backup_timer.status.UnitFileState }}
+          ActiveState={{ __verify_backup_timer.status.ActiveState }}
+
+    - name: Verify | List backup sets
+      ansible.builtin.find:
+        paths: '{{ __verify_defaults.n8n_backup_dir }}'
+        file_type: directory
+        patterns: 'n8n-*'
+      register: __verify_sets
+
+    - name: Verify | Assert exactly one scheduled set remains
+      ansible.builtin.assert:
+        that:
+          - __verify_sets.files | length == 1
+          - >-
+            __verify_sets.files[0].path | basename
+            is match('^n8n-scheduled-' ~ (__verify_defaults.n8n_version | regex_escape) ~ '-[0-9]{8}T[0-9]{6}$')
+        fail_msg: 'Backup sets: {{ __verify_sets.files | map(attribute="path") | list }}'
+
+    - name: Verify | Stat the files of the scheduled set
+      ansible.builtin.stat:
+        path: '{{ __verify_sets.files[0].path }}/{{ item }}'
+      register: __verify_set_files
+      loop:
+        - data.tar.gz
+        - db.dump
+
+    - name: Verify | Assert the set holds the archive and no database dump
+      ansible.builtin.assert:
+        that:
+          - __verify_set_files.results[0].stat.exists
+          - __verify_set_files.results[0].stat.mode == '0600'
+          - not __verify_set_files.results[1].stat.exists
+
+    # Listing an archive has no module equivalent.
+    - name: Verify | Assert the backup archive contains the SQLite database  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        cmd: 'tar -tzf {{ __verify_sets.files[0].path }}/data.tar.gz .n8n/database.sqlite'
+      changed_when: false
+
     # n8n writes its instance settings on first start; the keep-id mapping
     # keeps the files owned by the n8n user on the host.
     - name: Verify | Stat the n8n settings file

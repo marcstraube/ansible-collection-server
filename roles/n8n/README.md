@@ -106,11 +106,9 @@ A run whose pinned version differs from the installed one is an update.
 The role then:
 
 1. stops the n8n service,
-2. writes a backup set `n8n-<installed version>-<timestamp>/` to
-   `n8n_update_backup_dir` with `data.tar.gz` (the data directory,
-   entries relative to `n8n_user_home`) and, with `n8n_db_type:
-   'postgresdb'`, `db.dump` (`pg_dump -Fc` over the local socket),
-   keeping the newest `n8n_update_backup_keep` sets,
+2. runs the backup script for a pre-update set
+   `n8n-<installed version>-<timestamp>/` in `n8n_backup_dir` (see
+   Backup), keeping the newest `n8n_backup_update_keep` pre-update sets,
 3. pulls the pinned image,
 4. starts the service and waits up to `n8n_ready_timeout` seconds for
    `/healthz/readiness`, which answers 200 once the database is connected
@@ -128,9 +126,6 @@ needs no local copy of the older image, the role pulls it again.
 
 | Variable                       | Default               | Description                                   |
 | ------------------------------ | --------------------- | --------------------------------------------- |
-| `n8n_update_backup_enabled`    | `true`                | Backup before a version change or a restore   |
-| `n8n_update_backup_dir`        | `'/var/backups/n8n'`  | Directory for the backup sets                 |
-| `n8n_update_backup_keep`       | `3`                   | Backup sets to keep                           |
 | `n8n_update_restore`           | `''`                  | Backup set to restore (see below)             |
 | `n8n_update_remove_old_images` | `true`                | Remove the images of other releases           |
 | `n8n_ready_timeout`            | `300`                 | Seconds to wait for readiness after a start   |
@@ -139,7 +134,8 @@ needs no local copy of the older image, the role pulls it again.
 **Downgrades** are refused: n8n migrates its database on start and the
 migrations are forward-only, so an older release does not start on a
 migrated database. To go back, restore the backup set taken before the
-upgrade and pin its version in the same run:
+upgrade (or a scheduled set of that release) and pin its version in the
+same run:
 
 ```yaml
 n8n_version: '2.42.0'
@@ -153,6 +149,59 @@ healthy, the images of the newer release are removed in turn. The version
 in the set name must match the pin. `n8n_update_restore` is a one-shot
 setting: remove it after the run, otherwise the next run restores the set
 again.
+
+### Backup
+
+The role deploys `/usr/local/bin/n8n-backup`, which writes one backup set:
+a subdirectory of `n8n_backup_dir` with `data.tar.gz` (the data directory,
+entries relative to `n8n_user_home`) and, with `n8n_db_type: 'postgresdb'`,
+`db.dump` (`pg_dump -Fc` over the local socket). The version in the set
+name is the image tag of the deployed service unit. There are two kinds of
+sets with a count-based retention each, so a scheduled set never pushes
+out the set taken before the last update, and a failing timer never
+removes the last good set:
+
+| Kind       | Set name                              | Written by                     | Kept                     |
+| ---------- | ------------------------------------- | ------------------------------ | ------------------------ |
+| scheduled  | `n8n-scheduled-<version>-<timestamp>` | `n8n-backup.timer`             | `n8n_backup_keep`        |
+| pre-update | `n8n-<version>-<timestamp>`           | the update (change or restore) | `n8n_backup_update_keep` |
+
+A scheduled set is taken with n8n stopped (`n8n_backup_stop_service`), so
+the SQLite database and the data directory are copied in a consistent
+state; the task runners stop and start with n8n. The service starts again
+when the script exits, also after a failed dump. With
+`n8n_backup_stop_service: false` the set is taken from the running
+instance: the PostgreSQL dump is consistent on its own, the archive of a
+running SQLite database is not. `n8n-backup.service` is a oneshot unit, so
+`systemctl start n8n-backup.service` takes a scheduled set at any time and
+returns once the set is written; `n8n-backup update` takes a pre-update set
+instead (the update calls it with n8n stopped).
+
+| Variable                   | Default              | Description                                         |
+| -------------------------- | -------------------- | --------------------------------------------------- |
+| `n8n_backup_enabled`       | `true`               | Scheduled sets and the pre-update set               |
+| `n8n_backup_dir`           | `'/var/backups/n8n'` | Directory for the backup sets                       |
+| `n8n_backup_keep`          | `7`                  | Scheduled sets to keep                              |
+| `n8n_backup_update_keep`   | `3`                  | Pre-update sets to keep                             |
+| `n8n_backup_stop_service`  | `true`               | Stop n8n while a scheduled set is written           |
+| `n8n_backup_timer_enabled` | `true`               | Enable and start `n8n-backup.timer`                 |
+| `n8n_backup_on_calendar`   | `'daily'`            | Schedule of the timer (systemd `OnCalendar`)        |
+
+`n8n_backup_enabled: false` stops the timer and skips the pre-update set;
+the script, the units and the existing sets stay. The role never removes a
+set other than through the retention of its kind.
+
+> **Deprecation:** `n8n_update_backup_enabled`, `n8n_update_backup_dir` and
+> `n8n_update_backup_keep` are the former names of `n8n_backup_enabled`,
+> `n8n_backup_dir` and `n8n_backup_update_keep` and will be removed in the
+> next major version. Until then a set former name still takes effect as
+> the value of its replacement, and every run prints a deprecation warning
+> while it is set.
+
+A host backup takes the sets instead of the running data directory: it
+runs `systemctl start n8n-backup.service` as its pre-sync step and copies
+`n8n_backup_dir`. The sets are only as useful as `n8n_encryption_key`,
+which stays in the Ansible vault.
 
 ### Task Runners
 
@@ -357,6 +406,7 @@ default of 365 days.
 | Tag              | Description                                        |
 |------------------|----------------------------------------------------|
 | `n8n`            | All n8n tasks                                      |
+| `n8n:backup`     | Backup script, service and timer                   |
 | `n8n:install`    | User, directories and image pulls                  |
 | `n8n:database`   | PostgreSQL user and database setup                 |
 | `n8n:configure`  | Configuration deployment                           |
@@ -412,6 +462,14 @@ deprecated `n8n_endpoints_rest` (host variables in `molecule.yml`); verify
 checks the base path of the editor on every platform and readiness at the
 root.
 
+Both scenarios run `n8n-backup.service` twice with `n8n_backup_keep: 1`
+in their side effect and verify that exactly one scheduled set with the
+archive of the data directory remains. The update scenario verifies that
+the pre-update set of the update survives the scheduled retention, sets
+the deprecated `n8n_update_backup_keep` to verify that it still takes
+effect as the pre-update retention of the restore, and restores the
+pre-update set.
+
 ## Notes
 
 - The environment files (`/etc/n8n/n8n.env`, `/etc/n8n/n8n-runner.env`)
@@ -419,15 +477,15 @@ root.
 - The container runs rootless as the dedicated `n8n` system user; the
   service unit creates `/run/n8n` as the Podman runtime directory
 
-### Backup
+### Host Backup
 
-This role does not manage backups. The following data must be included in your
-backup solution:
+The role writes its backup sets to `n8n_backup_dir` (see Backup); a host
+backup copies that directory after `systemctl start n8n-backup.service`
+rather than the running data directory:
 
 | Data                          | Location             | Notes                                            |
 |-------------------------------|----------------------|--------------------------------------------------|
-| Workflow data and credentials | `/var/lib/n8n/.n8n`  | Encrypted with `n8n_encryption_key`              |
-| PostgreSQL database           | `pg_dump -U n8n n8n` | Only if `n8n_db_type: postgresdb`                |
+| Backup sets                   | `/var/backups/n8n`   | Data directory archive and PostgreSQL dump       |
 | Encryption key                | Ansible vault        | **Critical** — without it, credentials are lost  |
 
 The environment files in `/etc/n8n` are managed by Ansible and do not need

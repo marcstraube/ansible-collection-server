@@ -1,10 +1,32 @@
 ---
-# The deprecated name of the URL path prefix still takes effect; the
-# replacement is the only name the tasks and templates use.
+# The deprecated names of the URL path prefix and of the backup settings
+# still take effect; the replacements are the only names the tasks and
+# templates use.
 - name: Main | Handle deprecated variables
   ansible.builtin.set_fact:
     n8n_path: '{{ n8n_endpoints_rest | default(n8n_path) }}'
   when: n8n_endpoints_rest is defined
+  tags:
+    - always
+
+- name: Main | Handle the deprecated n8n_update_backup_enabled
+  ansible.builtin.set_fact:
+    n8n_backup_enabled: '{{ n8n_update_backup_enabled | default(n8n_backup_enabled) | bool }}'
+  when: n8n_update_backup_enabled is defined
+  tags:
+    - always
+
+- name: Main | Handle the deprecated n8n_update_backup_dir
+  ansible.builtin.set_fact:
+    n8n_backup_dir: '{{ n8n_update_backup_dir | default(n8n_backup_dir) }}'
+  when: n8n_update_backup_dir is defined
+  tags:
+    - always
+
+- name: Main | Handle the deprecated n8n_update_backup_keep
+  ansible.builtin.set_fact:
+    n8n_backup_update_keep: '{{ n8n_update_backup_keep | default(n8n_backup_update_keep) | int }}'
+  when: n8n_update_backup_keep is defined
   tags:
     - always
 
@@ -16,6 +38,39 @@
   when:
     - n8n_enabled | bool
     - n8n_endpoints_rest is defined
+  tags:
+    - always
+
+- name: Main | Warn about the deprecated n8n_update_backup_enabled
+  ansible.builtin.debug:
+    msg: >-
+      n8n_update_backup_enabled is deprecated and will be removed in the
+      next major version. Use n8n_backup_enabled instead.
+  when:
+    - n8n_enabled | bool
+    - n8n_update_backup_enabled is defined
+  tags:
+    - always
+
+- name: Main | Warn about the deprecated n8n_update_backup_dir
+  ansible.builtin.debug:
+    msg: >-
+      n8n_update_backup_dir is deprecated and will be removed in the next
+      major version. Use n8n_backup_dir instead.
+  when:
+    - n8n_enabled | bool
+    - n8n_update_backup_dir is defined
+  tags:
+    - always
+
+- name: Main | Warn about the deprecated n8n_update_backup_keep
+  ansible.builtin.debug:
+    msg: >-
+      n8n_update_backup_keep is deprecated and will be removed in the next
+      major version. Use n8n_backup_update_keep instead.
+  when:
+    - n8n_enabled | bool
+    - n8n_update_backup_keep is defined
   tags:
     - always
 
@@ -88,6 +143,13 @@
     - n8n_enabled | bool
   tags:
     - always
+
+- name: Main | Import backup tasks
+  ansible.builtin.import_tasks: backup.yml
+  when: n8n_enabled | bool
+  tags:
+    - n8n
+    - n8n:backup
 
 - name: Main | Import update tasks
   ansible.builtin.import_tasks: update.yml
