@@ -1,0 +1,11 @@
+{{ ansible_managed | comment }}
+
+[Unit]
+Description=Timer for the Activepieces backup set
+
+[Timer]
+OnCalendar={{ activepieces_backup_on_calendar }}
+Persistent=true
+
+[Install]
+WantedBy=timers.target

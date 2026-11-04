@@ -1,0 +1,155 @@
+---
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  vars:
+    # __activepieces_runtime_dir of the role vars is built from the UID
+    # of this user
+    activepieces_user: activepieces
+
+  tasks:
+    # The podman storage of the activepieces user lives on a tmpfs (test
+    # container only): the root file system of the container is an
+    # overlay, and extracting an image layer there fails because the
+    # whiteouts of the layer are character devices an overlay refuses to
+    # create. The user and group are the ones the role creates, so the role
+    # finds them in place.
+
+    - name: Prepare | Create activepieces system group
+      ansible.builtin.group:
+        name: activepieces
+        system: true
+
+    - name: Prepare | Create activepieces system user
+      ansible.builtin.user:
+        name: activepieces
+        group: activepieces
+        home: /var/lib/activepieces
+        shell: /usr/sbin/nologin
+        system: true
+        create_home: true
+      register: __prepare_activepieces_user
+
+    - name: Prepare | Create the podman storage directory of the activepieces user
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: directory
+        owner: activepieces
+        group: activepieces
+        mode: '0700'
+      loop:
+        - /var/lib/activepieces/.local
+        - /var/lib/activepieces/.local/share
+        - /var/lib/activepieces/.local/share/containers
+
+    # The update holds two releases with their user namespace copies at
+    # the same time, about twice the size of the default scenario
+    - name: Prepare | Mount a tmpfs on the podman storage directory
+      ansible.posix.mount:
+        path: /var/lib/activepieces/.local/share/containers
+        src: tmpfs
+        fstype: tmpfs
+        opts: 'size=10g,uid={{ __prepare_activepieces_user.uid }},gid={{ __prepare_activepieces_user.group }},mode=0700'
+        state: ephemeral
+
+    # Sudo PAM bypass — required for tasks using `become_user` on
+    # geerlingguy Rocky containers under GitHub-hosted runners
+    # (test container only).
+
+    - name: Prepare | Bypass sudo PAM stack (RedHat container)
+      ansible.builtin.copy:
+        content: |
+          #%PAM-1.0
+          auth       sufficient   pam_permit.so
+          account    sufficient   pam_permit.so
+          password   sufficient   pam_permit.so
+          session    sufficient   pam_permit.so
+        dest: /etc/pam.d/sudo
+        owner: root
+        group: root
+        mode: '0644'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Disable sudoers authentication (RedHat container)
+      ansible.builtin.copy:
+        content: 'Defaults !authenticate'
+        dest: /etc/sudoers.d/molecule-no-auth
+        owner: root
+        group: root
+        mode: '0440'
+        validate: 'visudo -cf %s'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    # The Arch Linux and Rocky 10 test images ship newuidmap/newgidmap
+    # without the file capabilities the shadow package sets on a real host;
+    # rootless podman as the activepieces user cannot create its user
+    # namespace without them (test container only).
+
+    - name: Prepare | Restore the ID map helper capabilities (Arch and Rocky 10 containers)
+      community.general.capabilities:
+        path: '/usr/bin/{{ item.helper }}'
+        capability: '{{ item.capability }}'
+        state: present
+      loop:
+        - { helper: newuidmap, capability: cap_setuid+ep }
+        - { helper: newgidmap, capability: cap_setgid+ep }
+      when: >-
+        ansible_facts['os_family'] == 'Archlinux'
+        or (ansible_facts['os_family'] == 'RedHat'
+            and ansible_facts['distribution_major_version'] == '10')
+
+    - name: Prepare | Update package cache
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name:
+          - systemd
+          - dbus
+          - procps
+          - gnupg
+          - ca-certificates
+        state: present
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Include podman role
+      ansible.builtin.include_role:
+        name: marcstraube.common.podman
+
+    # The release the converge run updates from.
+    - name: Prepare | Deploy the previous Activepieces release  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        activepieces_version: '{{ activepieces_update_previous_version }}'
+
+    # An image of another repository in the storage of the activepieces
+    # user; the image cleanup of the update must leave it alone. A second
+    # tag of the previous image costs no pull.
+    - name: Prepare | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Prepare | Look up the activepieces user
+      ansible.builtin.getent:
+        database: passwd
+        key: activepieces
+      register: __activepieces_user_entry
+
+    - name: Prepare | Load role defaults
+      ansible.builtin.include_vars:
+        file: '../../defaults/main.yml'
+        name: __prepare_defaults
+
+    - name: Prepare | Tag an unrelated image
+      containers.podman.podman_tag:
+        image: '{{ __prepare_defaults.activepieces_podman_image }}:{{ activepieces_update_previous_version }}'
+        target_names:
+          - '{{ activepieces_update_unrelated_image }}'
+      become: true
+      become_user: activepieces
+      environment:
+        XDG_RUNTIME_DIR: '{{ __activepieces_runtime_dir }}'

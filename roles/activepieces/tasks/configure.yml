@@ -1,0 +1,21 @@
+---
+- name: Configure | Deploy Activepieces environment file
+  ansible.builtin.template:
+    src: activepieces.env.j2
+    dest: '{{ __activepieces_env_file }}'
+    owner: '{{ activepieces_user }}'
+    group: '{{ activepieces_group }}'
+    mode: '0600'
+  notify: Restart Activepieces
+  no_log: true
+
+# The reverse proxy connects to the published port.
+- name: Configure | SELinux - Label Activepieces port as http_port_t
+  community.general.seport:
+    ports: '{{ activepieces_port }}'
+    proto: tcp
+    setype: http_port_t
+    state: present
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
