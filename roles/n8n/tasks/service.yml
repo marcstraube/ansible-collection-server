@@ -43,13 +43,14 @@
 # /healthz/readiness answers 200 only once the database is connected and
 # migrated, so a version change with long migrations is covered as well.
 # n8n itself always listens on plain HTTP; n8n_protocol only shapes the
-# URLs it generates behind a TLS-terminating proxy. The waits verify the
-# deployment, which a check run does not perform.
+# URLs it generates behind a TLS-terminating proxy. The same goes for the
+# URL path prefix (n8n_path): n8n keeps its backend routes at the root
+# and the reverse proxy strips the prefix, so the readiness URL
+# never carries it. The waits verify the deployment, which a check run does
+# not perform.
 - name: Service | Wait for n8n to be ready
   ansible.builtin.uri:
-    url: >-
-      http://{{ n8n_host if n8n_host != '0.0.0.0' else '127.0.0.1' }}:{{ n8n_port }}{{
-        n8n_endpoints_rest | regex_replace('/$', '') }}/healthz/readiness
+    url: "http://{{ n8n_host if n8n_host != '0.0.0.0' else '127.0.0.1' }}:{{ n8n_port }}/healthz/readiness"
     status_code: 200
     timeout: 10
   register: __n8n_ready

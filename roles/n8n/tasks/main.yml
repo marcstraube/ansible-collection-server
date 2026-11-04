@@ -1,4 +1,37 @@
 ---
+# The deprecated name of the URL path prefix still takes effect; the
+# replacement is the only name the tasks and templates use.
+- name: Main | Handle deprecated variables
+  ansible.builtin.set_fact:
+    n8n_path: '{{ n8n_endpoints_rest | default(n8n_path) }}'
+  when: n8n_endpoints_rest is defined
+  tags:
+    - always
+
+- name: Main | Warn about the deprecated n8n_endpoints_rest
+  ansible.builtin.debug:
+    msg: >-
+      n8n_endpoints_rest is deprecated and will be removed in the next major
+      version. Use n8n_path instead.
+  when:
+    - n8n_enabled | bool
+    - n8n_endpoints_rest is defined
+  tags:
+    - always
+
+- name: Main | Warn about the deprecated n8n_trusted_proxy_ips
+  ansible.builtin.debug:
+    msg: >-
+      n8n_trusted_proxy_ips is deprecated and will be removed in the next
+      major version. It has no effect: n8n has no list of trusted proxy
+      addresses and counts the reverse proxies in front of it instead
+      (n8n_proxy_hops).
+  when:
+    - n8n_enabled | bool
+    - n8n_trusted_proxy_ips | length > 0
+  tags:
+    - always
+
 - name: Main | Validate encryption key is set
   ansible.builtin.assert:
     that:
@@ -39,6 +72,20 @@
     - n8n_enabled | bool
     - n8n_webhook_url | length > 0
     - ansible_facts['env'].MOLECULE_SCENARIO_NAME is not defined
+  tags:
+    - always
+
+# n8n inserts the prefix verbatim in front of every editor URL, so a value
+# without both slashes produces broken asset paths ('/n8nstatic/...').
+- name: Main | Validate the URL path prefix
+  ansible.builtin.assert:
+    that:
+      - n8n_path is match('^/([^/]+/)*$')
+    fail_msg: |
+      n8n_path must start and end with a slash, e.g. '/' or
+      '/n8n/': n8n puts it verbatim in front of every editor URL.
+  when:
+    - n8n_enabled | bool
   tags:
     - always
 
