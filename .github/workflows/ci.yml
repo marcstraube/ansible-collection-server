@@ -331,6 +331,17 @@ jobs:
           sudo chmod +x /usr/bin/crun
           crun --version
 
+      - name: Unload the passt AppArmor profile of the runner
+        # The profiles of the runner attach by path to programs inside the
+        # test containers. On Arch, pasta is a symlink to passt and runs
+        # under the passt profile, which does not allow joining the network
+        # namespace of a container. The pasta profile stays loaded.
+        run: |
+          if sudo grep -q '^passt (' /sys/kernel/security/apparmor/profiles; then
+            echo -n passt | sudo tee /sys/kernel/security/apparmor/.remove > /dev/null
+            echo 'Unloaded the AppArmor profile passt'
+          fi
+
       - name: Run Molecule test
         working-directory: roles/${{ matrix.role }}
         run: molecule test -s ${{ matrix.scenario }}
@@ -338,6 +349,14 @@ jobs:
           MOLECULE_PLATFORM_NAME: ${{ matrix.platform }}
           PY_COLORS: '1'
           ANSIBLE_FORCE_COLOR: '1'
+
+      - name: Show AppArmor denials of the runner
+        # AppArmor profiles of the runner attach by path to programs inside
+        # the test containers; their denials end up in the kernel log
+        if: failure()
+        run: |
+          sudo aa-status | grep -iE 'pasta|passt' || true
+          sudo journalctl -k --no-pager | grep -i 'apparmor="DENIED"' | tail -n 50 || true
 
   # =============================================================================
   # MIGRATION DOC CHECK (PR only)
