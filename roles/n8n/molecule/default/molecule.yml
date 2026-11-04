@@ -47,8 +47,14 @@ provisioner:
   playbooks:
     prepare: prepare.yml
     converge: converge.yml
+    side_effect: side_effect.yml
     verify: verify.yml
   inventory:
+    group_vars:
+      all:
+        # Shared by converge and verify: side_effect runs the scheduled
+        # backup twice, and verify expects the retention to leave one set
+        n8n_backup_keep: 1
     host_vars:
       n8n-archlinux:
         ansible_python_interpreter: /usr/bin/python
@@ -76,5 +82,6 @@ scenario:
     - prepare
     - converge
     - idempotence
+    - side_effect
     - verify
     - destroy

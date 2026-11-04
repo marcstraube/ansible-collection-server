@@ -7,6 +7,11 @@
 __n8n_service_name: 'n8n.service'
 __n8n_runner_service_name: 'n8n-runner.service'
 
+# Backup script and the units that run it on a schedule
+__n8n_backup_script: '/usr/local/bin/n8n-backup'
+__n8n_backup_service_name: 'n8n-backup.service'
+__n8n_backup_timer_name: 'n8n-backup.timer'
+
 # Runtime state of the rootless podman instance; the service unit creates
 # it as its RuntimeDirectory
 __n8n_runtime_dir: '/run/n8n'

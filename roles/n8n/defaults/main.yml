@@ -42,22 +42,11 @@ n8n_subid_count: 65536
 # a lower version is refused unless the backup set taken before the
 # upgrade is restored with it (n8n_update_restore).
 
-# Back up n8n_data_dir (and the PostgreSQL database with n8n_db_type
-# 'postgresdb') before every version change and before a restore
-n8n_update_backup_enabled: true
-
-# Directory for the backup sets, one subdirectory per set:
-# n8n-<installed version>-<timestamp>/{data.tar.gz,db.dump}
-n8n_update_backup_dir: '/var/backups/n8n'
-
-# Backup sets to keep; older sets are removed after a new backup
-n8n_update_backup_keep: 3
-
-# Name of a backup set to restore, e.g. 'n8n-2.42.0-20261014T120000'.
-# Replaces n8n_data_dir (and recreates the database) from that set and
-# requires n8n_version to match the version in the set name. One-shot:
-# remove the variable after the run, otherwise the next run restores the
-# same set again.
+# Name of a backup set to restore, e.g. 'n8n-2.42.0-20261014T120000' or
+# 'n8n-scheduled-2.42.0-20261015T030000'. Replaces n8n_data_dir (and
+# recreates the database) from that set and requires n8n_version to match
+# the version in the set name. One-shot: remove the variable after the
+# run, otherwise the next run restores the same set again.
 n8n_update_restore: ''
 
 # Seconds to wait for /healthz/readiness after a service (re)start;
@@ -78,6 +67,53 @@ n8n_service_start_timeout: 300
 # failed update keeps the previous image; a restore pulls the image of
 # the backup set again.
 n8n_update_remove_old_images: true
+
+#
+# Backup
+#
+# A backup set is a subdirectory of n8n_backup_dir with data.tar.gz
+# (n8n_data_dir, entries relative to n8n_user_home) and, with n8n_db_type
+# 'postgresdb', db.dump (pg_dump -Fc). The script /usr/local/bin/n8n-backup
+# writes a set; n8n-backup.timer runs it on a schedule and the update runs
+# it before a version change or a restore. Scheduled sets are named
+# n8n-scheduled-<version>-<timestamp>, pre-update sets
+# n8n-<version>-<timestamp>; the retention is count-based and separate
+# per kind, so a scheduled set never pushes out the set taken before the
+# last update and a failing timer never removes the last good set.
+
+# Back up n8n_data_dir (and the PostgreSQL database) on the schedule of
+# the timer and before every version change or restore
+n8n_backup_enabled: true
+
+# Directory for the backup sets
+n8n_backup_dir: '/var/backups/n8n'
+
+# Scheduled sets to keep (n8n-scheduled-<version>-<timestamp>)
+n8n_backup_keep: 7
+
+# Pre-update sets to keep (n8n-<version>-<timestamp>)
+n8n_backup_update_keep: 3
+
+# Stop n8n (and the task runners bound to it) while a scheduled set is
+# written, for a consistent copy of the SQLite database and the data
+# directory; the service starts again afterwards, also when the backup
+# fails. With false the set is taken from the running instance.
+n8n_backup_stop_service: true
+
+# Enable and start the n8n-backup timer
+n8n_backup_timer_enabled: true
+
+# Schedule of the timer (systemd OnCalendar)
+n8n_backup_on_calendar: 'daily'
+
+# DEPRECATED: Use n8n_backup_enabled instead (removed in the next major version)
+# n8n_update_backup_enabled: {{ n8n_backup_enabled }}
+
+# DEPRECATED: Use n8n_backup_dir instead (removed in the next major version)
+# n8n_update_backup_dir: {{ n8n_backup_dir }}
+
+# DEPRECATED: Use n8n_backup_update_keep instead (removed in the next major version)
+# n8n_update_backup_keep: {{ n8n_backup_update_keep }}
 
 #
 # User and Directory

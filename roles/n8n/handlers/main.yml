@@ -26,3 +26,12 @@
     state: restarted
   when: n8n_service_enabled | bool
   ignore_errors: '{{ ansible_check_mode }}'
+
+- name: Restart n8n backup timer
+  ansible.builtin.systemd_service:
+    name: '{{ __n8n_backup_timer_name }}'
+    state: restarted
+  when:
+    - n8n_backup_enabled | bool
+    - n8n_backup_timer_enabled | bool
+  ignore_errors: '{{ ansible_check_mode }}'

@@ -1,0 +1,12 @@
+{{ ansible_managed | comment }}
+
+[Unit]
+Description=n8n backup set
+Documentation=https://docs.n8n.io
+
+[Service]
+Type=oneshot
+ExecStart={{ __n8n_backup_script }} scheduled
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=n8n-backup

@@ -18,9 +18,10 @@
         name: __verify_defaults
 
     #
-    # After the update: default version installed, images of the previous
-    # release removed, one backup set of the previous release, service
-    # ready.
+    # After the update and the scheduled runs of side_effect: default
+    # version installed, images of the previous release removed, one
+    # pre-update set of the previous release next to one scheduled set,
+    # service ready.
     #
 
     - name: Verify | Read the running image
@@ -81,20 +82,38 @@
         patterns: 'n8n-*'
       register: __verify_sets
 
-    - name: Verify | Assert one backup set of the previous release exists
+    # The scheduled retention of 1 removed the first scheduled set only;
+    # the pre-update set of the update is of the other kind and stays.
+    - name: Verify | Assert the pre-update set survived the scheduled retention
       ansible.builtin.assert:
         that:
-          - __verify_sets.files | length == 1
+          - __verify_set_names | length == 2
           - >-
-            __verify_sets.files[0].path | basename
-            is match('^n8n-' ~ n8n_update_previous_version ~ '-[0-9]{8}T[0-9]{6}$')
-        fail_msg: 'Backup sets: {{ __verify_sets.files | map(attribute="path") | list }}'
+            __verify_set_names
+            | select('match', '^n8n-scheduled-' ~ __verify_version_re ~ '-[0-9]{8}T[0-9]{6}$')
+            | list | length == 1
+          - >-
+            __verify_set_names
+            | select('match', '^n8n-' ~ __verify_previous_re ~ '-[0-9]{8}T[0-9]{6}$')
+            | list | length == 1
+        fail_msg: 'Backup sets: {{ __verify_set_names }}'
+      vars:
+        __verify_set_names: "{{ __verify_sets.files | map(attribute='path') | map('basename') | list }}"
+        __verify_version_re: '{{ __verify_defaults.n8n_version | regex_escape }}'
+        __verify_previous_re: '{{ n8n_update_previous_version | regex_escape }}'
+
+    - name: Verify | Set the pre-update set fact
+      ansible.builtin.set_fact:
+        __verify_update_set: >-
+          {{ __verify_sets.files | map(attribute='path')
+             | reject('search', '/n8n-scheduled-') | first }}
 
     # Listing an archive has no module equivalent.
-    - name: Verify | Assert the backup archive contains the SQLite database  # noqa: command-instead-of-module
+    - name: Verify | Assert the backup archives contain the SQLite database  # noqa: command-instead-of-module
       ansible.builtin.command:
-        cmd: 'tar -tzf {{ __verify_sets.files[0].path }}/data.tar.gz .n8n/database.sqlite'
+        cmd: 'tar -tzf {{ item }}/data.tar.gz .n8n/database.sqlite'
       changed_when: false
+      loop: "{{ __verify_sets.files | map(attribute='path') | list }}"
 
     - name: Verify | Assert n8n reports ready
       ansible.builtin.uri:
@@ -137,12 +156,31 @@
     # pulls it again and removes the images of the newer release in turn.
     #
 
+    # Two older pre-update sets: the deprecated n8n_update_backup_keep (2)
+    # has to take effect until its removal, so the pre-update rotation of
+    # the restore keeps the newer of the two besides the set it restores
+    # (never removed) and the set it writes.
+    - name: Verify | Create older pre-update sets
+      ansible.builtin.file:
+        path: '{{ __verify_backup_dir }}/{{ item.name }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+        modification_time: '{{ item.mtime }}'
+        access_time: '{{ item.mtime }}'
+      loop:
+        - { name: 'n8n-2.40.0-20250101T000000', mtime: '202501010000.00' }
+        - { name: 'n8n-2.41.0-20250102T000000', mtime: '202501020000.00' }
+      loop_control:
+        label: '{{ item.name }}'
+
     - name: Verify | Include n8n role (restore)  # noqa: role-name[path]
       ansible.builtin.include_role:
         name: '{{ playbook_dir }}/../..'
       vars:
         n8n_version: '{{ n8n_update_previous_version }}'
-        n8n_update_restore: '{{ __verify_sets.files[0].path | basename }}'
+        n8n_update_restore: '{{ __verify_update_set | basename }}'
 
     - name: Verify | Read the running image after the restore
       ansible.builtin.command:
@@ -168,13 +206,24 @@
         patterns: 'n8n-*'
       register: __verify_sets_after
 
+    # The restore took a pre-update set of the state before it; with the
+    # deprecated retention of 2 the older of the two created sets is gone,
+    # the restored set is untouched and the scheduled set is of the other
+    # kind.
     - name: Verify | Assert the state before the restore was backed up
       ansible.builtin.assert:
         that:
-          - __verify_sets_after.files | length == 2
-          - __verify_sets_after.files | map(attribute='path') | map('basename')
-            | select('match', '^n8n-' ~ __verify_defaults.n8n_version ~ '-') | list | length == 1
-        fail_msg: 'Backup sets: {{ __verify_sets_after.files | map(attribute="path") | list }}'
+          - __verify_update_sets_after | length == 3
+          - "'n8n-2.40.0-20250101T000000' not in __verify_update_sets_after"
+          - "'n8n-2.41.0-20250102T000000' in __verify_update_sets_after"
+          - __verify_update_set | basename in __verify_update_sets_after
+          - __verify_update_sets_after | select('match', '^n8n-' ~ __verify_version_re ~ '-') | list | length == 1
+          - __verify_set_names_after | select('match', '^n8n-scheduled-') | list | length == 1
+        fail_msg: 'Backup sets: {{ __verify_set_names_after }}'
+      vars:
+        __verify_set_names_after: "{{ __verify_sets_after.files | map(attribute='path') | map('basename') | list }}"
+        __verify_update_sets_after: "{{ __verify_set_names_after | reject('match', '^n8n-scheduled-') | list }}"
+        __verify_version_re: '{{ __verify_defaults.n8n_version | regex_escape }}'
 
     - name: Verify | Assert n8n reports ready after the restore
       ansible.builtin.uri:
