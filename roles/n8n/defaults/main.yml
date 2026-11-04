@@ -319,6 +319,14 @@ n8n_log_file_max_size: '10m'
 n8n_log_file_max_count: 5
 
 #
+# Metrics
+#
+
+# Serve Prometheus metrics on /metrics (N8N_METRICS). The endpoint has no
+# authentication of its own, so the reverse proxy restricts access to it
+n8n_metrics_enabled: false
+
+#
 # Telemetry and Updates
 #
 
@@ -458,7 +466,14 @@ n8n_env_file: '/etc/n8n/n8n.env'
 # SECURITY: Default to true - production deployments should use reverse proxy
 n8n_behind_reverse_proxy: true
 
-# Trusted proxy IPs (comma-separated)
+# Number of reverse proxies in front of n8n (N8N_PROXY_HOPS): n8n takes the
+# client address from the X-Forwarded-For header that many hops back, for
+# its rate limits and audit log. Rendered only when behind a reverse proxy
+n8n_proxy_hops: 1
+
+# DEPRECATED: no effect, removed in the next major version. n8n has no list
+# of trusted proxy addresses; it counts the proxies in front of it
+# (n8n_proxy_hops)
 n8n_trusted_proxy_ips: ''
 
 #

@@ -309,6 +309,34 @@ as well. n8n documents a prefix behind a reverse proxy with the caveat that
 parts of the editor may navigate wrongly; a dedicated host name
 (`n8n.example.com`) remains the simpler setup.
 
+### Reverse Proxy
+
+n8n listens on `n8n_host:n8n_port` and expects a reverse proxy in front of
+it that terminates TLS and forwards the client address in `X-Forwarded-For`.
+`n8n_proxy_hops` tells n8n how many proxies the header passed through, so
+it reads the client address from the right position for its rate limits and
+audit log; `0` makes n8n distrust the header altogether.
+
+| Variable                   | Default | Description                                            |
+| -------------------------- | ------- | ------------------------------------------------------ |
+| `n8n_behind_reverse_proxy` | `true`  | Render the reverse proxy settings (`N8N_PROXY_HOPS`)   |
+| `n8n_proxy_hops`           | `1`     | Number of reverse proxies in front of n8n              |
+
+> **Deprecation:** `n8n_trusted_proxy_ips` has no effect and will be removed
+> in the next major version. n8n has no list of trusted proxy addresses; it
+> counts the proxies in front of it (`n8n_proxy_hops`). Every run prints a
+> deprecation warning while the variable is set to a non-empty value.
+
+### Metrics
+
+`n8n_metrics_enabled: true` serves Prometheus metrics on `/metrics`
+(`N8N_METRICS`). The endpoint has no authentication of its own, so the
+reverse proxy restricts access to it.
+
+| Variable              | Default | Description                              |
+| --------------------- | ------- | ---------------------------------------- |
+| `n8n_metrics_enabled` | `false` | Serve Prometheus metrics on `/metrics`   |
+
 ### OpenTelemetry (n8n >= 2.15)
 
 Set `n8n_otel_enabled: true` and point `n8n_otel_exporter_otlp_endpoint` at

@@ -42,6 +42,23 @@
       register: __verify_env_file
       failed_when: not __verify_env_file.stat.exists
 
+    # The file is mode 0600, so it is read through slurp. With the
+    # defaults n8n sits behind one reverse proxy and serves no metrics.
+    - name: Verify | Read the environment file
+      ansible.builtin.slurp:
+        src: /etc/n8n/n8n.env
+      register: __verify_env
+
+    - name: Verify | Assert the reverse proxy and metrics settings
+      ansible.builtin.assert:
+        that:
+          - "'N8N_PROXY_HOPS=1' in __verify_env_lines"
+          - __verify_env_lines | select('match', '^N8N_METRICS=') | length == 0
+        fail_msg: >-
+          {{ __verify_env_lines | select('match', '^N8N_(PROXY_HOPS|METRICS)=') | list }}
+      vars:
+        __verify_env_lines: "{{ (__verify_env.content | b64decode).splitlines() }}"
+
     - name: Verify | Assert systemd service file exists
       ansible.builtin.stat:
         path: '/etc/systemd/system/{{ __n8n_service_name }}'

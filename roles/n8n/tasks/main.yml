@@ -19,6 +19,19 @@
   tags:
     - always
 
+- name: Main | Warn about the deprecated n8n_trusted_proxy_ips
+  ansible.builtin.debug:
+    msg: >-
+      n8n_trusted_proxy_ips is deprecated and will be removed in the next
+      major version. It has no effect: n8n has no list of trusted proxy
+      addresses and counts the reverse proxies in front of it instead
+      (n8n_proxy_hops).
+  when:
+    - n8n_enabled | bool
+    - n8n_trusted_proxy_ips | length > 0
+  tags:
+    - always
+
 - name: Main | Validate encryption key is set
   ansible.builtin.assert:
     that:
