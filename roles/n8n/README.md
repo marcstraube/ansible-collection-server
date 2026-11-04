@@ -248,7 +248,7 @@ orchestrator playbook includes the pki role automatically.
 
 n8n can share a virtual host with another application that owns `/`: the
 editor is then served under a path prefix such as `/n8n/`. n8n inserts
-`n8n_endpoints_rest` (`N8N_PATH`) verbatim in front of every URL the editor
+`n8n_path` (`N8N_PATH`) verbatim in front of every URL the editor
 requests, so the value starts and ends with a slash; the role refuses other
 values. The backend routes (`/rest`, `/webhook`, `/healthz`, …) stay at the
 root of `n8n_host:n8n_port` whatever the prefix is, so the reverse proxy
@@ -257,14 +257,19 @@ role is not affected.
 
 | Variable              | Default | Description                                      |
 | --------------------- | ------- | ------------------------------------------------ |
-| `n8n_endpoints_rest`  | `'/'`   | URL path prefix of the editor (`N8N_PATH`)       |
+| `n8n_path`            | `'/'`   | URL path prefix of the editor (`N8N_PATH`)       |
 | `n8n_editor_base_url` | `''`    | Public URL of the editor, with the prefix        |
 | `n8n_webhook_url`     | `''`    | Public base URL of the webhooks, with the prefix |
+
+> **Deprecation:** `n8n_endpoints_rest` is the former name of `n8n_path` and
+> will be removed in the next major version. Until then a set
+> `n8n_endpoints_rest` still takes effect as the URL path prefix, and every
+> run prints a deprecation warning while it is set.
 
 Host variables for an instance at `https://www.example.com/n8n/`:
 
 ```yaml
-n8n_endpoints_rest: '/n8n/'
+n8n_path: '/n8n/'
 n8n_editor_base_url: 'https://www.example.com/n8n/'
 n8n_webhook_url: 'https://www.example.com/n8n/'
 ```
@@ -374,8 +379,10 @@ because that range cannot map the UID 65532 owning `/home/nonroot` in the
 distroless runner image.
 
 The Debian platform of the default scenario serves the editor under the URL
-path prefix `/n8n/` (host variables in `molecule.yml`); verify checks the
-base path of the editor on every platform and readiness at the root.
+path prefix `/n8n/` and the EL 9 platform under `/legacy/` through the
+deprecated `n8n_endpoints_rest` (host variables in `molecule.yml`); verify
+checks the base path of the editor on every platform and readiness at the
+root.
 
 ## Notes
 

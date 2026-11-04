@@ -55,10 +55,13 @@ provisioner:
       n8n-debian-trixie:
         ansible_python_interpreter: /usr/bin/python3
         # Shared by converge and verify: the editor is served under a URL
-        # path prefix on this platform only
-        n8n_endpoints_rest: '/n8n/'
+        # path prefix on this platform
+        n8n_path: '/n8n/'
       n8n-rocky-9:
         ansible_python_interpreter: /usr/bin/python3
+        # The deprecated name of the prefix has to take effect until its
+        # removal; verify expects the editor under it
+        n8n_endpoints_rest: '/legacy/'
       n8n-rocky-10:
         ansible_python_interpreter: /usr/bin/python3
   config_options:

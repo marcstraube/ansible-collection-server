@@ -86,10 +86,10 @@
         url: 'http://127.0.0.1:5680/healthz'
         status_code: 200
 
-    # The URL path prefix (n8n_endpoints_rest) reaches the editor only: n8n
-    # keeps its backend routes at the root, so readiness answers unprefixed
-    # on every platform while the editor requests its assets under the
-    # prefix of the platform.
+    # The URL path prefix (n8n_path, or its deprecated name
+    # n8n_endpoints_rest) reaches the editor only: n8n keeps its backend
+    # routes at the root, so readiness answers unprefixed on every platform
+    # while the editor requests its assets under the prefix of the platform.
     - name: Verify | Assert n8n reports ready
       ansible.builtin.uri:
         url: 'http://127.0.0.1:5678/healthz/readiness'
@@ -116,7 +116,10 @@
           prefix={{ __verify_prefix }}
           base-path.js={{ __verify_base_path.content | trim }}
       vars:
-        __verify_prefix: "{{ n8n_endpoints_rest | default(__verify_defaults.n8n_endpoints_rest) }}"
+        __verify_prefix: >-
+          {{ n8n_path if n8n_path is defined
+             else n8n_endpoints_rest if n8n_endpoints_rest is defined
+             else __verify_defaults.n8n_path }}
 
     # n8n writes its instance settings on first start; the keep-id mapping
     # keeps the files owned by the n8n user on the host.

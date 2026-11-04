@@ -1,4 +1,24 @@
 ---
+# The deprecated name of the URL path prefix still takes effect; the
+# replacement is the only name the tasks and templates use.
+- name: Main | Handle deprecated variables
+  ansible.builtin.set_fact:
+    n8n_path: '{{ n8n_endpoints_rest | default(n8n_path) }}'
+  when: n8n_endpoints_rest is defined
+  tags:
+    - always
+
+- name: Main | Warn about the deprecated n8n_endpoints_rest
+  ansible.builtin.debug:
+    msg: >-
+      n8n_endpoints_rest is deprecated and will be removed in the next major
+      version. Use n8n_path instead.
+  when:
+    - n8n_enabled | bool
+    - n8n_endpoints_rest is defined
+  tags:
+    - always
+
 - name: Main | Validate encryption key is set
   ansible.builtin.assert:
     that:
@@ -47,9 +67,9 @@
 - name: Main | Validate the URL path prefix
   ansible.builtin.assert:
     that:
-      - n8n_endpoints_rest is match('^/([^/]+/)*$')
+      - n8n_path is match('^/([^/]+/)*$')
     fail_msg: |
-      n8n_endpoints_rest must start and end with a slash, e.g. '/' or
+      n8n_path must start and end with a slash, e.g. '/' or
       '/n8n/': n8n puts it verbatim in front of every editor URL.
   when:
     - n8n_enabled | bool
