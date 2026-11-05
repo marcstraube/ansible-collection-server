@@ -74,6 +74,15 @@
         - '{{ __n8n_service_name }}'
         - '{{ __n8n_runner_service_name }}'
 
+    # Converge runs SQLite: the unit requires no PostgreSQL unit
+    - name: Verify | Assert the service requires no PostgreSQL unit
+      ansible.builtin.assert:
+        that:
+          - >-
+            __verify_service_status.results[0].status.Requires | default('')
+            is not search('(^| )postgresql(-[0-9]+)?\\.service( |$)')
+        fail_msg: 'Requires={{ __verify_service_status.results[0].status.Requires | default("") }}'
+
     - name: Verify | Read the running containers
       ansible.builtin.command:
         cmd: podman ps --filter name=^{{ item }}$ --format '{{ "{{" }}.Image{{ "}}" }}'

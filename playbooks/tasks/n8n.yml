@@ -8,7 +8,7 @@
 # Stack: podman, optional postgresql, pki, n8n, nginx.
 #
 # n8n listens on localhost over plain HTTP; nginx terminates TLS in front of
-# it. The nginx vhost comes from the inventory (nginx_vhosts), the
+# it. The nginx vhost comes from the inventory (nginx_sites), the
 # certificate from marcstraube.common.pki (pki_server_certs): an internal CA
 # or a certificate issued elsewhere and deployed through pki. There is no
 # ACME step, so this file targets internal hosts. A public host that needs
