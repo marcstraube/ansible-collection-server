@@ -1,4 +1,39 @@
 ---
+# The deprecated name of the backup retention still takes effect; the
+# replacement is the only name the tasks and templates use.
+- name: Main | Handle the deprecated mariadb_backup_retention
+  ansible.builtin.set_fact:
+    mariadb_backup_keep: '{{ mariadb_backup_retention | default(mariadb_backup_keep) | int }}'
+  when: mariadb_backup_retention is defined
+  tags:
+    - always
+
+- name: Main | Warn about the deprecated mariadb_backup_retention
+  ansible.builtin.debug:
+    msg: >-
+      mariadb_backup_retention is deprecated and will be removed in the next
+      major version. Use mariadb_backup_keep instead.
+  when:
+    - mariadb_enabled | bool
+    - mariadb_backup_retention is defined
+  tags:
+    - always
+
+# The cron job stays while the deprecated schedule is set (backup.yml)
+- name: Main | Warn about the deprecated mariadb_backup_schedule
+  ansible.builtin.debug:
+    msg: >-
+      mariadb_backup_schedule is deprecated and will be removed in the next
+      major version. While it is set, the backup runs from cron and
+      mariadb-backup.timer stays stopped. Remove it and use
+      mariadb_backup_on_calendar instead (systemd OnCalendar, default
+      'daily'); the role then removes its cron job and starts the timer.
+  when:
+    - mariadb_enabled | bool
+    - mariadb_backup_schedule is defined
+  tags:
+    - always
+
 - name: Main | Load OS-specific variables
   ansible.builtin.include_vars: '{{ item }}'
   with_first_found:
@@ -177,6 +212,26 @@
   tags:
     - always
 
+# Checked before any change: a restore of a database the role does not
+# manage, or with the server stopped, must not touch the host.
+- name: Main | Validate the restore request
+  ansible.builtin.assert:
+    that:
+      - mariadb_service_enabled | bool
+      - mariadb_restore is match(__mariadb_backup_dump_regex)
+      - __mariadb_restore_database in (mariadb_databases | map(attribute='name') | list)
+    fail_msg: >-
+      mariadb_restore must name a dump in mariadb_backup_dir,
+      <database>_<YYYYmmdd_HHMMSS>.sql.gz (got '{{ mariadb_restore }}'), of
+      a database managed through mariadb_databases
+      ({{ mariadb_databases | map(attribute='name') | join(', ') }}), and
+      the restore needs mariadb_service_enabled.
+  when:
+    - mariadb_enabled | bool
+    - mariadb_restore | length > 0
+  tags:
+    - always
+
 - name: Main | Import repository tasks
   ansible.builtin.import_tasks: repos.yml
   when:
@@ -226,16 +281,23 @@
     - mariadb
     - mariadb:databases
 
-- name: Main | Include backup tasks
-  ansible.builtin.include_tasks:
-    file: backup.yml
-    apply:
-      tags:
-        - mariadb
-        - mariadb:backup
-  when:
-    - mariadb_enabled | bool
-    - mariadb_backup_enabled | bool
+- name: Main | Import backup tasks
+  ansible.builtin.import_tasks: backup.yml
+  when: mariadb_enabled | bool
   tags:
     - mariadb
     - mariadb:backup
+
+- name: Main | Include restore tasks
+  ansible.builtin.include_tasks:
+    file: restore.yml
+    apply:
+      tags:
+        - mariadb
+        - mariadb:restore
+  when:
+    - mariadb_enabled | bool
+    - mariadb_restore | length > 0
+  tags:
+    - mariadb
+    - mariadb:restore

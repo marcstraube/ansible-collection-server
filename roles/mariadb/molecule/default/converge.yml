@@ -22,6 +22,7 @@
         priv: 'testdb.*:ALL'
     mariadb_extra_config:
       sql_mode: 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'
+    mariadb_backup_enabled: true
 
   tasks:
     - name: Converge | Include mariadb role  # noqa: role-name[path]

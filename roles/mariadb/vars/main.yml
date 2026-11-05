@@ -19,6 +19,27 @@ __mariadb_upstream_yum_base: https://rpm.mariadb.org
 __mariadb_upstream_rpm_key_url: https://rpm.mariadb.org/RPM-GPG-KEY-MariaDB
 __mariadb_upstream_repo_file: /etc/yum.repos.d/mariadb.repo
 
+# Backup script, the units that run it on a schedule and the name of the
+# cron job of the deprecated mariadb_backup_schedule
+__mariadb_backup_script: /usr/local/bin/mariadb-backup
+__mariadb_backup_service_name: mariadb-backup.service
+__mariadb_backup_timer_name: mariadb-backup.timer
+__mariadb_backup_cron_name: MariaDB backup
+
+# Name of a dump the backup script writes, <database>_<YYYYmmdd_HHMMSS>.sql.gz;
+# the group is the database
+__mariadb_backup_dump_regex: '^([^/]+)_[0-9]{8}_[0-9]{6}\.sql\.gz$'
+
+# Database of the dump named by mariadb_restore
+__mariadb_restore_database: >-
+  {{ (mariadb_restore | string | regex_search(__mariadb_backup_dump_regex, '\1')
+      | default([''], true)) | first }}
+
+# Path of the dump and the mariadb_databases entry of its database
+__mariadb_restore_file: "{{ mariadb_backup_dir | regex_replace('/$', '') }}/{{ mariadb_restore }}"
+__mariadb_restore_entry: >-
+  {{ mariadb_databases | selectattr('name', 'equalto', __mariadb_restore_database) | first | default({}) }}
+
 # Schemas the backup script leaves out when mariadb_backup_databases is empty
 __mariadb_backup_system_schemas:
   - information_schema

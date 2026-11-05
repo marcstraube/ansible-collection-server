@@ -57,6 +57,8 @@ provisioner:
         mariadb_repo: 'distro'
         mariadb_version: '11.8'
         mariadb_arch_package: 'mariadb'
+        # The scheduled backup in side_effect keeps one dump per database
+        mariadb_backup_keep: 1
     host_vars:
       mariadb-archlinux:
         ansible_python_interpreter: /usr/bin/python
@@ -64,6 +66,10 @@ provisioner:
         ansible_python_interpreter: /usr/bin/python3
       mariadb-rocky-9:
         ansible_python_interpreter: /usr/bin/python3
+        # The deprecated name of the retention has to take effect until its
+        # removal and wins over the new name; verify expects one dump kept
+        mariadb_backup_keep: 3
+        mariadb_backup_retention: 1
       mariadb-rocky-10:
         ansible_python_interpreter: /usr/bin/python3
   config_options:

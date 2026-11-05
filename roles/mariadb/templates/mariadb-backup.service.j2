@@ -1,0 +1,13 @@
+{{ ansible_managed | comment }}
+
+[Unit]
+Description=MariaDB backup (one dump per database)
+Documentation=https://mariadb.com/kb/en/mariadb-dump/
+After={{ __mariadb_service_name }}
+
+[Service]
+Type=oneshot
+ExecStart={{ __mariadb_backup_script }}
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mariadb-backup

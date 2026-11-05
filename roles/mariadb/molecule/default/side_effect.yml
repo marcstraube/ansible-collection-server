@@ -7,6 +7,10 @@
 # latest and the full distribution version as minimum, and the server must
 # run the new binary after at most one restart. Arch Linux ignores the
 # state; nothing is rolled back there.
+#
+# Backup and restore: the last plays run the scheduled backup, change the
+# data, check that a restore of an unmanaged database fails, and restore
+# the dump through the converge playbook (see verify.yml).
 - name: Side Effect | Roll back
   hosts: all
   gather_facts: true
@@ -237,3 +241,103 @@
         path: /usr/sbin/policy-rc.d
         state: absent
       when: ansible_facts['os_family'] == 'Debian'
+
+# mariadb_backup_keep is 1 (scenario inventory): the scheduled backup
+# removes the seeded old dump of testdb and leaves the dump of a database
+# whose name only starts with testdb alone.
+- name: Side Effect | Backup
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __side_effect_backup_dir: '/var/backups/mariadb'
+
+  tasks:
+    - name: Side Effect | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Side Effect | Load OS-specific variables
+      ansible.builtin.include_vars: '{{ item }}'
+      with_first_found:
+        - files:
+            - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["distribution"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}.yml'
+          paths:
+            - '../../vars'
+
+    - name: Side Effect | Write the data the dump has to contain
+      ansible.mariadb.mariadb_query:
+        query:
+          - CREATE TABLE IF NOT EXISTS restore_check (id INT PRIMARY KEY, state VARCHAR(16))
+          - REPLACE INTO restore_check VALUES (1, 'dumped')
+        login_unix_socket: '{{ __mariadb_socket }}'
+        login_db: testdb
+
+    # The rotation only looks at the names, the content is never read
+    - name: Side Effect | Seed old dumps
+      ansible.builtin.copy:
+        content: "-- seeded by molecule\n"
+        dest: '{{ __side_effect_backup_dir }}/{{ item }}'
+        owner: root
+        group: root
+        mode: '0600'
+      loop:
+        - testdb_20000101_000000.sql.gz
+        - testdb_old_20000101_000000.sql.gz
+
+    - name: Side Effect | Run the scheduled backup
+      ansible.builtin.systemd_service:
+        name: '{{ __mariadb_backup_service_name }}'
+        state: started
+
+    - name: Side Effect | List the dumps of testdb
+      ansible.builtin.find:
+        paths: '{{ __side_effect_backup_dir }}'
+        patterns: '^testdb_[0-9]{8}_[0-9]{6}\.sql\.gz$'
+        use_regex: true
+      register: __side_effect_dumps
+
+    - name: Side Effect | Record the dump to restore
+      ansible.builtin.set_fact:
+        __side_effect_restore_dump: >-
+          {{ __side_effect_dumps.files | map(attribute='path') | map('basename') | sort | last }}
+
+    # verify.yml expects the restore to remove this row again, and the
+    # fresh dump the restore takes first to contain it
+    - name: Side Effect | Change the data after the dump
+      ansible.mariadb.mariadb_query:
+        query:
+          - REPLACE INTO restore_check VALUES (2, 'after-dump')
+        login_unix_socket: '{{ __mariadb_socket }}'
+        login_db: testdb
+
+    - name: Side Effect | Run a restore of a database the role does not manage
+      block:
+        - name: Side Effect | Include mariadb role with an unmanaged database to restore  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            mariadb_enabled: true
+            mariadb_databases:
+              - name: testdb
+            mariadb_restore: 'otherdb_20000101_000000.sql.gz'
+      rescue:
+        - name: Side Effect | Record the restore failure
+          ansible.builtin.set_fact:
+            __side_effect_restore_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Assert the restore of an unmanaged database failed
+      ansible.builtin.assert:
+        that:
+          - __side_effect_restore_error is defined
+          - "'mariadb_databases' in __side_effect_restore_error"
+        fail_msg: 'A restore of a database outside mariadb_databases did not fail the run'
+        success_msg: 'A restore of a database outside mariadb_databases fails the run'
+
+- name: Side Effect | Restore
+  ansible.builtin.import_playbook: converge.yml
+  vars:
+    mariadb_restore: '{{ __side_effect_restore_dump }}'

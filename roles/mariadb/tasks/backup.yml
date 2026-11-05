@@ -1,4 +1,9 @@
 ---
+# Deploys the backup script with the oneshot service and the timer that
+# run it. The restore runs the script too, so it is deployed on every run;
+# the toggles only decide whether the timer (or, while the deprecated
+# mariadb_backup_schedule is set, the cron job) runs it on a schedule.
+
 - name: Backup | Create backup directory
   ansible.builtin.file:
     path: '{{ mariadb_backup_dir }}'
@@ -9,22 +14,72 @@
 
 - name: Backup | Deploy backup script
   ansible.builtin.template:
-    src: backup.sh.j2
-    dest: /usr/local/bin/mariadb-backup.sh
+    src: mariadb-backup.sh.j2
+    dest: '{{ __mariadb_backup_script }}'
     owner: root
     group: root
-    mode: '0700'
+    mode: '0750'
 
-# Runs as root: the unix_socket plugin authenticates the dump without a
-# password file
-- name: Backup | Configure backup cron job
+- name: Backup | Deploy backup service file
+  ansible.builtin.template:
+    src: mariadb-backup.service.j2
+    dest: '/etc/systemd/system/{{ __mariadb_backup_service_name }}'
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload MariaDB systemd units
+
+- name: Backup | Deploy backup timer file
+  ansible.builtin.template:
+    src: mariadb-backup.timer.j2
+    dest: '/etc/systemd/system/{{ __mariadb_backup_timer_name }}'
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - Reload MariaDB systemd units
+    - Restart MariaDB backup timer
+
+# The timer and the cron job of the deprecated mariadb_backup_schedule
+# never run side by side: while the schedule is set, the cron job runs the
+# backup and the timer is stopped. A check run has not deployed the unit
+# yet, so report the failure and continue.
+- name: Backup | Manage backup timer
+  ansible.builtin.systemd_service:
+    name: '{{ __mariadb_backup_timer_name }}'
+    enabled: '{{ __mariadb_backup_timer_active }}'
+    state: "{{ __mariadb_backup_timer_active | ternary('started', 'stopped') }}"
+    daemon_reload: true
+  vars:
+    __mariadb_backup_timer_active: >-
+      {{ mariadb_backup_enabled | bool
+         and mariadb_backup_timer_enabled | bool
+         and mariadb_backup_schedule is not defined }}
+  ignore_errors: '{{ ansible_check_mode }}'
+
+# The cron module needs the crontab binary, also to remove a job; a host
+# without a cron daemon has no job of the role to remove.
+- name: Backup | Check for crontab
+  ansible.builtin.stat:
+    path: /usr/bin/crontab
+  register: __mariadb_crontab
+
+# The job starts the backup service, so the run is logged and ordered like
+# a timer run. It is the role's own: it stays while the deprecated
+# mariadb_backup_schedule is set and is removed by its name otherwise. A
+# schedule without five fields fails instead of running every minute.
+- name: Backup | Manage the cron job of the deprecated schedule
   ansible.builtin.cron:
-    name: MariaDB backup
-    minute: '{{ mariadb_backup_schedule.split()[0] }}'
-    hour: '{{ mariadb_backup_schedule.split()[1] }}'
-    day: '{{ mariadb_backup_schedule.split()[2] }}'
-    month: '{{ mariadb_backup_schedule.split()[3] }}'
-    weekday: '{{ mariadb_backup_schedule.split()[4] }}'
-    job: /usr/local/bin/mariadb-backup.sh
+    name: '{{ __mariadb_backup_cron_name }}'
+    minute: '{{ __mariadb_backup_schedule[0] if __mariadb_backup_cron_active else omit }}'
+    hour: '{{ __mariadb_backup_schedule[1] if __mariadb_backup_cron_active else omit }}'
+    day: '{{ __mariadb_backup_schedule[2] if __mariadb_backup_cron_active else omit }}'
+    month: '{{ __mariadb_backup_schedule[3] if __mariadb_backup_cron_active else omit }}'
+    weekday: '{{ __mariadb_backup_schedule[4] if __mariadb_backup_cron_active else omit }}'
+    job: 'systemctl start {{ __mariadb_backup_service_name }}'
     user: root
-    state: present
+    state: "{{ __mariadb_backup_cron_active | ternary('present', 'absent') }}"
+  vars:
+    __mariadb_backup_cron_active: '{{ mariadb_backup_enabled | bool and mariadb_backup_schedule is defined }}'
+    __mariadb_backup_schedule: '{{ mariadb_backup_schedule.split() if mariadb_backup_schedule is defined else [] }}'
+  when: __mariadb_crontab.stat.exists or __mariadb_backup_cron_active | bool
