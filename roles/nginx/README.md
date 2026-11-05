@@ -178,6 +178,21 @@ a plain prefix location, so certificate renewal would break.
 Site types: `static`, `proxy`, `php`, `custom`. See defaults/main.yml for
 full site definition schema with SSL, basic auth, rate limiting, and locations.
 
+A site without SSL listens on `listen` (default `80`), a site with SSL on
+`listen_ssl` (default `443`) and, with `http_redirect`, also on `listen` for
+the redirect. The HTTP redirect (`http_redirect`) and the www redirect
+(`www_redirect`) keep the port of the site: with `listen_ssl: 8444` the
+HTTP redirect points to `https://<host>:8444/`, with `443` the URL carries
+no port.
+
+On SELinux systems nginx may only bind ports labeled `http_port_t` (80, 81,
+443, 488, 8008, 8009, 8443 and 9000). Every other `listen` and `listen_ssl`
+port of an enabled site gets that label from the role; without it nginx
+cannot bind the port. Labels the role added stay in place when a port is
+removed from the sites. The role also enables the `httpd_can_network_connect`
+boolean when a site of type `proxy` or an upstream exists, so nginx can reach
+backends on any port.
+
 ### Upstreams
 
 | Variable          | Default | Description                  |
