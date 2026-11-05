@@ -39,3 +39,6 @@ __postgresql_pgdg_apt_key_url: https://www.postgresql.org/media/keys/ACCC4CF8.as
 # postgresql_ssl_cert_file/_key_file are left empty in inventory.
 __postgresql_ssl_cert_file: '/etc/ssl/certs/ssl-cert-snakeoil.pem'
 __postgresql_ssl_key_file: '/etc/ssl/private/ssl-cert-snakeoil.key'
+
+# Directory of the user crontabs
+__postgresql_cron_spool_dir: /var/spool/cron/crontabs

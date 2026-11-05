@@ -1,0 +1,136 @@
+#!/bin/bash
+{{ ansible_managed | comment }}
+#
+# Writes one compressed plain-format dump per database
+# (<database>_<YYYYmmdd_HHMMSS>.sql.gz, pg_dump) and one of the roles and
+# tablespaces (globals_<YYYYmmdd_HHMMSS>.sql.gz, pg_dumpall --globals-only)
+# into {{ postgresql_backup_dir }}. The client programs run as {{ __postgresql_user }}
+# over the local socket; the dumps belong to root.
+#
+# Usage: postgresql-backup [-k <dump to keep>] [<database>...]
+#
+#   Without a database the script dumps
+{% if postgresql_backup_databases | length > 0 %}
+#   {{ postgresql_backup_databases | join(', ') }}
+{% else %}
+#   every database except the templates and postgres
+{% endif %}
+#   and the globals; {{ __postgresql_backup_service_name }} runs it this way.
+#   With databases it dumps only those, without the globals (the role
+#   dumps the database of a restore this way).
+#   -k <dump>  File name of a dump in the backup directory that the
+#              rotation never removes (the dump a restore reads).
+#
+# The retention is count-based per database and for the globals: the dump
+# just written counts, older dumps beyond {{ [postgresql_backup_keep | int, 1] | max }} are removed. A dump
+# is written to a temporary file first, so a failed dump neither counts
+# nor removes an older one. The script continues with the next database
+# and exits with an error at the end.
+
+set -euo pipefail
+umask 077
+cd /
+
+BACKUP_DIR="{{ postgresql_backup_dir }}"
+BACKUP_DIR="${BACKUP_DIR%/}"
+BIN_DIR="{{ __postgresql_bin_dir }}"
+KEEP={{ [postgresql_backup_keep | int, 1] | max }}
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+PROTECT=""
+PARTIAL=""
+
+while getopts 'k:' OPT; do
+    case "${OPT}" in
+        k)
+            PROTECT="${OPTARG}"
+            ;;
+        *)
+            echo "Usage: $0 [-k <dump to keep>] [<database>...]" >&2
+            exit 64
+            ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+# Removes the temporary file of an interrupted dump.
+cleanup() {
+    if [ -n "${PARTIAL}" ]; then
+        rm -f -- "${PARTIAL}"
+    fi
+}
+trap cleanup EXIT
+
+as_postgres() {
+    runuser -u {{ __postgresql_user }} -- "$@"
+}
+
+# rotate <name>: keeps the newest ${KEEP} dumps of <name> (by the
+# timestamp in the file name), never the protected dump.
+rotate() {
+    local NAME="$1"
+    local FIND_ARGS=("${BACKUP_DIR}" -mindepth 1 -maxdepth 1 -type f
+        -name "${NAME}_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].sql.gz")
+    if [ -n "${PROTECT}" ]; then
+        FIND_ARGS+=(! -name "${PROTECT}")
+    fi
+    find "${FIND_ARGS[@]}" -printf '%f\n' \
+        | sort -r \
+        | tail -n +$((KEEP + 1)) \
+        | while IFS= read -r OLD; do
+            echo "Removing ${OLD} beyond the retention of ${KEEP}"
+            rm -f -- "${BACKUP_DIR}/${OLD}"
+        done
+}
+
+# dump <name> <command> [<argument>...]: writes the output of the command
+# to <name>_<timestamp>.sql.gz and rotates the dumps of <name>.
+dump() {
+    local NAME="$1"
+    shift
+    local FILE="${BACKUP_DIR}/${NAME}_${TIMESTAMP}.sql.gz"
+    PARTIAL="${FILE}.partial"
+    echo "Dumping ${NAME} to ${FILE}"
+    if as_postgres "$@" | gzip > "${PARTIAL}"; then
+        mv -f -- "${PARTIAL}" "${FILE}"
+        PARTIAL=""
+        rotate "${NAME}"
+    else
+        echo "Dump of ${NAME} failed, its older dumps stay" >&2
+        rm -f -- "${PARTIAL}"
+        PARTIAL=""
+        return 1
+    fi
+}
+
+mkdir -p "${BACKUP_DIR}"
+
+DATABASES=()
+if [ "$#" -gt 0 ]; then
+    DATABASES=("$@")
+    GLOBALS=false
+else
+{% if postgresql_backup_databases | length > 0 %}
+    DATABASES=({% for database in postgresql_backup_databases %}{{ database | quote }}{{ ' ' if not loop.last else '' }}{% endfor %})
+{% else %}
+    LIST=$(as_postgres "${BIN_DIR}/psql" -X -A -t -d postgres \
+        -c "SELECT datname FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres' ORDER BY datname")
+    if [ -n "${LIST}" ]; then
+        mapfile -t DATABASES <<< "${LIST}"
+    fi
+{% endif %}
+    GLOBALS=true
+fi
+
+FAILED=0
+for DB in "${DATABASES[@]}"; do
+    dump "${DB}" "${BIN_DIR}/pg_dump" "${DB}" || FAILED=1
+done
+if [ "${GLOBALS}" = true ]; then
+    dump globals "${BIN_DIR}/pg_dumpall" --globals-only || FAILED=1
+fi
+
+if [ "${FAILED}" -ne 0 ]; then
+    echo "Backup finished with errors: $(date)" >&2
+    exit 1
+fi
+echo "Backup completed: $(date)"

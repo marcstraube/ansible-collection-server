@@ -1,28 +1,93 @@
 ---
+# Deploys the backup script with the oneshot service and the timer that
+# run it. The unit files are always deployed; the toggles only decide
+# whether the timer runs. The deprecated postgresql_backup_schedule runs
+# the service from a cron job of root instead of the timer.
+
 - name: Backup | Create backup directory
   ansible.builtin.file:
     path: '{{ postgresql_backup_dir }}'
     state: directory
-    owner: '{{ __postgresql_user }}'
-    group: '{{ __postgresql_group }}'
-    mode: '0700'
-
-- name: Backup | Deploy backup script
-  ansible.builtin.template:
-    src: backup.sh.j2
-    dest: /usr/local/bin/postgresql-backup.sh
     owner: root
     group: root
     mode: '0700'
 
+- name: Backup | Deploy backup script
+  ansible.builtin.template:
+    src: postgresql-backup.sh.j2
+    dest: '{{ __postgresql_backup_script }}'
+    owner: root
+    group: root
+    mode: '0750'
+
+- name: Backup | Deploy backup service file
+  ansible.builtin.template:
+    src: postgresql-backup.service.j2
+    dest: '/etc/systemd/system/{{ __postgresql_backup_service_name }}'
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload PostgreSQL systemd units
+
+- name: Backup | Deploy backup timer file
+  ansible.builtin.template:
+    src: postgresql-backup.timer.j2
+    dest: '/etc/systemd/system/{{ __postgresql_backup_timer_name }}'
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - Reload PostgreSQL systemd units
+    - Restart PostgreSQL backup timer
+
+# A check run has not deployed the unit yet, so report the failure and
+# continue.
+- name: Backup | Manage backup timer
+  ansible.builtin.systemd_service:
+    name: '{{ __postgresql_backup_timer_name }}'
+    enabled: '{{ __postgresql_backup_timer_active | bool }}'
+    state: "{{ __postgresql_backup_timer_active | bool | ternary('started', 'stopped') }}"
+    daemon_reload: true
+  ignore_errors: '{{ ansible_check_mode }}'
+
+#
+# Cron job of the deprecated postgresql_backup_schedule
+#
+
 - name: Backup | Configure backup cron job
   ansible.builtin.cron:
-    name: PostgreSQL backup
+    name: '{{ __postgresql_backup_cron_name }}'
     minute: '{{ postgresql_backup_schedule.split()[0] }}'
     hour: '{{ postgresql_backup_schedule.split()[1] }}'
     day: '{{ postgresql_backup_schedule.split()[2] }}'
     month: '{{ postgresql_backup_schedule.split()[3] }}'
     weekday: '{{ postgresql_backup_schedule.split()[4] }}'
-    job: /usr/local/bin/postgresql-backup.sh
-    user: '{{ __postgresql_user }}'
+    job: 'systemctl start {{ __postgresql_backup_service_name }}'
+    user: root
     state: present
+  when: __postgresql_backup_cron_enabled | bool
+
+# Without the deprecated schedule the timer runs the backup, and the cron
+# job the role created goes away: in the crontab of root (this role
+# version) and of the postgres user (earlier versions, which ran the
+# script as that user). Only a crontab that exists is edited, so a host
+# without cron needs no crontab binary.
+- name: Backup | Find the crontabs of the cron job
+  ansible.builtin.stat:
+    path: '{{ __postgresql_cron_spool_dir }}/{{ item }}'
+  loop:
+    - root
+    - '{{ __postgresql_user }}'
+  register: __postgresql_backup_crontabs
+
+- name: Backup | Remove the backup cron job
+  ansible.builtin.cron:
+    name: '{{ __postgresql_backup_cron_name }}'
+    user: '{{ item.item }}'
+    state: absent
+  loop: '{{ __postgresql_backup_crontabs.results }}'
+  loop_control:
+    label: '{{ item.item }}'
+  when:
+    - item.stat.exists | default(false)
+    - not (__postgresql_backup_cron_enabled | bool and item.item == 'root')

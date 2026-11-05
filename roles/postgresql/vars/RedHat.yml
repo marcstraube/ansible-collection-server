@@ -58,3 +58,6 @@ __postgresql_pgdg_repo_file: '/etc/yum.repos.d/pgdg{{ __postgresql_version }}.re
 # the inventory paths.
 __postgresql_ssl_cert_file: 'server.crt'
 __postgresql_ssl_key_file: 'server.key'
+
+# Directory of the user crontabs (cronie)
+__postgresql_cron_spool_dir: /var/spool/cron

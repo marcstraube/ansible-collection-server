@@ -55,6 +55,11 @@ provisioner:
         # Shared by converge and verify: the OS vars derive package names,
         # service name and paths from it.
         postgresql_repo: 'distro'
+        # Shared by converge, side_effect and verify: side_effect runs the
+        # backup service once next to two older dumps per name, verify
+        # expects the rotation to leave the new dump only and restores it.
+        postgresql_backup_enabled: true
+        postgresql_backup_keep: 1
     host_vars:
       postgresql-archlinux:
         ansible_python_interpreter: /usr/bin/python
@@ -62,6 +67,10 @@ provisioner:
         ansible_python_interpreter: /usr/bin/python3
       postgresql-rocky-9:
         ansible_python_interpreter: /usr/bin/python3
+        # The deprecated retention has to take effect until its removal and
+        # maps onto the count: verify expects the rotation of keep 1.
+        postgresql_backup_keep: 3
+        postgresql_backup_retention: 1
       postgresql-rocky-10:
         ansible_python_interpreter: /usr/bin/python3
   config_options:
