@@ -1,0 +1,211 @@
+---
+#
+# Role Control
+#
+
+# Enable the activepieces role
+activepieces_enabled: false
+
+# Enable and start the activepieces service
+activepieces_service_enabled: true
+
+#
+# Installation
+#
+
+# Activepieces release: the tag of the container image the role runs. The
+# default follows the latest GitHub release and is bumped by the
+# update-activepieces-version workflow once the image tag is published.
+activepieces_version: '0.92.3-hotfix.2'
+
+# Container image and runtime settings
+activepieces_podman_image: 'docker.io/activepieces/activepieces'
+activepieces_podman_pull_policy: 'missing'  # missing, always or never
+activepieces_podman_container_name: 'activepieces'
+activepieces_podman_memory: ''
+activepieces_podman_cpus: ''
+activepieces_podman_extra_args: []
+
+# Subordinate ID range of the activepieces user for rootless podman; it
+# must not overlap with the ranges of other users in /etc/subuid and
+# /etc/subgid (the default follows the range of the n8n role)
+activepieces_subid_start: 165536
+activepieces_subid_count: 65536
+
+#
+# Updates
+#
+# A change of activepieces_version on a host with a deployed Activepieces
+# is an update: the role stops the service, backs up the data, pulls the
+# new image, waits for /api/v1/health and removes the images of the
+# replaced release. Activepieces migrates its database on start, and the
+# migrations are forward-only, so a lower version is refused unless the
+# backup set taken before the upgrade is restored with it
+# (activepieces_update_restore).
+
+# Name of a backup set to restore, e.g.
+# 'activepieces-0.91.4-20261014T120000' or
+# 'activepieces-scheduled-0.91.4-20261015T030000'. Replaces
+# activepieces_data_dir (and recreates the database) from that set and
+# requires activepieces_version to match the version in the set name.
+# One-shot: remove the variable after the run, otherwise the next run
+# restores the same set again.
+activepieces_update_restore: ''
+
+# Seconds to wait for /api/v1/health after a service (re)start; migrations
+# run before the endpoint reports healthy
+activepieces_ready_timeout: 300
+
+# Start timeout of the unit (TimeoutStartSec). The first start after an
+# image change copies the image layers into the user namespace of the
+# activepieces user, which takes minutes on a host whose audit rules
+# throttle the chown of every file.
+activepieces_service_start_timeout: 300
+
+# Remove the images of other releases from the podman storage of the
+# activepieces user after a version change, once Activepieces reports
+# healthy: every tag of activepieces_podman_image except the one the
+# service runs. Images of other containers stay. A failed update keeps the
+# previous image; a restore pulls the image of the backup set again.
+activepieces_update_remove_old_images: true
+
+#
+# Backup
+#
+# A backup set is a subdirectory of activepieces_backup_dir with
+# data.tar.gz (activepieces_data_dir, entries relative to
+# activepieces_user_home) and, with activepieces_db_type 'POSTGRES',
+# db.dump (pg_dump -Fc). The script /usr/local/bin/activepieces-backup
+# writes a set; activepieces-backup.timer runs it on a schedule and the
+# update runs it before a version change or a restore. Scheduled sets are
+# named activepieces-scheduled-<version>-<timestamp>, pre-update sets
+# activepieces-<version>-<timestamp>; the retention is count-based and
+# separate per kind, so a scheduled set never pushes out the set taken
+# before the last update and a failing timer never removes the last good
+# set.
+
+# Back up activepieces_data_dir (and the PostgreSQL database) on the
+# schedule of the timer and before every version change or restore
+activepieces_backup_enabled: true
+
+# Directory for the backup sets
+activepieces_backup_dir: '/var/backups/activepieces'
+
+# Scheduled sets to keep (activepieces-scheduled-<version>-<timestamp>)
+activepieces_backup_keep: 7
+
+# Pre-update sets to keep (activepieces-<version>-<timestamp>)
+activepieces_backup_update_keep: 3
+
+# Stop Activepieces while a scheduled set is written, for a consistent copy
+# of the embedded PGlite database and the data directory; the service
+# starts again afterwards, also when the backup fails. With false the set
+# is taken from the running instance.
+activepieces_backup_stop_service: true
+
+# Enable and start the activepieces-backup timer
+activepieces_backup_timer_enabled: true
+
+# Schedule of the timer (systemd OnCalendar)
+activepieces_backup_on_calendar: 'daily'
+
+#
+# User and Directory
+#
+
+# Run Activepieces as dedicated user
+activepieces_user: 'activepieces'
+activepieces_group: 'activepieces'
+activepieces_user_home: '/var/lib/activepieces'
+activepieces_user_shell: '/usr/sbin/nologin'
+
+# Data directory (AP_CONFIG_PATH: the embedded PGlite database and the
+# instance settings)
+activepieces_data_dir: '{{ activepieces_user_home }}/data'
+
+#
+# Network
+#
+
+# Port Activepieces listens on (AP_PORT). The container publishes it on
+# 127.0.0.1 only; a reverse proxy serves it on its own host name. The
+# image default 80 cannot be bound by a rootless container.
+activepieces_port: 8080
+
+# Public URL of the instance (AP_FRONTEND_URL), REQUIRED: Activepieces
+# builds the webhook and OAuth redirect URLs from it. A host name only,
+# without a path: Activepieces cannot be served under a path prefix.
+# Example: https://activepieces.example.com
+activepieces_frontend_url: ''
+
+#
+# Database
+#
+
+# Database type (AP_DB_TYPE): PGLITE (embedded PostgreSQL in the data
+# directory) or POSTGRES
+activepieces_db_type: 'PGLITE'
+
+# PostgreSQL settings (when activepieces_db_type is 'POSTGRES'). A server
+# on the loopback address of the host is reached through a port forward
+# of the container network (see README).
+activepieces_db_host: 'localhost'
+activepieces_db_port: 5432
+activepieces_db_name: 'activepieces'
+activepieces_db_user: 'activepieces'
+activepieces_db_password: ''
+activepieces_db_ssl: false
+
+# Create the PostgreSQL database and user
+activepieces_db_create: true
+
+# PostgreSQL unit the service requires when activepieces_db_host is an
+# address of the host itself. Empty detects postgresql.service or
+# postgresql-<version>.service (PGDG on Rocky Linux) from the installed
+# unit files; set it when several versions are installed.
+activepieces_db_service: ''
+
+#
+# Security
+#
+
+# Encryption key of the stored connections (AP_ENCRYPTION_KEY), REQUIRED:
+# 32 hexadecimal characters. Losing it means losing every stored
+# connection.
+# Generate with: openssl rand -hex 16
+activepieces_encryption_key: ''
+
+# Secret that signs the session and worker tokens (AP_JWT_SECRET), REQUIRED
+# Generate with: openssl rand -hex 32
+activepieces_jwt_secret: ''
+
+#
+# Execution
+#
+
+# Isolation of flow code (AP_EXECUTION_MODE):
+#   'SANDBOX_CODE_ONLY' - Code steps run in a V8 isolate, without npm
+#                         packages (default).
+#   'UNSANDBOXED'       - No isolation, npm packages allowed; for a single
+#                         trusted tenant only.
+# The kernel namespace modes (SANDBOX_PROCESS, SANDBOX_CODE_AND_PROCESS)
+# need a privileged container and do not work rootless; the role refuses
+# them.
+activepieces_execution_mode: 'SANDBOX_CODE_ONLY'
+
+#
+# Telemetry
+#
+
+# Send usage telemetry to Activepieces (AP_TELEMETRY_ENABLED)
+activepieces_telemetry_enabled: false
+
+#
+# Extra Environment Variables
+#
+
+# Additional AP_* environment variables (dictionary)
+activepieces_extra_env: {}
+# Example:
+#   AP_EXECUTION_DATA_RETENTION_DAYS: '14'
+#   AP_WEBHOOK_TIMEOUT_SECONDS: '60'

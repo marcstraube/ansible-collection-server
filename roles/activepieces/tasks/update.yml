@@ -1,0 +1,200 @@
+---
+# Runs after the backup tasks and before the install tasks: resolves the
+# installed and the target version, refuses downgrades, and on a version
+# change stops the service and takes a pre-update backup set with the
+# backup script. A backup set named in activepieces_update_restore is
+# restored here as well. The install tasks then pull the target image, and
+# service.yml starts Activepieces and waits for the health check.
+
+- name: Update | Set target version fact
+  ansible.builtin.set_fact:
+    __activepieces_target_version: '{{ activepieces_version }}'
+
+#
+# Installed version
+#
+
+- name: Update | Check for the service unit
+  ansible.builtin.stat:
+    path: '/etc/systemd/system/{{ __activepieces_service_name }}'
+  register: __activepieces_unit_stat
+
+# The deployed unit carries the image reference of the running container.
+- name: Update | Read the installed image tag
+  ansible.builtin.slurp:
+    src: '/etc/systemd/system/{{ __activepieces_service_name }}'
+  register: __activepieces_unit_file
+  when: __activepieces_unit_stat.stat.exists
+
+# Releases are X.Y.Z, hotfixes of a release X.Y.Z-hotfix.N. For the
+# comparison both become four numbers (X.Y.Z.0 and X.Y.Z.N), so a hotfix
+# sorts after its release; other tags (release candidates) skip the
+# downgrade guard.
+- name: Update | Set installed version fact
+  ansible.builtin.set_fact:
+    __activepieces_installed_version: >-
+      {{ __activepieces_unit_file.content | default('') | b64decode
+         | regex_findall(activepieces_podman_image | regex_escape ~ ':(\S+)') | default([''], true) | first }}
+
+- name: Update | Set version change facts
+  ansible.builtin.set_fact:
+    __activepieces_version_changed: >-
+      {{ __activepieces_installed_version | length > 0
+         and __activepieces_installed_version != __activepieces_target_version }}
+    __activepieces_downgrade: >-
+      {{ __activepieces_installed_version is match(__activepieces_version_pattern)
+         and __activepieces_target_version is match(__activepieces_version_pattern)
+         and __activepieces_installed_sortable is version(__activepieces_target_sortable, '>') }}
+  vars:
+    __activepieces_installed_sortable: >-
+      {{ (__activepieces_installed_version
+          ~ ('' if '-hotfix.' in __activepieces_installed_version else '.0'))
+         | replace('-hotfix.', '.') }}
+    __activepieces_target_sortable: >-
+      {{ (__activepieces_target_version
+          ~ ('' if '-hotfix.' in __activepieces_target_version else '.0'))
+         | replace('-hotfix.', '.') }}
+
+#
+# Backup sets and guards
+#
+
+- name: Update | List backup sets
+  ansible.builtin.find:
+    paths: '{{ activepieces_backup_dir }}'
+    file_type: directory
+    patterns: 'activepieces-*'
+  register: __activepieces_backup_sets
+  failed_when: false
+
+- name: Update | Refuse a downgrade without a backup set to restore
+  ansible.builtin.assert:
+    that:
+      - not __activepieces_downgrade | bool or activepieces_update_restore | length > 0
+    fail_msg: |
+      Refusing to downgrade Activepieces from {{ __activepieces_installed_version }}
+      to {{ __activepieces_target_version }}: database migrations are
+      forward-only, the older release does not start on the migrated
+      database.
+
+      Restore the backup set taken before the upgrade by setting
+      activepieces_update_restore to its name together with the lower
+      version. Backup sets in {{ activepieces_backup_dir }}:
+      {% for set in __activepieces_backup_sets.files | default([]) | map(attribute='path') | map('basename') | sort %}
+        - {{ set }}
+      {% else %}
+        (none)
+      {% endfor %}
+
+# Both kinds of sets restore: the pre-update set
+# activepieces-<version>-<timestamp> and the scheduled set
+# activepieces-scheduled-<version>-<timestamp>.
+- name: Update | Validate the backup set to restore
+  ansible.builtin.assert:
+    that:
+      - >-
+        activepieces_update_restore
+        in (__activepieces_backup_sets.files | default([]) | map(attribute='path') | map('basename'))
+      - activepieces_update_restore | regex_replace(__activepieces_set_pattern, '\\1') == __activepieces_target_version
+    fail_msg: |
+      activepieces_update_restore '{{ activepieces_update_restore }}' is not a
+      backup set in {{ activepieces_backup_dir }}, or its version does not
+      match the requested Activepieces version {{ __activepieces_target_version }}.
+      A set restores the data of the version in its name
+      (activepieces-<version>-<timestamp> or
+      activepieces-scheduled-<version>-<timestamp>); pin that version
+      alongside.
+  vars:
+    __activepieces_set_pattern: '^activepieces-(?:scheduled-)?(.+)-[0-9]{8}T[0-9]{6}$'
+  when: activepieces_update_restore | length > 0
+
+#
+# Stop and back up before a version change or a restore
+#
+
+- name: Update | Stop Activepieces before the version change
+  ansible.builtin.systemd_service:
+    name: '{{ __activepieces_service_name }}'
+    state: stopped
+  when:
+    - __activepieces_unit_stat.stat.exists
+    - __activepieces_version_changed | bool or activepieces_update_restore | length > 0
+
+# The script writes activepieces-<installed version>-<timestamp> with the
+# service stopped above, keeps the newest activepieces_backup_update_keep
+# pre-update sets and never removes the set named for a restore.
+- name: Update | Take the pre-update backup set
+  ansible.builtin.command:
+    argv: >-
+      {{ [__activepieces_backup_script, 'update']
+         + ([activepieces_update_restore] if activepieces_update_restore | length > 0 else []) }}
+  changed_when: true
+  when:
+    - activepieces_backup_enabled | bool
+    - __activepieces_installed_version | length > 0
+    - __activepieces_version_changed | bool or activepieces_update_restore | length > 0
+
+#
+# Restore
+#
+
+- name: Update | Remove the data directory before the restore
+  ansible.builtin.file:
+    path: '{{ activepieces_data_dir }}'
+    state: absent
+  when: activepieces_update_restore | length > 0
+
+- name: Update | Restore the data directory
+  ansible.builtin.unarchive:
+    src: '{{ activepieces_backup_dir }}/{{ activepieces_update_restore }}/data.tar.gz'
+    dest: '{{ activepieces_data_dir | dirname }}'
+    remote_src: true
+    owner: '{{ activepieces_user }}'
+    group: '{{ activepieces_group }}'
+  when: activepieces_update_restore | length > 0
+
+# The database is recreated rather than restored in place: pg_restore
+# --clean only drops objects contained in the dump, tables of newer
+# migrations would survive.
+- name: Update | Drop the PostgreSQL database before the restore
+  community.postgresql.postgresql_db:
+    name: '{{ activepieces_db_name }}'
+    state: absent
+  become: true
+  become_user: postgres
+  when:
+    - activepieces_update_restore | length > 0
+    - activepieces_db_type == 'POSTGRES'
+
+- name: Update | Recreate the PostgreSQL database
+  community.postgresql.postgresql_db:
+    name: '{{ activepieces_db_name }}'
+    owner: '{{ activepieces_db_user }}'
+    encoding: UTF8
+    lc_collate: en_US.UTF-8
+    lc_ctype: en_US.UTF-8
+    template: template0
+    state: present
+  become: true
+  become_user: postgres
+  when:
+    - activepieces_update_restore | length > 0
+    - activepieces_db_type == 'POSTGRES'
+
+- name: Update | Restore the PostgreSQL database
+  ansible.builtin.shell:
+    cmd: >-
+      runuser -u postgres -- pg_restore -d {{ activepieces_db_name }}
+      < {{ activepieces_backup_dir }}/{{ activepieces_update_restore }}/db.dump
+  changed_when: true
+  when:
+    - activepieces_update_restore | length > 0
+    - activepieces_db_type == 'POSTGRES'
+
+- name: Update | Remind to unset activepieces_update_restore
+  ansible.builtin.debug:
+    msg: >-
+      Backup set {{ activepieces_update_restore }} restored. Remove
+      activepieces_update_restore from the inventory, otherwise the next run
+      restores it again.
+  when: activepieces_update_restore | length > 0

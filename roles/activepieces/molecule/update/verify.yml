@@ -1,0 +1,256 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  vars:
+    # __activepieces_runtime_dir of the role vars is built from the UID
+    # of this user
+    activepieces_user: activepieces
+    __verify_backup_dir: '/var/backups/activepieces'
+    __verify_health_url: 'http://127.0.0.1:{{ activepieces_port }}/api/v1/health'
+
+  tasks:
+    - name: Verify | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Verify | Look up the activepieces user
+      ansible.builtin.getent:
+        database: passwd
+        key: activepieces
+      register: __activepieces_user_entry
+
+    - name: Verify | Load role defaults
+      ansible.builtin.include_vars:
+        file: '../../defaults/main.yml'
+        name: __verify_defaults
+
+    #
+    # After the update and the scheduled runs of side_effect: default
+    # version installed, image of the previous release removed, one
+    # pre-update set of the previous release next to one scheduled set,
+    # service healthy.
+    #
+
+    - name: Verify | Read the running image
+      ansible.builtin.command:
+        cmd: podman ps --filter name=^activepieces$ --format '{{ "{{" }}.Image{{ "}}" }}'
+      register: __verify_version
+      changed_when: false
+      become: true
+      become_user: activepieces
+      environment:
+        XDG_RUNTIME_DIR: '{{ __activepieces_runtime_dir }}'
+
+    - name: Verify | Assert the role default is running
+      ansible.builtin.assert:
+        that:
+          - __verify_version.stdout | trim == __verify_image ~ ':' ~ __verify_defaults.activepieces_version
+        fail_msg: >-
+          Running {{ __verify_version.stdout | trim }},
+          expected {{ __verify_image }}:{{ __verify_defaults.activepieces_version }}
+      vars:
+        __verify_image: '{{ __verify_defaults.activepieces_podman_image }}'
+
+    - name: Verify | List the images of the activepieces user
+      ansible.builtin.command:
+        cmd: podman images --format '{{ "{{" }}.Repository{{ "}}" }}:{{ "{{" }}.Tag{{ "}}" }}'
+      register: __verify_images
+      changed_when: false
+      become: true
+      become_user: activepieces
+      environment:
+        XDG_RUNTIME_DIR: '{{ __activepieces_runtime_dir }}'
+
+    # Only the tag of the role default remains in the repository of the
+    # role; the tag of another repository survives.
+    - name: Verify | Assert the image of the previous release is removed
+      ansible.builtin.assert:
+        that:
+          - __verify_image ~ ':' ~ __verify_expected_version in __verify_images.stdout_lines
+          - __verify_images.stdout_lines | select('match', '^' ~ __verify_image ~ ':') | list | length == 1
+          - activepieces_update_unrelated_image in __verify_images.stdout_lines
+        fail_msg: 'Images: {{ __verify_images.stdout_lines }}'
+      # __verify_version is the registered image of the running container
+      # above; a task var of that name would be shadowed by it
+      vars:
+        __verify_image: '{{ __verify_defaults.activepieces_podman_image }}'
+        __verify_expected_version: '{{ __verify_defaults.activepieces_version }}'
+
+    - name: Verify | List backup sets
+      ansible.builtin.find:
+        paths: '{{ __verify_backup_dir }}'
+        file_type: directory
+        patterns: 'activepieces-*'
+      register: __verify_sets
+
+    # The scheduled retention of 1 removed the first scheduled set only;
+    # the pre-update set of the update is of the other kind and stays.
+    - name: Verify | Assert the pre-update set survived the scheduled retention
+      ansible.builtin.assert:
+        that:
+          - __verify_set_names | length == 2
+          - >-
+            __verify_set_names
+            | select('match', '^activepieces-scheduled-' ~ __verify_version_re ~ '-[0-9]{8}T[0-9]{6}$')
+            | list | length == 1
+          - >-
+            __verify_set_names
+            | select('match', '^activepieces-' ~ __verify_previous_re ~ '-[0-9]{8}T[0-9]{6}$')
+            | list | length == 1
+        fail_msg: 'Backup sets: {{ __verify_set_names }}'
+      vars:
+        __verify_set_names: "{{ __verify_sets.files | map(attribute='path') | map('basename') | list }}"
+        __verify_version_re: '{{ __verify_defaults.activepieces_version | regex_escape }}'
+        __verify_previous_re: '{{ activepieces_update_previous_version | regex_escape }}'
+
+    - name: Verify | Set the pre-update set fact
+      ansible.builtin.set_fact:
+        __verify_update_set: >-
+          {{ __verify_sets.files | map(attribute='path')
+             | reject('search', '/activepieces-scheduled-') | first }}
+
+    # Listing an archive has no module equivalent.
+    - name: Verify | Assert the backup archives contain the PGlite database  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        cmd: 'tar -tzf {{ item }}/data.tar.gz data/pglite/'
+      changed_when: false
+      loop: "{{ __verify_sets.files | map(attribute='path') | list }}"
+
+    - name: Verify | Assert Activepieces reports healthy
+      ansible.builtin.uri:
+        url: '{{ __verify_health_url }}'
+        status_code: 200
+
+    #
+    # Downgrade guard: pinning the previous release without a backup set
+    # to restore fails at the assert in update.yml.
+    #
+
+    - name: Verify | Run the role with the previous release pinned
+      block:
+        - name: Verify | Include activepieces role (downgrade)  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            activepieces_version: '{{ activepieces_update_previous_version }}'
+      rescue:
+        - name: Verify | Record the downgrade failure
+          ansible.builtin.set_fact:
+            __verify_downgrade_msg: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Assert the downgrade was refused
+      ansible.builtin.assert:
+        that:
+          - __verify_downgrade_msg is defined
+          - "'Refusing to downgrade Activepieces' in __verify_downgrade_msg"
+        fail_msg: 'Downgrade result: {{ __verify_downgrade_msg | default("role run succeeded") }}'
+
+    - name: Verify | Assert the default version is still installed and healthy
+      ansible.builtin.uri:
+        url: '{{ __verify_health_url }}'
+        status_code: 200
+
+    #
+    # Restore: the backup set together with the matching pin brings the
+    # previous release back; the current state is backed up first. The
+    # update removed the image of the previous release, so the restore
+    # pulls it again and removes the image of the newer release in turn.
+    #
+
+    # Two older pre-update sets: with activepieces_backup_update_keep 2 the
+    # pre-update rotation of the restore keeps the newer of the two besides
+    # the set it restores (never removed) and the set it writes.
+    - name: Verify | Create older pre-update sets
+      ansible.builtin.file:
+        path: '{{ __verify_backup_dir }}/{{ item.name }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+        modification_time: '{{ item.mtime }}'
+        access_time: '{{ item.mtime }}'
+      loop:
+        - { name: 'activepieces-0.89.0-20250101T000000', mtime: '202501010000.00' }
+        - { name: 'activepieces-0.90.4-20250102T000000', mtime: '202501020000.00' }
+      loop_control:
+        label: '{{ item.name }}'
+
+    - name: Verify | Include activepieces role (restore)  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        activepieces_version: '{{ activepieces_update_previous_version }}'
+        activepieces_update_restore: '{{ __verify_update_set | basename }}'
+
+    - name: Verify | Read the running image after the restore
+      ansible.builtin.command:
+        cmd: podman ps --filter name=^activepieces$ --format '{{ "{{" }}.Image{{ "}}" }}'
+      register: __verify_restored_version
+      changed_when: false
+      become: true
+      become_user: activepieces
+      environment:
+        XDG_RUNTIME_DIR: '{{ __activepieces_runtime_dir }}'
+
+    - name: Verify | Assert the previous release is running again
+      ansible.builtin.assert:
+        that:
+          - >-
+            __verify_restored_version.stdout | trim
+            == __verify_defaults.activepieces_podman_image ~ ':' ~ activepieces_update_previous_version
+
+    - name: Verify | List backup sets after the restore
+      ansible.builtin.find:
+        paths: '{{ __verify_backup_dir }}'
+        file_type: directory
+        patterns: 'activepieces-*'
+      register: __verify_sets_after
+
+    # The restore took a pre-update set of the state before it; with the
+    # pre-update retention of 2 the older of the two created sets is gone,
+    # the restored set is untouched and the scheduled set is of the other
+    # kind.
+    - name: Verify | Assert the state before the restore was backed up
+      ansible.builtin.assert:
+        that:
+          - __verify_update_sets_after | length == 3
+          - "'activepieces-0.89.0-20250101T000000' not in __verify_update_sets_after"
+          - "'activepieces-0.90.4-20250102T000000' in __verify_update_sets_after"
+          - __verify_update_set | basename in __verify_update_sets_after
+          - >-
+            __verify_update_sets_after
+            | select('match', '^activepieces-' ~ __verify_version_re ~ '-') | list | length == 1
+          - __verify_set_names_after | select('match', '^activepieces-scheduled-') | list | length == 1
+        fail_msg: 'Backup sets: {{ __verify_set_names_after }}'
+      vars:
+        __verify_set_names_after: "{{ __verify_sets_after.files | map(attribute='path') | map('basename') | list }}"
+        __verify_update_sets_after: >-
+          {{ __verify_set_names_after | reject('match', '^activepieces-scheduled-') | list }}
+        __verify_version_re: '{{ __verify_defaults.activepieces_version | regex_escape }}'
+
+    - name: Verify | Assert Activepieces reports healthy after the restore
+      ansible.builtin.uri:
+        url: '{{ __verify_health_url }}'
+        status_code: 200
+
+    - name: Verify | List the images of the activepieces user after the restore
+      ansible.builtin.command:
+        cmd: podman images --format '{{ "{{" }}.Repository{{ "}}" }}:{{ "{{" }}.Tag{{ "}}" }}'
+      register: __verify_images_after
+      changed_when: false
+      become: true
+      become_user: activepieces
+      environment:
+        XDG_RUNTIME_DIR: '{{ __activepieces_runtime_dir }}'
+
+    - name: Verify | Assert only the image of the restored release remains
+      ansible.builtin.assert:
+        that:
+          - __verify_image ~ ':' ~ activepieces_update_previous_version in __verify_images_after.stdout_lines
+          - __verify_images_after.stdout_lines | select('match', '^' ~ __verify_image ~ ':') | list | length == 1
+          - activepieces_update_unrelated_image in __verify_images_after.stdout_lines
+        fail_msg: 'Images: {{ __verify_images_after.stdout_lines }}'
+      vars:
+        __verify_image: '{{ __verify_defaults.activepieces_podman_image }}'

@@ -1,0 +1,110 @@
+---
+# Activepieces refuses to start without both secrets; the format check of
+# the encryption key is the one Activepieces applies on startup.
+- name: Main | Validate the secrets are set
+  ansible.builtin.assert:
+    that:
+      - activepieces_encryption_key is match('^[A-Za-z0-9]{32}$')
+      - activepieces_jwt_secret | length > 0
+    fail_msg: |
+      activepieces_encryption_key (32 hexadecimal characters) and
+      activepieces_jwt_secret must be set.
+      Generate them with: openssl rand -hex 16 (encryption key)
+                          openssl rand -hex 32 (JWT secret)
+      Store them in the vault.
+  when:
+    - activepieces_enabled | bool
+  tags:
+    - always
+
+# Webhook and redirect URLs are built from the public URL; Activepieces
+# serves its frontend and API from the root, so a path is not supported.
+- name: Main | Validate the public URL
+  ansible.builtin.assert:
+    that:
+      - activepieces_frontend_url is match('^https?://[^/]+/?$')
+    fail_msg: |
+      activepieces_frontend_url must be set to the public URL of the
+      instance without a path, e.g. https://activepieces.example.com.
+      Activepieces cannot be served under a URL path prefix.
+  when:
+    - activepieces_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate the execution and database settings
+  ansible.builtin.assert:
+    that:
+      - activepieces_execution_mode in ['SANDBOX_CODE_ONLY', 'UNSANDBOXED']
+      - activepieces_db_type in ['PGLITE', 'POSTGRES']
+      - activepieces_db_type != 'POSTGRES' or activepieces_db_password | length > 0
+    fail_msg: |
+      activepieces_execution_mode must be SANDBOX_CODE_ONLY or UNSANDBOXED:
+      the kernel namespace modes need a privileged container.
+      activepieces_db_type must be PGLITE or POSTGRES, and POSTGRES needs
+      activepieces_db_password.
+  when:
+    - activepieces_enabled | bool
+  tags:
+    - always
+
+# The runtime directory of rootless podman is named after the UID of the
+# Activepieces user; every sub-tag path needs it. install.yml repeats the
+# lookup once the user exists.
+- name: Main | Look up the Activepieces user
+  ansible.builtin.getent:
+    database: passwd
+    key: '{{ activepieces_user }}'
+    fail_key: false
+  register: __activepieces_user_entry
+  when:
+    - activepieces_enabled | bool
+  tags:
+    - always
+
+- name: Main | Import backup tasks
+  ansible.builtin.import_tasks: backup.yml
+  when: activepieces_enabled | bool
+  tags:
+    - activepieces
+    - activepieces:backup
+
+# Shares the install tag: a pull of a new image always runs behind the
+# version change guard, the stop and the pre-update backup.
+- name: Main | Import update tasks
+  ansible.builtin.import_tasks: update.yml
+  when: activepieces_enabled | bool
+  tags:
+    - activepieces
+    - activepieces:install
+
+- name: Main | Import install tasks
+  ansible.builtin.import_tasks: install.yml
+  when: activepieces_enabled | bool
+  tags:
+    - activepieces
+    - activepieces:install
+
+- name: Main | Import database tasks
+  ansible.builtin.import_tasks: database.yml
+  when:
+    - activepieces_enabled | bool
+    - activepieces_db_type == 'POSTGRES'
+    - activepieces_db_create | bool
+  tags:
+    - activepieces
+    - activepieces:database
+
+- name: Main | Import configure tasks
+  ansible.builtin.import_tasks: configure.yml
+  when: activepieces_enabled | bool
+  tags:
+    - activepieces
+    - activepieces:configure
+
+- name: Main | Import service tasks
+  ansible.builtin.import_tasks: service.yml
+  when: activepieces_enabled | bool
+  tags:
+    - activepieces
+    - activepieces:service

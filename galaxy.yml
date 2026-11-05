@@ -7,9 +7,9 @@ authors:
   - Marc Straube <email@marcstraube.de>
 description: >-
   Ansible roles for self-hosted server infrastructure: nginx, Apache, Let's
-  Encrypt certificates, PostgreSQL, MariaDB, and n8n workflow automation. Supports
-  Arch Linux, Debian Trixie, and Rocky Linux 9/10. Built for ansible-core
-  2.19+ on top of marcstraube.common.
+  Encrypt certificates, PostgreSQL, MariaDB, and n8n and Activepieces workflow
+  automation. Supports Arch Linux, Debian Trixie, and Rocky Linux 9/10. Built
+  for ansible-core 2.19+ on top of marcstraube.common.
 license_file: LICENSE
 tags:
   - linux
@@ -25,6 +25,7 @@ tags:
   - postgresql
   - mariadb
   - n8n
+  - activepieces
   - podman
 repository: https://github.com/marcstraube/ansible-collection-server
 documentation: https://github.com/marcstraube/ansible-collection-server
