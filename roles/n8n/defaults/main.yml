@@ -168,7 +168,7 @@ n8n_path: '/'
 # Database
 #
 
-# Database type: sqlite, postgresdb, mysqldb, mariadb
+# Database type: sqlite, postgresdb
 # SECURITY: Use PostgreSQL for production
 n8n_db_type: 'sqlite'
 

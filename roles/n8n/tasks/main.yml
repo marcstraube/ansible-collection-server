@@ -101,6 +101,21 @@
   tags:
     - always
 
+# n8n 2.0 removed MySQL and MariaDB as databases for its own data; an
+# n8n configured with one of them does not start.
+- name: Main | Validate the database type
+  ansible.builtin.assert:
+    that:
+      - n8n_db_type in ['sqlite', 'postgresdb']
+    fail_msg: |
+      n8n_db_type must be 'sqlite' or 'postgresdb', not '{{ n8n_db_type }}':
+      n8n 2.0 removed MySQL and MariaDB. Migrate the data to PostgreSQL or
+      SQLite with n8n before upgrading, then set n8n_db_type accordingly.
+  when:
+    - n8n_enabled | bool
+  tags:
+    - always
+
 - name: Main | Validate encryption key is set
   ansible.builtin.assert:
     that:

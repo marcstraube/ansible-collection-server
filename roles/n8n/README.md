@@ -59,7 +59,7 @@ See [defaults/main.yml](defaults/main.yml) for all available variables.
 | `n8n_podman_image`       | `n8nio/n8n`   | Container image (`docker.io/n8nio/n8n`)                |
 | `n8n_host`               | `'127.0.0.1'` | Listen address                                         |
 | `n8n_port`               | `5678`        | Listen port                                            |
-| `n8n_db_type`            | `'sqlite'`    | Database: `sqlite`, `postgresdb`, `mysqldb`, `mariadb` |
+| `n8n_db_type`            | `'sqlite'`    | Database: `sqlite` or `postgresdb`                     |
 | `n8n_encryption_key`     | `''`          | **REQUIRED** — credential encryption key               |
 | `n8n_runners_auth_token` | `''`          | **REQUIRED** — shared secret of n8n and task runners   |
 | `n8n_firewalld_enabled`  | `true`        | Deprecated — firewalld rule for the n8n port           |
@@ -280,6 +280,10 @@ them explicitly.
 - Default listen address is localhost — use a reverse proxy for external access.
 
 ### Database Configuration
+
+n8n stores its own data in SQLite or PostgreSQL. n8n 2.0 removed MySQL and
+MariaDB, so the role refuses any other `n8n_db_type`; migrate such a setup
+to PostgreSQL or SQLite with n8n before upgrading.
 
 When using `n8n_db_type: postgresdb`, the `marcstraube.server.postgresql` role
 must run before this role. The n8n role creates its own database and user via
