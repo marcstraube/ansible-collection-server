@@ -85,9 +85,10 @@ __apache_modules: >-
 # exclusive vhost pruning must leave them alone.
 __apache_vhosts_dir_role_files: >-
   {{
-    ['autoindex.conf']
-    if (ansible_facts['os_family'] == 'RedHat' and 'autoindex' not in __apache_modules)
-    else []
+    (['ssl.conf'] if ansible_facts['os_family'] == 'RedHat' else [])
+    + (['autoindex.conf']
+       if (ansible_facts['os_family'] == 'RedHat' and 'autoindex' not in __apache_modules)
+       else [])
   }}
 
 # PHP-FPM handler address for the server-wide block. Same rule as in
