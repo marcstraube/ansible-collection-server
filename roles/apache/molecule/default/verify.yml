@@ -767,3 +767,49 @@
         __verify_update_starts: >-
           {{ __verify_update_journal.stdout_lines | select('match', '^Started ') | list }}
       when: __verify_version_rolled_back != __verify_version_latest
+
+    #
+    # Package update (RedHat). A mod_ssl update restores a deleted conf.d/ssl.conf,
+    # whose Listen 443 then clashes with the role's own. Reinstalling the package
+    # stands in for the update: the neutralized file must come through unchanged
+    # and the configuration must stay valid.
+    #
+
+    - name: Verify | Read ssl.conf before the reinstall (RedHat)
+      ansible.builtin.slurp:
+        src: '{{ __apache_vhosts_dir }}/ssl.conf'
+      register: __apache_ssl_conf_before
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Verify | Reinstall mod_ssl like a package update (RedHat)
+      ansible.builtin.command:
+        cmd: dnf reinstall -y mod_ssl
+      register: __apache_ssl_reinstall
+      changed_when: __apache_ssl_reinstall.rc == 0
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Verify | Read ssl.conf after the reinstall (RedHat)
+      ansible.builtin.slurp:
+        src: '{{ __apache_vhosts_dir }}/ssl.conf'
+      register: __apache_ssl_conf_after
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Verify | Validate Apache configuration after the reinstall (RedHat)
+      ansible.builtin.command:
+        cmd: apachectl configtest
+      register: __apache_configtest_update
+      changed_when: false
+      failed_when: false
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Verify | Assert the neutralized ssl.conf survives a package update (RedHat)
+      ansible.builtin.assert:
+        that:
+          - __apache_ssl_conf_after.content == __apache_ssl_conf_before.content
+          - __apache_configtest_update.rc == 0
+        fail_msg: >-
+          ssl.conf {{ 'unchanged' if __apache_ssl_conf_after.content == __apache_ssl_conf_before.content
+                      else 'replaced by the package' }};
+          configtest: {{ __apache_configtest_update.stderr | default('') | trim }}
+        success_msg: 'ssl.conf stays neutral after a mod_ssl update, the configuration is valid'
+      when: ansible_facts['os_family'] == 'RedHat'

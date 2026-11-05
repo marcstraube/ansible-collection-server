@@ -9,7 +9,7 @@
 # SSL vhosts count as managed even while their certificate is still pending —
 # the config file may not exist yet, but the vhost is not orphaned.
 # Non-vhost files the role itself keeps in the vhost directory (the
-# neutralized autoindex.conf on RedHat) are never orphans either.
+# neutralized ssl.conf and autoindex.conf on RedHat) are never orphans either.
 - name: Vhosts Exclusive | Build list of managed vhost config file names
   ansible.builtin.set_fact:
     __apache_vhosts_managed_files: >-

@@ -243,7 +243,10 @@ automatically.
 On EL and Arch Linux the role writes one `LoadModule` line per module into
 `httpd.conf`; the package's `conf.modules.d` is not included. Because the
 package's `conf.d/autoindex.conf` uses directives of `mod_autoindex`, the role
-replaces it with an empty file while `autoindex` is not loaded.
+replaces it with an empty file while `autoindex` is not loaded. On EL the role
+also replaces the `conf.d/ssl.conf` of `mod_ssl` with an empty file, whether
+SSL is enabled or not: the SSL configuration lives in `httpd.conf` and the
+SSL vhosts. Both replaced files survive package updates.
 
 On Debian the role enables the modules with `a2enmod`. Modules the `apache2`
 package enables by default but nothing needs are disabled with `a2dismod`.

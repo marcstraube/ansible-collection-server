@@ -86,13 +86,20 @@
     - __apache_config_deployed.content is defined
     - __apache_server_limit_deployed != __apache_server_limit_wanted
 
-- name: Configure | Remove default SSL config (RedHat)
-  ansible.builtin.file:
-    path: '{{ __apache_vhosts_dir }}/ssl.conf'
-    state: absent
-  when:
-    - ansible_facts['os_family'] == 'RedHat'
-    - apache_ssl_enabled | bool
+# mod_ssl ships conf.d/ssl.conf with its own Listen 443 and default vhost,
+# and its directives stop Apache from starting while ssl is not loaded.
+# Deleting the file is not enough: a mod_ssl update restores it. Like
+# autoindex.conf it is replaced with a neutral file, which rpm keeps
+# (%config(noreplace) writes ssl.conf.rpmnew instead). Deployed regardless of
+# apache_ssl_enabled, because mod_ssl stays installed when SSL is turned off.
+- name: Configure | Neutralize the package ssl.conf (RedHat)
+  ansible.builtin.template:
+    src: 'ssl.conf.j2'
+    dest: '{{ __apache_vhosts_dir }}/ssl.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  when: ansible_facts['os_family'] == 'RedHat'
   notify: Reload Apache
 
 # Proxy modules are not in apache_modules_enabled by default, yet both the
