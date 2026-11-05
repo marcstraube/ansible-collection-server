@@ -212,22 +212,45 @@ mariadb_users: []
 #
 # Backup
 #
+# The script /usr/local/bin/mariadb-backup writes one compressed
+# mariadb-dump per database to mariadb_backup_dir, named
+# <database>_<YYYYmmdd_HHMMSS>.sql.gz; mariadb-backup.timer runs it on a
+# schedule and a restore runs it first for the database it replaces. The
+# retention is count-based per database.
 
-# Enable the scheduled backup (one mariadb-dump per database, cron)
+# Enable the scheduled backup (mariadb-backup.timer)
 mariadb_backup_enabled: false
 
 # Backup directory
 mariadb_backup_dir: '/var/backups/mariadb'
 
-# Backup schedule (cron format)
-mariadb_backup_schedule: '0 3 * * *'
-
-# Backup sets to keep per database (count-based: the newest N dumps stay,
-# older ones are removed after each successful run)
-mariadb_backup_retention: 7
+# Dumps to keep per database (the newest N stay, older ones are removed
+# after each successful dump)
+mariadb_backup_keep: 7
 
 # Databases to back up (empty = all except the system schemas)
 mariadb_backup_databases: []
+
+# Enable and start the mariadb-backup timer
+mariadb_backup_timer_enabled: true
+
+# Schedule of the timer (systemd OnCalendar)
+mariadb_backup_on_calendar: '*-*-* 03:00:00'
+
+# Dump file in mariadb_backup_dir to restore, e.g.
+# 'myapp_20261104_000000.sql.gz'. The database must be managed through
+# mariadb_databases: the role takes a fresh dump of it, drops and recreates
+# it and loads the dump. One-shot: pass it with -e for one run, never set it
+# in inventory.
+mariadb_restore: ''
+
+# DEPRECATED: Use mariadb_backup_keep instead (removed in the next major version)
+# mariadb_backup_retention: {{ mariadb_backup_keep }}
+
+# DEPRECATED: Use mariadb_backup_on_calendar instead (removed in the next
+# major version). While set (cron format, e.g. '0 3 * * *'), the backup runs
+# from a cron job instead of the timer.
+# mariadb_backup_schedule: '0 3 * * *'
 
 #
 # Extra Configuration

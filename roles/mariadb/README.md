@@ -10,7 +10,8 @@ Foundation repository, deploys a configuration drop-in (utf8mb4, InnoDB,
 connection and logging settings, optional TLS), locks the root account to
 unix socket authentication, removes the anonymous users and the test
 database, and manages databases and users. An optional count-based backup
-dumps every database on a schedule.
+dumps every database from a systemd timer, and a restore loads one of
+these dumps back into its database.
 
 ## Requirements
 
@@ -65,7 +66,7 @@ See [defaults/main.yml](defaults/main.yml) for all available variables.
 | `mariadb_ssl_enabled`             | `false`                | Enable TLS (see TLS section below)             |
 | `mariadb_databases`               | `[]`                   | Databases to create                            |
 | `mariadb_users`                   | `[]`                   | Users to create                                |
-| `mariadb_backup_enabled`          | `false`                | Enable the scheduled backup                    |
+| `mariadb_backup_enabled`          | `false`                | Enable the scheduled backup (timer)            |
 | `mariadb_extra_config`            | `{}`                   | Extra `[mysqld]` options                       |
 
 ### `mariadb_repo` — Distribution packages vs. upstream
@@ -245,25 +246,74 @@ certbot timer runs outside of Ansible — add the MariaDB service unit to
 
 ### Backup
 
-| Variable                   | Default                  | Description                            |
-| -------------------------- | ------------------------ | -------------------------------------- |
-| `mariadb_backup_enabled`   | `false`                  | Enable the scheduled backup            |
-| `mariadb_backup_dir`       | `'/var/backups/mariadb'` | Backup directory (mode `0700`, root)   |
-| `mariadb_backup_schedule`  | `'0 3 * * *'`            | Schedule (cron format)                 |
-| `mariadb_backup_retention` | `7`                      | Dumps to keep per database             |
-| `mariadb_backup_databases` | `[]`                     | Databases to dump (empty = all)        |
+The role deploys `/usr/local/bin/mariadb-backup`, which writes one
+`mariadb-dump --single-transaction --routines --triggers --events` per
+database, compressed with gzip, to
+`<mariadb_backup_dir>/<database>_<YYYYmmdd_HHMMSS>.sql.gz` (root, mode
+`0600`). It runs as root and authenticates through the unix socket, so no
+password file is needed. An empty `mariadb_backup_databases` dumps every
+database except the system schemas (`information_schema`,
+`performance_schema`, `mysql`, `sys`). The dumps hold the data of each
+database, not the users and grants.
 
-The script `/usr/local/bin/mariadb-backup.sh` runs as root from cron and
-writes one `mariadb-dump --single-transaction --routines --triggers
---events` per database, compressed with gzip, to
-`<dir>/<database>_<timestamp>.sql.gz`. An empty `mariadb_backup_databases`
-dumps every database except the system schemas (`information_schema`,
-`performance_schema`, `mysql`, `sys`). The rotation is count-based: after
-each run the newest `mariadb_backup_retention` dumps of every database
-stay, so a failing schedule never removes the last good set. The dumps
-hold the data of each database, not the users and grants. A cron daemon
-must be installed. For encrypted offsite backups consider
+`mariadb-backup.timer` starts the oneshot `mariadb-backup.service` on
+`mariadb_backup_on_calendar` (`Persistent=true`, so a run missed while the
+host was down follows at the next boot). `systemctl start
+mariadb-backup.service` takes a backup at any time and returns once the
+dumps are written. The rotation is count-based per database: after each
+dump the newest `mariadb_backup_keep` dumps of that database stay, so a
+failing schedule never removes the last good dump.
+
+| Variable                       | Default                  | Description                                   |
+| ------------------------------ | ------------------------ | --------------------------------------------- |
+| `mariadb_backup_enabled`       | `false`                  | Run the backup from the timer                 |
+| `mariadb_backup_dir`           | `'/var/backups/mariadb'` | Backup directory (mode `0700`, root)          |
+| `mariadb_backup_keep`          | `7`                      | Dumps to keep per database                    |
+| `mariadb_backup_databases`     | `[]`                     | Databases to dump (empty = all)               |
+| `mariadb_backup_timer_enabled` | `true`                   | Enable and start `mariadb-backup.timer`       |
+| `mariadb_backup_on_calendar`   | `'*-*-* 03:00:00'`       | Schedule of the timer (systemd `OnCalendar`)  |
+| `mariadb_restore`              | `''`                     | Dump to restore, passed with `-e` (see below) |
+
+The script and the units are deployed on every run, also with
+`mariadb_backup_enabled: false`, which stops and disables the timer; the
+existing dumps stay. The role never removes a dump other than through the
+rotation.
+
+> **Deprecation:** `mariadb_backup_retention` is the former name of
+> `mariadb_backup_keep`, and `mariadb_backup_schedule` (cron format) is
+> replaced by `mariadb_backup_on_calendar`. Both will be removed in the
+> next major version, and every run prints a deprecation warning while one
+> of them is set. Until then a set `mariadb_backup_retention` takes effect
+> as the value of `mariadb_backup_keep`. While `mariadb_backup_schedule` is
+> set, the role keeps the `MariaDB backup` cron job of root (now running
+> `/usr/local/bin/mariadb-backup`, a cron daemon must be installed) and
+> leaves the timer stopped; once it is removed from the inventory, the role
+> removes the cron job and starts the timer.
+
+A host backup takes the dumps instead of the running data directory: it
+runs `systemctl start mariadb-backup.service` as its pre-sync step and
+copies `mariadb_backup_dir`. For encrypted offsite backups consider
 `marcstraube.common.restic`.
+
+#### Restore
+
+`mariadb_restore` names a dump in `mariadb_backup_dir`. It is passed with
+`-e` for one run, never set in the inventory:
+
+```bash
+ansible-playbook site.yml --tags mariadb -l db1 \
+  -e mariadb_restore=myapp_20261104_000000.sql.gz
+```
+
+The database in the dump name must be managed through `mariadb_databases`
+and the server must run (`mariadb_service_enabled`); otherwise the run fails
+before any change. The role first takes a fresh dump of that database
+(`mariadb-backup myapp myapp_20261104_000000.sql.gz`, whose rotation never
+removes the named dump), then drops the database, recreates it with the
+encoding and collation of its `mariadb_databases` entry and loads the dump.
+The server keeps running; clients of the database see it empty while the
+dump loads. Users and grants are not part of the dump and stay as they are.
+To undo a restore, restore the fresh dump the same way.
 
 ### Extra Configuration
 
@@ -286,7 +336,8 @@ mariadb_extra_config:
 | `mariadb:service`   | Systemd service management                         |
 | `mariadb:users`     | Root authentication, anonymous users, users        |
 | `mariadb:databases` | Test database removal, databases                   |
-| `mariadb:backup`    | Backup script and cron setup                       |
+| `mariadb:backup`    | Backup script and timer                            |
+| `mariadb:restore`   | Restore of a dump (with `mariadb_restore`)         |
 
 ## Example Playbook
 
@@ -325,7 +376,8 @@ molecule verify
 ```
 
 Driver: `podman` | Scenarios: `default` (distribution packages, all
-platforms, with the targeted package update), `upstream`
+platforms, with the targeted package update, the scheduled backup and a
+restore), `upstream`
 (`mariadb_repo: 'upstream'`, `mariadb-lts` on Arch Linux).
 
 ## Notes
@@ -365,6 +417,10 @@ Debian and Arch Linux unless `mariadb_log_error` is set.
 The role never uninstalls packages and never deletes data. To remove
 MariaDB from a host, stop and disable `mariadb.service`, remove the
 packages, and delete `/var/lib/mysql` and the backup directory by hand.
+
+Earlier versions of the role ran the backup as
+`/usr/local/bin/mariadb-backup.sh`. The script is no longer used and the
+role leaves it in place; remove it by hand.
 
 ## References
 

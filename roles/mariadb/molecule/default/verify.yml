@@ -155,6 +155,122 @@
       changed_when: false
 
     #
+    # Backup and restore: side_effect seeded old dumps, ran the scheduled
+    # backup with one dump kept per database, changed the data and restored
+    # the scheduled dump; the restore took a fresh dump first.
+    #
+
+    - name: Verify | Stat the backup script
+      ansible.builtin.stat:
+        path: '{{ __mariadb_backup_script }}'
+      register: __verify_backup_script
+
+    - name: Verify | Assert the backup script is deployed
+      ansible.builtin.assert:
+        that:
+          - __verify_backup_script.stat.exists
+          - __verify_backup_script.stat.mode == '0750'
+          - __verify_backup_script.stat.pw_name == 'root'
+        fail_msg: '{{ __mariadb_backup_script }} is missing or has wrong permissions'
+        success_msg: '{{ __mariadb_backup_script }} exists with correct permissions'
+
+    - name: Verify | Read the backup timer state
+      ansible.builtin.systemd_service:
+        name: '{{ __mariadb_backup_timer_name }}'
+      register: __verify_backup_timer
+
+    - name: Verify | Assert the backup timer is enabled and active
+      ansible.builtin.assert:
+        that:
+          - __verify_backup_timer.status.UnitFileState == 'enabled'
+          - __verify_backup_timer.status.ActiveState == 'active'
+        fail_msg: >-
+          UnitFileState={{ __verify_backup_timer.status.UnitFileState }}
+          ActiveState={{ __verify_backup_timer.status.ActiveState }}
+        success_msg: '{{ __mariadb_backup_timer_name }} is enabled and active'
+
+    - name: Verify | List the dumps
+      ansible.builtin.find:
+        paths: /var/backups/mariadb
+        patterns: '*.sql.gz'
+      register: __verify_dumps
+
+    # The scheduled dump (the restored one, protected from the rotation)
+    # and the fresh dump of the restore remain; the seeded old dump of
+    # testdb is rotated out, the dump of testdb_old is not one of testdb.
+    - name: Verify | Assert the rotation kept the expected dumps
+      ansible.builtin.assert:
+        that:
+          - __verify_testdb_dumps | length == 2
+          - "'testdb_20000101_000000.sql.gz' not in __verify_dump_names"
+          - "'testdb_old_20000101_000000.sql.gz' in __verify_dump_names"
+        fail_msg: 'Dumps: {{ __verify_dump_names }}'
+        success_msg: 'Dumps: {{ __verify_dump_names }}'
+      vars:
+        __verify_dump_names: '{{ __verify_dumps.files | map(attribute="path") | map("basename") | sort }}'
+        __verify_testdb_dumps: >-
+          {{ __verify_dump_names | select('match', '^testdb_[0-9]{8}_[0-9]{6}\.sql\.gz$') | list }}
+
+    - name: Verify | Stat the newest dump of testdb
+      ansible.builtin.stat:
+        path: '/var/backups/mariadb/{{ __verify_newest_dump }}'
+      vars:
+        __verify_newest_dump: >-
+          {{ __verify_dumps.files | map(attribute='path') | map('basename')
+             | select('match', '^testdb_[0-9]{8}_[0-9]{6}\.sql\.gz$') | sort | last }}
+      register: __verify_newest_dump_stat
+
+    - name: Verify | Assert the dump is root-only
+      ansible.builtin.assert:
+        that:
+          - __verify_newest_dump_stat.stat.mode == '0600'
+          - __verify_newest_dump_stat.stat.pw_name == 'root'
+        fail_msg: >-
+          {{ __verify_newest_dump_stat.stat.path }} has mode
+          {{ __verify_newest_dump_stat.stat.mode }}, owner
+          {{ __verify_newest_dump_stat.stat.pw_name }}
+
+    # The fresh dump of the restore holds the row written after the
+    # scheduled dump. Searching a compressed dump has no module equivalent.
+    - name: Verify | Assert the restore took a fresh dump first  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        argv:
+          - zgrep
+          - '-q'
+          - after-dump
+          - '{{ __verify_newest_dump_stat.stat.path }}'
+      changed_when: false
+
+    - name: Verify | Query the restored data
+      ansible.mariadb.mariadb_query:
+        query:
+          - SELECT id, state FROM restore_check ORDER BY id
+        login_unix_socket: '{{ __mariadb_socket }}'
+        login_db: testdb
+      register: __verify_restored
+
+    - name: Verify | Assert the restore loaded the scheduled dump
+      ansible.builtin.assert:
+        that:
+          - __verify_restored.query_result[0] | length == 1
+          - __verify_restored.query_result[0][0]['state'] == 'dumped'
+        fail_msg: 'restore_check holds {{ __verify_restored.query_result[0] }}'
+        success_msg: 'The restore replaced the data with the scheduled dump'
+
+    - name: Verify | Query the collation of the restored database
+      ansible.mariadb.mariadb_query:
+        query:
+          - SELECT default_collation_name FROM information_schema.schemata WHERE schema_name = 'testdb'
+        login_unix_socket: '{{ __mariadb_socket }}'
+      register: __verify_restored_schema
+
+    - name: Verify | Assert the restore recreated the database with its collation
+      ansible.builtin.assert:
+        that:
+          - __verify_restored_schema.query_result[0][0]['default_collation_name'] == 'utf8mb4_unicode_ci'
+        fail_msg: 'testdb uses {{ __verify_restored_schema.query_result[0] }}'
+
+    #
     # Targeted package update (side_effect rolled the packages back and ran
     # the converge playbook with mariadb_packages_state: latest)
     #

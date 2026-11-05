@@ -22,3 +22,20 @@
   when:
     - mariadb_service_enabled | bool
     - mariadb_ssl_enabled | bool
+
+# failed_when: false keeps the daemon reload container-safe (molecule)
+- name: Reload MariaDB systemd units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: mariadb_enabled | bool
+  failed_when: false
+
+- name: Restart MariaDB backup timer
+  ansible.builtin.systemd_service:
+    name: '{{ __mariadb_backup_timer_name }}'
+    state: restarted
+  when:
+    - mariadb_backup_enabled | bool
+    - mariadb_backup_timer_enabled | bool
+    - mariadb_backup_schedule is not defined
+  ignore_errors: '{{ ansible_check_mode }}'
