@@ -74,6 +74,15 @@
         - '{{ __n8n_service_name }}'
         - '{{ __n8n_runner_service_name }}'
 
+    # Converge runs SQLite: the unit requires no PostgreSQL unit
+    - name: Verify | Assert the service requires no PostgreSQL unit
+      ansible.builtin.assert:
+        that:
+          - >-
+            __verify_service_status.results[0].status.Requires | default('')
+            is not search('(^| )postgresql(-[0-9]+)?\\.service( |$)')
+        fail_msg: 'Requires={{ __verify_service_status.results[0].status.Requires | default("") }}'
+
     - name: Verify | Read the running containers
       ansible.builtin.command:
         cmd: podman ps --filter name=^{{ item }}$ --format '{{ "{{" }}.Image{{ "}}" }}'
@@ -245,3 +254,28 @@
         that:
           - __verify_deprecations | length == 0
         fail_msg: '{{ __verify_deprecations }}'
+
+    #
+    # Database type: n8n 2.0 removed MySQL and MariaDB, the role refuses them
+    # before it changes anything.
+    #
+
+    - name: Verify | Run the role with a removed database type
+      block:
+        - name: Verify | Include n8n role (mariadb)  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            n8n_enabled: true
+            n8n_db_type: 'mariadb'
+      rescue:
+        - name: Verify | Record the database type failure
+          ansible.builtin.set_fact:
+            __verify_db_type_msg: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Assert the removed database type was refused
+      ansible.builtin.assert:
+        that:
+          - __verify_db_type_msg is defined
+          - "'n8n 2.0 removed MySQL and MariaDB' in __verify_db_type_msg"
+        fail_msg: 'Database type result: {{ __verify_db_type_msg | default("role run succeeded") }}'

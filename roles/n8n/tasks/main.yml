@@ -87,6 +87,35 @@
   tags:
     - always
 
+- name: Main | Warn about the deprecated firewall tasks
+  ansible.builtin.debug:
+    msg: >-
+      n8n_firewalld_enabled, n8n_firewalld_zone, the firewall tasks and the
+      n8n:firewall tag are deprecated and will be removed in the next major
+      version. Open http and https for the reverse proxy through
+      marcstraube.common.firewalld (firewalld_services), then set
+      n8n_firewalld_enabled to false so the role removes its n8n_port rule.
+  when:
+    - n8n_enabled | bool
+    - n8n_firewalld_enabled | bool
+  tags:
+    - always
+
+# n8n 2.0 removed MySQL and MariaDB as databases for its own data; an
+# n8n configured with one of them does not start.
+- name: Main | Validate the database type
+  ansible.builtin.assert:
+    that:
+      - n8n_db_type in ['sqlite', 'postgresdb']
+    fail_msg: |
+      n8n_db_type must be 'sqlite' or 'postgresdb', not '{{ n8n_db_type }}':
+      n8n 2.0 removed MySQL and MariaDB. Migrate the data to PostgreSQL or
+      SQLite with n8n before upgrading, then set n8n_db_type accordingly.
+  when:
+    - n8n_enabled | bool
+  tags:
+    - always
+
 - name: Main | Validate encryption key is set
   ansible.builtin.assert:
     that:
@@ -189,6 +218,8 @@
     - n8n
     - n8n:service
 
+# Deprecated: with n8n_firewalld_enabled false the tasks remove the rule
+# they created before.
 - name: Main | Include firewall tasks
   ansible.builtin.include_tasks:
     file: firewall.yml
@@ -196,9 +227,7 @@
       tags:
         - n8n
         - n8n:firewall
-  when:
-    - n8n_enabled | bool
-    - n8n_firewalld_enabled | bool
+  when: n8n_enabled | bool
   tags:
     - n8n
     - n8n:firewall

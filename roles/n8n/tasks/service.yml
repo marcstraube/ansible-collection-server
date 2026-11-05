@@ -1,4 +1,50 @@
 ---
+# The unit name depends on the packages: postgresql.service from the
+# distribution, postgresql-<version>.service from PGDG on Rocky Linux.
+- name: Service | List the PostgreSQL units
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - list-unit-files
+      - --type=service
+      - --no-legend
+      - --plain
+      - 'postgresql*.service'
+  register: __n8n_db_unit_files
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - __n8n_db_local | bool
+    - n8n_db_service | length == 0
+
+- name: Service | Set PostgreSQL unit fact
+  ansible.builtin.set_fact:
+    __n8n_db_service: >-
+      {{ n8n_db_service if n8n_db_service | length > 0
+         else (__n8n_db_units | first if __n8n_db_units | length == 1 else '') }}
+  vars:
+    __n8n_db_units: >-
+      {{ __n8n_db_unit_files.stdout_lines | default([])
+         | map('split') | map('first')
+         | select('match', __n8n_db_unit_pattern) | list }}
+  when: __n8n_db_local | bool
+
+# In check mode on a new host the postgresql role has not installed the
+# server yet, so a missing unit is only an error in a real run.
+- name: Service | Validate the PostgreSQL unit
+  ansible.builtin.assert:
+    that:
+      - __n8n_db_service | length > 0
+    fail_msg: |
+      n8n_db_host points to this host, but no single PostgreSQL unit was
+      found ({{ __n8n_db_unit_files.stdout_lines | default([]) | join(', ') or 'none' }}).
+      Run the marcstraube.server.postgresql role before this role, or set
+      n8n_db_service to the unit n8n depends on.
+  when:
+    - __n8n_db_local | bool
+    - not ansible_check_mode
+
 - name: Service | Deploy systemd service file
   ansible.builtin.template:
     src: n8n.service.j2

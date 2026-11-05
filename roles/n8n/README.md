@@ -19,7 +19,7 @@ The role supports Podman only: the container runs rootless as the dedicated
 `n8n` user without a daemon or a privileged group, which Docker does not
 offer in the same way.
 
-The orchestrator playbook `playbooks/servers/n8n.yml` includes all required
+The orchestrator playbook `playbooks/n8n.yml` includes all required
 roles in the correct order.
 
 ### Required Collections
@@ -59,10 +59,10 @@ See [defaults/main.yml](defaults/main.yml) for all available variables.
 | `n8n_podman_image`       | `n8nio/n8n`   | Container image (`docker.io/n8nio/n8n`)                |
 | `n8n_host`               | `'127.0.0.1'` | Listen address                                         |
 | `n8n_port`               | `5678`        | Listen port                                            |
-| `n8n_db_type`            | `'sqlite'`    | Database: `sqlite`, `postgresdb`, `mysqldb`, `mariadb` |
+| `n8n_db_type`            | `'sqlite'`    | Database: `sqlite` or `postgresdb`                     |
 | `n8n_encryption_key`     | `''`          | **REQUIRED** — credential encryption key               |
 | `n8n_runners_auth_token` | `''`          | **REQUIRED** — shared secret of n8n and task runners   |
-| `n8n_firewalld_enabled`  | `true`        | Manage firewalld rule for n8n port                     |
+| `n8n_firewalld_enabled`  | `true`        | Deprecated — firewalld rule for the n8n port           |
 
 ### Version Pinning
 
@@ -281,11 +281,25 @@ them explicitly.
 
 ### Database Configuration
 
+n8n stores its own data in SQLite or PostgreSQL. n8n 2.0 removed MySQL and
+MariaDB, so the role refuses any other `n8n_db_type`; migrate such a setup
+to PostgreSQL or SQLite with n8n before upgrading.
+
 When using `n8n_db_type: postgresdb`, the `marcstraube.server.postgresql` role
 must run before this role. The n8n role creates its own database and user via
 `database.yml` (controlled by `n8n_db_create: true`). Required PostgreSQL
 configuration (pg_hba scram-sha-256, service start) is handled by the
 postgresql role.
+
+| Variable         | Default | Description                           |
+| ---------------- | ------- | ------------------------------------- |
+| `n8n_db_service` | `''`    | Local PostgreSQL unit (empty: detect) |
+
+With a server on the host itself (`n8n_db_host` is `localhost`, `127.0.0.1`
+or `::1`) the unit requires the PostgreSQL unit of the host: the role detects
+`postgresql.service` or, with the PGDG packages on Rocky Linux,
+`postgresql-<version>.service`. With several versions installed, set
+`n8n_db_service` to the unit n8n depends on.
 
 ### TLS Certificates
 
@@ -411,7 +425,7 @@ default of 365 days.
 | `n8n:database`   | PostgreSQL user and database setup                 |
 | `n8n:configure`  | Configuration deployment                           |
 | `n8n:service`    | Systemd services, health checks and image cleanup  |
-| `n8n:firewall`   | Firewalld rule management                          |
+| `n8n:firewall`   | Firewalld rule management (deprecated)             |
 
 ## Example Playbook
 
@@ -476,6 +490,32 @@ pre-update set.
   contain secrets and are deployed with mode `0600`
 - The container runs rootless as the dedicated `n8n` system user; the
   service unit creates `/run/n8n` as the Podman runtime directory
+
+### Firewall
+
+n8n listens on `127.0.0.1` (`n8n_host`) and needs no firewall rule of its
+own. The reverse proxy in front of it serves HTTPS (and HTTP for the
+redirect), which the `marcstraube.common.firewalld` inventory opens:
+
+```yaml
+firewalld_services:
+  - ssh
+  - http
+  - https
+```
+
+Never open `n8n_port`: the reverse proxy is the only client.
+
+To migrate a host, add `http` and `https` to `firewalld_services` and run
+the `marcstraube.common.firewalld` role first, then set
+`n8n_firewalld_enabled: false`: the next run removes the `n8n_port` rule
+the role created.
+
+> **Deprecation:** `n8n_firewalld_enabled`, `n8n_firewalld_zone`, the
+> firewall tasks and the `n8n:firewall` tag will be removed in the next
+> major version. Until then `n8n_firewalld_enabled` keeps its default
+> `true` and the role opens `n8n_port` in `n8n_firewalld_zone`, printing a
+> deprecation warning on every run; `false` removes that rule again.
 
 ### Host Backup
 

@@ -5,9 +5,9 @@ Description=n8n - Workflow Automation Tool
 Documentation=https://docs.n8n.io
 After=network-online.target
 Wants=network-online.target
-{% if n8n_db_type == 'postgresdb' %}
-Requires=postgresql.service
-After=postgresql.service
+{% if __n8n_db_local | bool %}
+Requires={{ __n8n_db_service | default('postgresql.service', true) }}
+After={{ __n8n_db_service | default('postgresql.service', true) }}
 {% endif %}
 
 [Service]

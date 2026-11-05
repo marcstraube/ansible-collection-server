@@ -168,7 +168,7 @@ n8n_path: '/'
 # Database
 #
 
-# Database type: sqlite, postgresdb, mysqldb, mariadb
+# Database type: sqlite, postgresdb
 # SECURITY: Use PostgreSQL for production
 n8n_db_type: 'sqlite'
 
@@ -182,6 +182,12 @@ n8n_db_ssl: false
 
 # Create PostgreSQL database and user
 n8n_db_create: true
+
+# PostgreSQL unit the service requires when n8n_db_host is an address of
+# the host itself. Empty detects postgresql.service or
+# postgresql-<version>.service (PGDG on Rocky Linux) from the installed
+# unit files; set it when several versions are installed.
+n8n_db_service: ''
 
 #
 # Security
@@ -476,10 +482,15 @@ n8n_user_management_disabled: false
 # Firewall
 #
 
-# Enable firewalld rule for n8n port
+# DEPRECATED: Firewall rules belong to marcstraube.common.firewalld (removed
+# in the next major version together with the firewall tasks and the
+# n8n:firewall tag). n8n listens on 127.0.0.1 behind a reverse proxy, so its
+# port needs no rule. true opens n8n_port in firewalld, false removes the
+# rule again.
 n8n_firewalld_enabled: true
 
-# Firewalld zone for n8n port
+# DEPRECATED: Firewalld zone of the n8n port rule (removed in the next major
+# version)
 n8n_firewalld_zone: 'public'
 
 #
