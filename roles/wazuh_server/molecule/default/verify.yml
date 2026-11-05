@@ -1,7 +1,7 @@
 ---
 - name: Verify
   hosts: all
-  gather_facts: false
+  gather_facts: true
 
   vars:
     # vars/main.yml builds the indexer URL from these role defaults, which a
@@ -28,6 +28,40 @@
         - wazuh-manager
         - filebeat
         - wazuh-dashboard
+
+    # A system upgrade must leave the packages alone
+    - name: Verify | Read package holds (Debian)
+      ansible.builtin.command:
+        cmd: dpkg --get-selections {{ __wazuh_server_package_names | join(' ') }}
+      register: __verify_package_holds
+      changed_when: false
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Verify | Assert Wazuh packages are held (Debian)
+      ansible.builtin.assert:
+        that:
+          - (item ~ ' hold') in __verify_package_hold_lines
+        fail_msg: '{{ item }} is not held'
+      loop: '{{ __wazuh_server_package_names }}'
+      vars:
+        __verify_package_hold_lines: >-
+          {{ __verify_package_holds.stdout_lines | map('regex_replace', '\s+', ' ') | list }}
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Verify | Read version locks (RedHat)
+      ansible.builtin.command:
+        cmd: dnf versionlock list
+      register: __verify_version_locks
+      changed_when: false
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Verify | Assert Wazuh package versions are locked (RedHat)
+      ansible.builtin.assert:
+        that:
+          - __verify_version_locks.stdout is regex('(?m)^' ~ item ~ '-[0-9]+:')
+        fail_msg: '{{ item }} is not locked'
+      loop: '{{ __wazuh_server_package_names }}'
+      when: ansible_facts['os_family'] == 'RedHat'
 
     - name: Verify | Stat indexer certificates
       ansible.builtin.stat:

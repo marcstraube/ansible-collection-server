@@ -6,10 +6,12 @@ __wazuh_server_packages:
   - 'filebeat-{{ wazuh_server_filebeat_version }}'
   - 'wazuh-dashboard-{{ wazuh_server_version }}'
 
-# Dependencies (dashboard: libcap; certificate handling: cryptography)
+# Dependencies (dashboard: libcap; certificate handling: cryptography;
+# dnf_versionlock: versionlock plugin)
 __wazuh_server_dependency_packages:
   - 'libcap'
   - 'python3-cryptography'
+  - 'python3-dnf-plugin-versionlock'
   - 'tar'
 
 # Wazuh yum repository
