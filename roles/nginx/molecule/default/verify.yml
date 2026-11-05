@@ -251,6 +251,78 @@
         - 'allowed.txt'
 
     #
+    # HTTP to HTTPS Redirect
+    #
+
+    - name: Verify | Request the HTTP redirect of the site on another HTTPS port
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1:8082/path?query=1'
+        headers:
+          Host: 'redirect-port.example.com'
+        follow_redirects: none
+        status_code: 301
+      register: __verify_redirect_port
+
+    - name: Verify | Request the HTTP redirect of the site on port 443
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1/path?query=1'
+        headers:
+          Host: 'redirect-default.example.com'
+        follow_redirects: none
+        status_code: 301
+      register: __verify_redirect_default
+
+    - name: Verify | Assert the redirects keep the HTTPS port
+      ansible.builtin.assert:
+        that:
+          - __verify_redirect_port.location == 'https://redirect-port.example.com:8444/path?query=1'
+          - __verify_redirect_default.location == 'https://redirect-default.example.com/path?query=1'
+        fail_msg: >-
+          Unexpected redirect targets: {{ __verify_redirect_port.location | default('none') }},
+          {{ __verify_redirect_default.location | default('none') }}
+        success_msg: 'The HTTP redirects point to the HTTPS port of each site'
+
+    #
+    # SELinux (RedHat with SELinux enabled)
+    #
+
+    - name: Verify | Read the httpd_can_network_connect boolean
+      ansible.builtin.command:
+        cmd: getsebool httpd_can_network_connect
+      register: __verify_selinux_boolean
+      changed_when: false
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    - name: Verify | Read the SELinux port labels
+      ansible.builtin.command:
+        cmd: semanage port -l
+      register: __verify_selinux_ports
+      changed_when: false
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    - name: Verify | Assert the SELinux boolean and port labels
+      ansible.builtin.assert:
+        that:
+          - __verify_selinux_boolean.stdout is search('--> on$')
+          - __verify_selinux_http_ports is contains('8082')
+          - __verify_selinux_http_ports is contains('8444')
+        fail_msg: >-
+          httpd_can_network_connect: {{ __verify_selinux_boolean.stdout }},
+          http_port_t: {{ __verify_selinux_http_ports | join(', ') }}
+        success_msg: 'httpd_can_network_connect is on, ports 8082 and 8444 are labeled http_port_t'
+      vars:
+        __verify_selinux_http_ports: >-
+          {{ __verify_selinux_ports.stdout_lines | select('match', '^http_port_t +tcp ')
+             | map('regex_replace', '^http_port_t +tcp +', '') | join(', ') | split(', ') }}
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    #
     # Targeted package update (side_effect rolled the packages back and ran
     # the converge playbook with nginx_packages_state: latest)
     #

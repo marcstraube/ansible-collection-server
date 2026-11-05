@@ -16,3 +16,15 @@ __nginx_htpasswd_package: 'httpd-tools'
 # Installed packages a targeted update moves along (nginx, nginx-core,
 # nginx-filesystem, dynamic modules)
 __nginx_update_pattern: '^nginx(-.+)?$'
+
+# Ports the SELinux policy labels http_port_t out of the box; site ports
+# outside this list get the label from the role.
+__nginx_selinux_default_ports:
+  - '80'
+  - '81'
+  - '443'
+  - '488'
+  - '8008'
+  - '8009'
+  - '8443'
+  - '9000'
