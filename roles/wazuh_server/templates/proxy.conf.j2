@@ -1,0 +1,10 @@
+{{ ansible_managed | comment }}
+# Outgoing proxy of the Wazuh manager. libcurl reads http_proxy only in
+# lower case, the other names in both cases.
+[Service]
+Environment="http_proxy={{ wazuh_server_http_proxy }}"
+Environment="HTTP_PROXY={{ wazuh_server_http_proxy }}"
+Environment="https_proxy={{ wazuh_server_https_proxy }}"
+Environment="HTTPS_PROXY={{ wazuh_server_https_proxy }}"
+Environment="no_proxy={{ __wazuh_server_manager_no_proxy }}"
+Environment="NO_PROXY={{ __wazuh_server_manager_no_proxy }}"

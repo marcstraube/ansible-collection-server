@@ -1,6 +1,6 @@
 {{ ansible_managed | comment }}
 
-<VirtualHost *:{{ item.listen_port | default(80) }}>
+<VirtualHost {{ item.listen_address | default('*') }}:{{ item.listen_port | default(80) }}>
     ServerName {{ item.server_name }}
 {% if item.server_alias is defined %}
 {% for alias in item.server_alias %}
@@ -37,6 +37,11 @@
     RewriteCond %{HTTPS} off
     RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
 
+{% endif %}
+{# A redirect vhost answers every request with a redirect, so a PHP handler
+   would never run there. #}
+{% if not item.redirect_to_https | default(false) %}
+{% include 'vhost_php_fpm.conf.j2' %}
 {% endif %}
     # Logging
     ErrorLog {{ __apache_log_dir }}/{{ item.server_name }}-error.log

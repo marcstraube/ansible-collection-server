@@ -1,0 +1,117 @@
+---
+name: Update Activepieces Version
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly Monday 6:00 UTC
+  workflow_dispatch:       # Manual trigger
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-activepieces:
+    name: Check for new Activepieces release
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      # Activepieces publishes releases (X.Y.Z) and hotfixes of a release
+      # (X.Y.Z-hotfix.N), also for older release lines; the role default
+      # follows the release GitHub marks as latest. Release candidates
+      # (-rc.N) are not marked as prereleases and are rejected by the tag
+      # check. A hotfix of an older line never replaces a newer default:
+      # both versions become X.Y.Z.N (N = 0 for a release) and the bump
+      # needs a higher one. The role pulls
+      # docker.io/activepieces/activepieces:<version>, so the bump waits
+      # until the matching image tag is published.
+      - name: Get latest Activepieces release
+        id: activepieces
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LATEST=$(gh api repos/activepieces/activepieces/releases/latest --jq '.tag_name')
+          if ! [[ "$LATEST" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-hotfix\.[0-9]+)?$ ]]; then
+            echo "::error::Unexpected latest release tag from GitHub: '$LATEST'"
+            exit 1
+          fi
+          CURRENT=$(grep '^activepieces_version:' roles/activepieces/defaults/main.yml \
+            | sed "s/.*'\(.*\)'/\1/")
+          normalize() {
+            if [[ "$1" == *-hotfix.* ]]; then
+              echo "${1/-hotfix./.}"
+            else
+              echo "$1.0"
+            fi
+          }
+          NEWER=false
+          if [ "$LATEST" != "$CURRENT" ] \
+             && [ "$(printf '%s\n%s\n' "$(normalize "$CURRENT")" "$(normalize "$LATEST")" \
+                    | sort -V | tail -n 1)" = "$(normalize "$LATEST")" ]; then
+            NEWER=true
+          fi
+          if curl -fsSL -o /dev/null \
+               "https://hub.docker.com/v2/repositories/activepieces/activepieces/tags/${LATEST}"; then
+            IMAGE=true
+          else
+            IMAGE=false
+            echo "::warning::Image tag activepieces/activepieces:${LATEST} not published yet"
+          fi
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "newer=$NEWER" >> "$GITHUB_OUTPUT"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "Current: $CURRENT, Latest: $LATEST, newer: $NEWER, image published: $IMAGE"
+
+      - name: Update defaults/main.yml
+        if: >-
+          steps.activepieces.outputs.newer == 'true'
+          && steps.activepieces.outputs.image == 'true'
+        run: |
+          sed -i "s/^activepieces_version: '.*'/activepieces_version: '${{ steps.activepieces.outputs.latest }}'/" \
+            roles/activepieces/defaults/main.yml
+
+      # Pull requests opened with github.token do not trigger the CI
+      # workflow; the release bot app token lets the bump PR run the
+      # Activepieces molecule matrix.
+      - name: Generate release bot token
+        if: >-
+          steps.activepieces.outputs.newer == 'true'
+          && steps.activepieces.outputs.image == 'true'
+        uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
+      - name: Create Pull Request
+        if: >-
+          steps.activepieces.outputs.newer == 'true'
+          && steps.activepieces.outputs.image == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          commit-message: >-
+            chore(activepieces): update Activepieces version
+            ${{ steps.activepieces.outputs.current }} →
+            ${{ steps.activepieces.outputs.latest }}
+          branch: chore/update-activepieces-${{ steps.activepieces.outputs.latest }}
+          title: >-
+            chore(activepieces): update Activepieces version to
+            ${{ steps.activepieces.outputs.latest }}
+          body: |
+            Automated update of `activepieces_version` in `roles/activepieces/defaults/main.yml`.
+
+            **Previous:** `${{ steps.activepieces.outputs.current }}`
+            **New:** `${{ steps.activepieces.outputs.latest }}`
+
+            Release notes: https://github.com/activepieces/activepieces/releases/tag/${{ steps.activepieces.outputs.latest }}
+
+            ---
+            This PR was created automatically by the
+            `update-activepieces-version` workflow.
+          labels: dependencies
+          delete-branch: true

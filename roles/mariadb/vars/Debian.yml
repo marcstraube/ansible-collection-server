@@ -1,0 +1,37 @@
+---
+# Debian ships one MariaDB version per release (Trixie: 11.8); the MariaDB
+# Foundation repository carries Trixie from 11.8 on.
+__mariadb_distro_versions:
+  - '11.8'
+# Oldest version the MariaDB Foundation repository carries for Trixie; any
+# newer release resolves through the repository
+__mariadb_upstream_minimum_version: '11.8'
+
+# The upstream packages keep the Debian names; apt prefers them through
+# their higher version (1:11.8.9+maria~deb13 over 1:11.8.6-0+deb13u1).
+__mariadb_packages:
+  - mariadb-server
+  - mariadb-client
+  - python3-pymysql
+
+# Package that carries the server version
+__mariadb_server_package: mariadb-server
+
+# Installed server packages the major version guard reads
+__mariadb_installed_server_pattern: '^mariadb-server$'
+
+# Installed packages a targeted update moves along (server, client, common,
+# core packages, libmariadb*; all built from the mariadb source)
+__mariadb_update_pattern: '^(mariadb-.+|libmariadb.+)$'
+
+__mariadb_service_name: mariadb.service
+__mariadb_config_dir: /etc/mysql/mariadb.conf.d
+__mariadb_config_file: '/etc/mysql/mariadb.conf.d/{{ __mariadb_config_name }}'
+__mariadb_socket: /run/mysqld/mysqld.sock
+
+# TLS fallback paths — the snakeoil pair of the Debian ssl-cert package
+# (not a dependency of mariadb-server; the role asserts that the files
+# exist). Used when mariadb_ssl_cert_file / _key_file are empty. The key is
+# readable by the ssl-cert group only; add the mysql user to that group.
+__mariadb_ssl_cert_file: /etc/ssl/certs/ssl-cert-snakeoil.pem
+__mariadb_ssl_key_file: /etc/ssl/private/ssl-cert-snakeoil.key

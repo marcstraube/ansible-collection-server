@@ -1,0 +1,237 @@
+---
+# Targeted update: the first play rolls the nginx packages back to an older
+# build. A minimum the repository does not offer must fail before any
+# change, a mapping without a key for the host must fail, and on Debian a
+# configuration the new binary rejects must fail the update without a
+# restart. The converge playbook then runs with nginx_packages_state:
+# latest and the full distribution version as minimum, and nginx must run
+# the new binary after at most one restart. Arch Linux ignores the state.
+- name: Side Effect | Roll back
+  hosts: all
+  gather_facts: true
+
+  vars:
+    # version-release of the nginx package from the latest package facts
+    # (Debian has no separate release field). The epoch is left out, so the
+    # minimum check has to add it on EL (nginx carries epoch 2 there).
+    __side_effect_version: >-
+      {{ [(ansible_facts['packages']['nginx'] | first).version,
+          (ansible_facts['packages']['nginx'] | first).release | default('')]
+         | select | join('-') }}
+
+  tasks:
+    - name: Side Effect | Gather package facts before the rollback
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Record the current nginx package version
+      ansible.builtin.set_fact:
+        __side_effect_version_current: '{{ __side_effect_version }}'
+
+    # Debian: policy-rc.d keeps the maintainer scripts from restarting
+    # nginx, so only the role can restart it
+    - name: Side Effect | Block service restarts by packages (Debian)
+      ansible.builtin.copy:
+        content: "#!/bin/sh\nexit 101\n"
+        dest: /usr/sbin/policy-rc.d
+        mode: '0755'
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # The EL AppStream keeps the older builds of a release. When the
+    # repository holds only one build, nothing is rolled back and verify.yml
+    # skips the version comparison.
+    - name: Side Effect | Roll the nginx packages back (RedHat)
+      ansible.builtin.command:
+        cmd: dnf downgrade -y 'nginx*'
+      changed_when: true
+      failed_when: false
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    # Every installed package built from the nginx source carries its
+    # version and moves back with it.
+    - name: Side Effect | Roll the nginx packages back (Debian)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          installed=$(dpkg-query -W -f '${Version}' nginx)
+          # madison lists the newest build first; take the first older one
+          old=$(apt-cache madison nginx \
+            | awk -F' [|] ' -v cur="${installed}" '$2 != cur { print $2; exit }')
+          [ -n "${old}" ] || exit 0
+          pkgs=$(dpkg-query -W -f '${Package} ${Version} ${db:Status-Abbrev}\n' 'nginx*' 'libnginx-mod-*' \
+            | awk -v cur="${installed}" '$2 == cur && $3 == "ii" { print $1 }')
+          args=''
+          for pkg in ${pkgs}; do args="${args} ${pkg}=${old}"; done
+          # shellcheck disable=SC2086
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades ${args}
+        executable: /bin/bash
+      changed_when: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Side Effect | Gather package facts after the rollback
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Record the rolled back nginx package version
+      ansible.builtin.set_fact:
+        __side_effect_version_rolled_back: '{{ __side_effect_version }}'
+
+    # verify.yml runs as a separate playbook; the versions before and after
+    # the rollback and the time of the update reach it through this file.
+    - name: Side Effect | Record the nginx package versions around the rollback
+      ansible.builtin.copy:
+        content: |
+          {{ __side_effect_version_current }}
+          {{ __side_effect_version_rolled_back }}
+        dest: /root/nginx-update-versions
+        mode: '0600'
+
+- name: Side Effect | Minimum
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __side_effect_version: >-
+      {{ [(ansible_facts['packages']['nginx'] | first).version,
+          (ansible_facts['packages']['nginx'] | first).release | default('')]
+         | select | join('-') }}
+
+  tasks:
+    # The pre-check runs before the package task, so a minimum the
+    # repository does not offer leaves the rolled back packages in place.
+    - name: Side Effect | Run with a minimum the repository does not offer
+      block:
+        - name: Side Effect | Include nginx role with an unmet minimum  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_packages_state: 'latest'
+            nginx_packages_minimum: "{{ {ansible_facts['os_family']: '99.0'} }}"
+      rescue:
+        - name: Side Effect | Record the minimum check failure
+          ansible.builtin.set_fact:
+            __side_effect_minimum_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Gather package facts after the unmet minimum
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Assert the unmet minimum failed without a change
+      ansible.builtin.assert:
+        that:
+          - __side_effect_minimum_error is defined
+          - "'requires 99.0' in __side_effect_minimum_error"
+          - "'nothing was changed' in __side_effect_minimum_error"
+          - __side_effect_version == __side_effect_version_rolled_back
+        fail_msg: >-
+          A minimum of 99.0 did not fail before the update (error:
+          {{ __side_effect_minimum_error | default('none') }}, nginx
+          {{ __side_effect_version_rolled_back }} -> {{ __side_effect_version }})
+        success_msg: 'The pre-check rejects a minimum the repository does not offer'
+
+    - name: Side Effect | Run with a mapping without a key for the host
+      block:
+        - name: Side Effect | Include nginx role with a mapping for another platform  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_packages_state: 'latest'
+            nginx_packages_minimum:
+              Solaris: '1.0'
+      rescue:
+        - name: Side Effect | Record the mapping failure
+          ansible.builtin.set_fact:
+            __side_effect_mapping_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Assert the mapping without a key failed
+      ansible.builtin.assert:
+        that:
+          - __side_effect_mapping_error is defined
+          - "'has no key for this host' in __side_effect_mapping_error"
+        fail_msg: 'A mapping without a key for the host did not fail the run'
+        success_msg: 'A mapping without a key for the host fails the run'
+
+# Debian only: policy-rc.d keeps the old master running after the update,
+# so the role has to restart it and tests the configuration first.
+- name: Side Effect | Configuration test
+  hosts: all
+  gather_facts: true
+
+  vars:
+    # Only a rolled back build leaves a replaced binary to restart
+    __side_effect_config_test: >-
+      {{ ansible_facts['os_family'] == 'Debian'
+         and __side_effect_version_rolled_back != __side_effect_version_current }}
+
+  tasks:
+    - name: Side Effect | Add a configuration the new binary rejects (Debian)
+      ansible.builtin.copy:
+        content: "not_a_directive on;\n"
+        dest: /etc/nginx/conf.d/zz-broken.conf
+        mode: '0644'
+      when: __side_effect_config_test | bool
+
+    - name: Side Effect | Run the update with a rejected configuration (Debian)
+      when: __side_effect_config_test | bool
+      block:
+        - name: Side Effect | Include nginx role with a rejected configuration  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_packages_state: 'latest'
+      rescue:
+        - name: Side Effect | Record the failed task
+          ansible.builtin.set_fact:
+            __side_effect_config_task: '{{ ansible_failed_task.name | default("") }}'
+
+    - name: Side Effect | Read the nginx master PID (Debian)
+      ansible.builtin.slurp:
+        src: /run/nginx.pid
+      register: __side_effect_pid
+      when: __side_effect_config_test | bool
+
+    - name: Side Effect | Read the binary of the running master (Debian)
+      ansible.builtin.command:
+        argv:
+          - readlink
+          - '/proc/{{ __side_effect_pid.content | b64decode | trim }}/exe'
+      register: __side_effect_exe
+      changed_when: false
+      when: __side_effect_config_test | bool
+
+    - name: Side Effect | Assert the rejected configuration stopped the restart (Debian)
+      ansible.builtin.assert:
+        that:
+          - __side_effect_config_task | default('') == 'Install | Test the configuration before the restart'
+          - __side_effect_exe.stdout is search(' \(deleted\)$')
+        fail_msg: >-
+          The update did not stop at the configuration test (failed task:
+          {{ __side_effect_config_task | default('none') }}, master runs
+          {{ __side_effect_exe.stdout }})
+        success_msg: 'The old master keeps serving when the new binary rejects the configuration'
+      when: __side_effect_config_test | bool
+
+    - name: Side Effect | Remove the rejected configuration (Debian)
+      ansible.builtin.file:
+        path: /etc/nginx/conf.d/zz-broken.conf
+        state: absent
+      when: __side_effect_config_test | bool
+
+# On Debian the packages are already updated; the role restarts the master
+# that still runs the replaced binary.
+- name: Side Effect | Update
+  ansible.builtin.import_playbook: converge.yml
+  vars:
+    nginx_packages_state: 'latest'
+    nginx_packages_minimum: '{{ __side_effect_version_current }}'
+
+- name: Side Effect | Clean up
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Allow service restarts by packages again (Debian)
+      ansible.builtin.file:
+        path: /usr/sbin/policy-rc.d
+        state: absent
+      when: ansible_facts['os_family'] == 'Debian'

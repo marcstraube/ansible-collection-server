@@ -1,0 +1,17 @@
+---
+- name: Converge
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Converge | Include podman role
+      ansible.builtin.include_role:
+        name: marcstraube.common.podman
+
+    - name: Converge | Include postgresql role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postgresql'
+
+    - name: Converge | Include activepieces role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'

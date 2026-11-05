@@ -1,0 +1,343 @@
+---
+# Targeted update: the first play rolls the MariaDB packages back to an
+# older build. A minimum the repository does not offer must fail before
+# any change, a mapping without a key for the host must fail, and a
+# request for another major version must fail without touching the
+# server. The converge playbook then runs with mariadb_packages_state:
+# latest and the full distribution version as minimum, and the server must
+# run the new binary after at most one restart. Arch Linux ignores the
+# state; nothing is rolled back there.
+#
+# Backup and restore: the last plays run the scheduled backup, change the
+# data, check that a restore of an unmanaged database fails, and restore
+# the dump through the converge playbook (see verify.yml).
+- name: Side Effect | Roll back
+  hosts: all
+  gather_facts: true
+
+  vars:
+    # [epoch:]version-release of the server package from the latest package
+    # facts (Debian has no separate release field)
+    __side_effect_version: >-
+      {{ ((__side_effect_pkg.epoch ~ ':')
+          if ((__side_effect_pkg.epoch | default('', true) | string) not in ['', 'None', '0']) else '')
+         ~ (__side_effect_pkg.version | default(''))
+         ~ (('-' ~ __side_effect_pkg.release) if (__side_effect_pkg.release | default('', true)) else '') }}
+    __side_effect_pkg: "{{ ansible_facts['packages'][__mariadb_server_package] | default([{}]) | first }}"
+
+  tasks:
+    - name: Side Effect | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Side Effect | Load OS-specific variables
+      ansible.builtin.include_vars: '{{ item }}'
+      with_first_found:
+        - files:
+            - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["distribution"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}.yml'
+          paths:
+            - '../../vars'
+
+    - name: Side Effect | Gather package facts before the rollback
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Record the current server package version
+      ansible.builtin.set_fact:
+        __side_effect_version_current: '{{ __side_effect_version }}'
+
+    # Debian: policy-rc.d keeps the maintainer scripts from restarting the
+    # server, so only the role can restart it. The EL packages restart it
+    # themselves, and the role must not restart it a second time.
+    - name: Side Effect | Block service restarts by packages (Debian)
+      ansible.builtin.copy:
+        content: "#!/bin/sh\nexit 101\n"
+        dest: /usr/sbin/policy-rc.d
+        mode: '0755'
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # The EL AppStream and the upstream yum repository keep the older builds
+    # of a release. When the repository holds only one build, nothing is
+    # rolled back and verify.yml skips the version comparison. Every
+    # installed package of the family moves back together.
+    - name: Side Effect | Roll the MariaDB packages back (RedHat)
+      ansible.builtin.command:
+        argv: >-
+          {{ ['dnf', 'downgrade', '-y']
+             + (ansible_facts['packages'] | list | select('match', __mariadb_update_pattern) | list) }}
+      changed_when: true
+      failed_when: false
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    # Every installed package built from the mariadb source carries the
+    # server version and moves back with it. With the upstream repository
+    # the older build is the Debian one, so the update moves the packages
+    # to the upstream build again.
+    - name: Side Effect | Roll the MariaDB packages back (Debian)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          server='{{ __mariadb_server_package }}'
+          installed=$(dpkg-query -W -f '${Version}' "${server}")
+          # madison lists the newest build first; take the first older one
+          old=$(apt-cache madison "${server}" \
+            | awk -F' [|] ' -v cur="${installed}" '$2 != cur { print $2; exit }')
+          [ -n "${old}" ] || exit 0
+          pkgs=$(dpkg-query -W -f '${Package} ${Version} ${db:Status-Abbrev}\n' 'mariadb*' 'libmariadb*' \
+            | awk -v cur="${installed}" '$2 == cur && $3 == "ii" { print $1 }')
+          args=''
+          for pkg in ${pkgs}; do args="${args} ${pkg}=${old}"; done
+          # shellcheck disable=SC2086
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades ${args}
+        executable: /bin/bash
+      changed_when: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Side Effect | Gather package facts after the rollback
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Record the rolled back server package version
+      ansible.builtin.set_fact:
+        __side_effect_version_rolled_back: '{{ __side_effect_version }}'
+
+    # verify.yml runs as a separate playbook; the versions before and after
+    # the rollback and the time of the update reach it through this file.
+    - name: Side Effect | Record the server package versions around the rollback
+      ansible.builtin.copy:
+        content: |
+          {{ __side_effect_version_current }}
+          {{ __side_effect_version_rolled_back }}
+        dest: /root/mariadb-update-versions
+        mode: '0600'
+
+- name: Side Effect | Minimum
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __side_effect_version: >-
+      {{ ((__side_effect_pkg.epoch ~ ':')
+          if ((__side_effect_pkg.epoch | default('', true) | string) not in ['', 'None', '0']) else '')
+         ~ (__side_effect_pkg.version | default(''))
+         ~ (('-' ~ __side_effect_pkg.release) if (__side_effect_pkg.release | default('', true)) else '') }}
+    __side_effect_pkg: "{{ ansible_facts['packages'][__mariadb_server_package] | default([{}]) | first }}"
+
+  tasks:
+    # The pre-check runs before the package task, so a minimum the
+    # repository does not offer leaves the rolled back packages in place.
+    - name: Side Effect | Run with a minimum the repository does not offer
+      block:
+        - name: Side Effect | Include mariadb role with an unmet minimum  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            mariadb_enabled: true
+            mariadb_packages_state: 'latest'
+            mariadb_packages_minimum: "{{ {ansible_facts['os_family']: '99.0'} }}"
+      rescue:
+        - name: Side Effect | Record the minimum check failure
+          ansible.builtin.set_fact:
+            __side_effect_minimum_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Gather package facts after the unmet minimum
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Assert the unmet minimum failed without a change
+      ansible.builtin.assert:
+        that:
+          - __side_effect_minimum_error is defined
+          - "'requires 99.0' in __side_effect_minimum_error"
+          - "'nothing was changed' in __side_effect_minimum_error"
+          - __side_effect_version == __side_effect_version_rolled_back
+        fail_msg: >-
+          A minimum of 99.0 did not fail before the update (error:
+          {{ __side_effect_minimum_error | default('none') }},
+          {{ __mariadb_server_package }} {{ __side_effect_version_rolled_back }}
+          -> {{ __side_effect_version }})
+        success_msg: 'The pre-check rejects a minimum the repository does not offer'
+
+    - name: Side Effect | Run with a mapping without a key for the host
+      block:
+        - name: Side Effect | Include mariadb role with a mapping for another platform  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            mariadb_enabled: true
+            mariadb_packages_state: 'latest'
+            mariadb_packages_minimum:
+              Solaris: '1.0'
+      rescue:
+        - name: Side Effect | Record the mapping failure
+          ansible.builtin.set_fact:
+            __side_effect_mapping_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Assert the mapping without a key failed
+      ansible.builtin.assert:
+        that:
+          - __side_effect_mapping_error is defined
+          - "'has no key for this host' in __side_effect_mapping_error"
+        fail_msg: 'A mapping without a key for the host did not fail the run'
+        success_msg: 'A mapping without a key for the host fails the run'
+
+# A request for another major version must stop before any change: Debian
+# does not carry it with the selected source, and on EL the installed
+# server package differs from the requested one. Arch Linux ignores the
+# version.
+- name: Side Effect | Major version
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Run with another major version
+      when: ansible_facts['os_family'] != 'Archlinux'
+      block:
+        - name: Side Effect | Include mariadb role with another major version  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            mariadb_enabled: true
+            mariadb_version: '10.11'
+      rescue:
+        - name: Side Effect | Record the major version failure
+          ansible.builtin.set_fact:
+            __side_effect_major_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Assert the other major version failed the run
+      ansible.builtin.assert:
+        that:
+          - __side_effect_major_error is defined
+          - "'MariaDB' in __side_effect_major_error"
+          - "'10.11' in __side_effect_major_error"
+        fail_msg: >-
+          A request for MariaDB 10.11 did not fail the run (error:
+          {{ __side_effect_major_error | default('none') }})
+        success_msg: 'A request for another major version fails the run'
+      when: ansible_facts['os_family'] != 'Archlinux'
+
+    - name: Side Effect | Assert the server is still running
+      ansible.builtin.systemd_service:
+        name: mariadb.service
+      register: __side_effect_service
+      failed_when: __side_effect_service.status.ActiveState != 'active'
+      when: ansible_facts['os_family'] != 'Archlinux'
+
+# On Debian the packages are already updated; the role restarts the server
+# that still runs the replaced binary.
+- name: Side Effect | Update
+  ansible.builtin.import_playbook: converge.yml
+  vars:
+    mariadb_packages_state: 'latest'
+    mariadb_packages_minimum: '{{ __side_effect_version_current }}'
+
+- name: Side Effect | Clean up
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Allow service restarts by packages again (Debian)
+      ansible.builtin.file:
+        path: /usr/sbin/policy-rc.d
+        state: absent
+      when: ansible_facts['os_family'] == 'Debian'
+
+# mariadb_backup_keep is 1 (scenario inventory): the scheduled backup
+# removes the seeded old dump of testdb and leaves the dump of a database
+# whose name only starts with testdb alone.
+- name: Side Effect | Backup
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __side_effect_backup_dir: '/var/backups/mariadb'
+
+  tasks:
+    - name: Side Effect | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Side Effect | Load OS-specific variables
+      ansible.builtin.include_vars: '{{ item }}'
+      with_first_found:
+        - files:
+            - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["distribution"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}.yml'
+          paths:
+            - '../../vars'
+
+    - name: Side Effect | Write the data the dump has to contain
+      ansible.mariadb.mariadb_query:
+        query:
+          - CREATE TABLE IF NOT EXISTS restore_check (id INT PRIMARY KEY, state VARCHAR(16))
+          - REPLACE INTO restore_check VALUES (1, 'dumped')
+        login_unix_socket: '{{ __mariadb_socket }}'
+        login_db: testdb
+
+    # The rotation only looks at the names, the content is never read
+    - name: Side Effect | Seed old dumps
+      ansible.builtin.copy:
+        content: "-- seeded by molecule\n"
+        dest: '{{ __side_effect_backup_dir }}/{{ item }}'
+        owner: root
+        group: root
+        mode: '0600'
+      loop:
+        - testdb_20000101_000000.sql.gz
+        - testdb_old_20000101_000000.sql.gz
+
+    - name: Side Effect | Run the scheduled backup
+      ansible.builtin.systemd_service:
+        name: '{{ __mariadb_backup_service_name }}'
+        state: started
+
+    - name: Side Effect | List the dumps of testdb
+      ansible.builtin.find:
+        paths: '{{ __side_effect_backup_dir }}'
+        patterns: '^testdb_[0-9]{8}_[0-9]{6}\.sql\.gz$'
+        use_regex: true
+      register: __side_effect_dumps
+
+    - name: Side Effect | Record the dump to restore
+      ansible.builtin.set_fact:
+        __side_effect_restore_dump: >-
+          {{ __side_effect_dumps.files | map(attribute='path') | map('basename') | sort | last }}
+
+    # verify.yml expects the restore to remove this row again, and the
+    # fresh dump the restore takes first to contain it
+    - name: Side Effect | Change the data after the dump
+      ansible.mariadb.mariadb_query:
+        query:
+          - REPLACE INTO restore_check VALUES (2, 'after-dump')
+        login_unix_socket: '{{ __mariadb_socket }}'
+        login_db: testdb
+
+    - name: Side Effect | Run a restore of a database the role does not manage
+      block:
+        - name: Side Effect | Include mariadb role with an unmanaged database to restore  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            mariadb_enabled: true
+            mariadb_databases:
+              - name: testdb
+            mariadb_restore: 'otherdb_20000101_000000.sql.gz'
+      rescue:
+        - name: Side Effect | Record the restore failure
+          ansible.builtin.set_fact:
+            __side_effect_restore_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Assert the restore of an unmanaged database failed
+      ansible.builtin.assert:
+        that:
+          - __side_effect_restore_error is defined
+          - "'mariadb_databases' in __side_effect_restore_error"
+        fail_msg: 'A restore of a database outside mariadb_databases did not fail the run'
+        success_msg: 'A restore of a database outside mariadb_databases fails the run'
+
+- name: Side Effect | Restore
+  ansible.builtin.import_playbook: converge.yml
+  vars:
+    mariadb_restore: '{{ __side_effect_restore_dump }}'

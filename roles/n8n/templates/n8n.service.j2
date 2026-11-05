@@ -5,9 +5,9 @@ Description=n8n - Workflow Automation Tool
 Documentation=https://docs.n8n.io
 After=network-online.target
 Wants=network-online.target
-{% if n8n_db_type == 'postgresdb' %}
-Requires=postgresql.service
-After=postgresql.service
+{% if __n8n_db_local | bool %}
+Requires={{ __n8n_db_service | default('postgresql.service', true) }}
+After={{ __n8n_db_service | default('postgresql.service', true) }}
 {% endif %}
 
 [Service]
@@ -21,6 +21,10 @@ RuntimeDirectory={{ __n8n_runtime_dir | basename }}
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 Environment="XDG_RUNTIME_DIR={{ __n8n_runtime_dir }}"
+
+# The first start after an image change copies the image layers into the
+# user namespace of the n8n user, which can take minutes
+TimeoutStartSec={{ n8n_service_start_timeout }}
 
 # Remove any existing container before starting
 ExecStartPre=-/usr/bin/podman rm -f {{ n8n_podman_container_name }}

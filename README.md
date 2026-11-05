@@ -7,8 +7,9 @@
 ## Description
 
 Ansible roles for self-hosted server infrastructure: web servers, Let's
-Encrypt certificates, PostgreSQL, and n8n workflow automation. The roles
-build on [marcstraube.common](https://github.com/marcstraube/ansible-collection-common)
+Encrypt certificates, PostgreSQL, MariaDB, and n8n and Activepieces workflow
+automation. The roles build on
+[marcstraube.common](https://github.com/marcstraube/ansible-collection-common)
 for the base system (podman, pki, firewalld, fail2ban).
 
 ## Supported Platforms
@@ -21,9 +22,9 @@ for the base system (podman, pki, firewalld, fail2ban).
 ## Requirements
 
 - ansible-core >= 2.19
-- Collections: `marcstraube.common`, `community.general`,
-  `community.postgresql`, `containers.podman`, `ansible.posix`
-  (installed automatically with the collection)
+- Collections: `marcstraube.common`, `community.crypto`, `community.general`,
+  `community.postgresql`, `ansible.mariadb`, `containers.podman`,
+  `ansible.posix` (installed automatically with the collection)
 
 ## Included Roles
 
@@ -37,15 +38,23 @@ for the base system (podman, pki, firewalld, fail2ban).
 
 ### Databases
 
-| Role           | Description                                               |
-| -------------- | --------------------------------------------------------- |
-| **postgresql** | PostgreSQL server with TLS and the PGDG repository option |
+| Role           | Description                                                 |
+| -------------- | ----------------------------------------------------------- |
+| **postgresql** | PostgreSQL server with TLS and the PGDG repository option   |
+| **mariadb**    | MariaDB server with TLS and the upstream repository option  |
 
 ### Applications
 
-| Role    | Description                                             |
-| ------- | ------------------------------------------------------- |
-| **n8n** | n8n workflow automation as a rootless Podman container  |
+| Role             | Description                                                     |
+| ---------------- | --------------------------------------------------------------- |
+| **n8n**          | n8n workflow automation as a rootless Podman container          |
+| **activepieces** | Activepieces workflow automation as a rootless Podman container |
+
+### Security
+
+| Role             | Description                                                    |
+| ---------------- | -------------------------------------------------------------- |
+| **wazuh_server** | Wazuh all-in-one server: indexer, manager, Filebeat, dashboard |
 
 ## Installation
 
@@ -79,11 +88,13 @@ of the stack in the required order and, on Arch Linux, a full system
 upgrade first, so a rolling release never installs packages on an outdated
 package database. Other platforms skip the upgrade.
 
-| Playbook                             | Host group    | Stack                               |
-| ------------------------------------ | ------------- | ----------------------------------- |
-| `marcstraube.server.web_server`      | `web_servers` | nginx or apache, certbot            |
-| `marcstraube.server.database_server` | `db_servers`  | pki, postgresql                     |
-| `marcstraube.server.n8n`             | `n8n_servers` | podman, postgresql, pki, n8n, nginx |
+| Playbook                             | Host group             | Stack                                        |
+| ------------------------------------ | ---------------------- | -------------------------------------------- |
+| `marcstraube.server.web_server`      | `web_servers`          | nginx or apache, certbot                     |
+| `marcstraube.server.database_server` | `db_servers`           | pki, postgresql, mariadb                     |
+| `marcstraube.server.n8n`             | `n8n_servers`          | podman, postgresql, pki, n8n, nginx          |
+| `marcstraube.server.activepieces`    | `activepieces_servers` | podman, postgresql, pki, activepieces, nginx |
+| `marcstraube.server.wazuh_server`    | `wazuh_servers`        | pki, wazuh_server                            |
 
 Every role in a stack is gated on its `<role>_enabled` toggle, so the
 inventory decides which parts of a stack run on a host:
@@ -102,7 +113,8 @@ ansible-playbook marcstraube.server.web_server -i inventory/ --tags nginx
 The roles are imported statically, so their sub-tags stay visible to
 `--tags` and `--list-tags`. A play of your own can import the task files
 under `playbooks/tasks/` instead: `system_update.yml` for the upgrade and
-`web_server.yml`, `database_server.yml` or `n8n.yml` for the stack.
+`web_server.yml`, `database_server.yml`, `n8n.yml`, `activepieces.yml` or
+`wazuh_server.yml` for the stack.
 
 ### Single Roles
 

@@ -1,0 +1,33 @@
+---
+galaxy_info:
+  author: Marc Straube
+  description: Run the Activepieces workflow automation platform as a rootless Podman container
+  license: MIT
+  min_ansible_version: '2.19'
+
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+
+    - name: Debian
+      versions:
+        - trixie
+
+    - name: EL
+      versions:
+        - all
+
+  galaxy_tags:
+    - automation
+    - workflow
+    - activepieces
+    - integration
+    - webhooks
+    - api
+    - nocode
+    - lowcode
+    - zapier
+    - podman
+
+dependencies: []

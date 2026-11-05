@@ -87,3 +87,375 @@
       check_mode: true
       register: __verify_ext_check
       failed_when: __verify_ext_check.changed
+
+    - name: Verify | Query pacman ignored packages (Arch)
+      ansible.builtin.command:
+        cmd: pacman-conf IgnorePkg
+      register: __verify_pacman_ignore
+      changed_when: false
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Verify | Assert the system upgrade leaves PostgreSQL alone (Arch)
+      ansible.builtin.assert:
+        that:
+          - "'postgresql' in __verify_pacman_ignore.stdout_lines"
+          - "'postgresql-libs' in __verify_pacman_ignore.stdout_lines"
+        fail_msg: 'pacman does not ignore postgresql and postgresql-libs: {{ __verify_pacman_ignore.stdout }}'
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    #
+    # Targeted package update (side_effect rolled the packages back and ran
+    # the role with postgresql_packages_state: latest)
+    #
+
+    - name: Verify | Read the server package versions around the rollback
+      ansible.builtin.slurp:
+        src: /root/postgresql-update-versions
+      register: __verify_update_versions
+
+    - name: Verify | Stat the version record
+      ansible.builtin.stat:
+        path: /root/postgresql-update-versions
+      register: __verify_update_stat
+
+    - name: Verify | Gather package facts after the update
+      ansible.builtin.package_facts:
+
+    - name: Verify | Set update version facts
+      ansible.builtin.set_fact:
+        __verify_version_latest: '{{ (__verify_update_versions.content | b64decode).splitlines()[0] | trim }}'
+        __verify_version_rolled_back: '{{ (__verify_update_versions.content | b64decode).splitlines()[1] | trim }}'
+        __verify_version_now: >-
+          {{ [(ansible_facts['packages'][__postgresql_server_package] | first).version,
+              (ansible_facts['packages'][__postgresql_server_package] | first).release | default('')]
+             | select | join('-') }}
+
+    - name: Verify | Assert the update restored the latest build
+      ansible.builtin.assert:
+        that:
+          - __verify_version_now == __verify_version_latest
+        fail_msg: >-
+          {{ __postgresql_server_package }} is at {{ __verify_version_now }}
+          after the update, expected {{ __verify_version_latest }} (rolled back
+          to {{ __verify_version_rolled_back }})
+        success_msg: >-
+          Updated from {{ __verify_version_rolled_back }} to {{ __verify_version_now }}
+      when:
+        - __verify_version_rolled_back != __verify_version_latest
+
+    # The third line of postmaster.pid holds the start time of the running
+    # server; a server started before the update still runs the old binaries.
+    - name: Verify | Read the postmaster PID file
+      ansible.builtin.slurp:
+        src: '{{ __postgresql_data_dir }}/postmaster.pid'
+      register: __verify_postmaster_pid
+      when:
+        - __verify_version_rolled_back != __verify_version_latest
+
+    - name: Verify | Assert the server was restarted after the update
+      ansible.builtin.assert:
+        that:
+          - __verify_postmaster_start | int > __verify_update_stat.stat.mtime | int
+        fail_msg: >-
+          The running server started at {{ __verify_postmaster_start }}, before
+          the package update at {{ __verify_update_stat.stat.mtime | int }}; it
+          still runs the old binaries
+        success_msg: 'The server was restarted after the package update'
+      vars:
+        __verify_postmaster_start: '{{ (__verify_postmaster_pid.content | b64decode).splitlines()[2] | trim }}'
+      when:
+        - __verify_version_rolled_back != __verify_version_latest
+
+    # pacman never restarts a service and side_effect blocks the package
+    # restart on Debian, so the role has to restart the server there; the
+    # EL packages restart it themselves, so the role must not restart it
+    # again.
+    - name: Verify | Read the server starts since the update
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - '--unit={{ __verify_cluster_unit }}'
+          - '--since=@{{ __verify_update_stat.stat.mtime }}'
+          - '--output=cat'
+          - '--no-pager'
+      register: __verify_update_journal
+      changed_when: false
+      vars:
+        __verify_cluster_unit: >-
+          {{ ('postgresql@' ~ __postgresql_version ~ '-main.service')
+             if ansible_facts['os_family'] == 'Debian' else __postgresql_service_name }}
+      when:
+        - __verify_version_rolled_back != __verify_version_latest
+
+    - name: Verify | Assert the update restarted the server once
+      ansible.builtin.assert:
+        that:
+          - __verify_update_starts | length == 1
+        fail_msg: >-
+          The server started {{ __verify_update_starts | length }} times after
+          the package update, expected once: {{ __verify_update_starts }}
+        success_msg: 'The server started once after the package update'
+      vars:
+        __verify_update_starts: >-
+          {{ __verify_update_journal.stdout_lines | select('match', '^Started ') | list }}
+      when:
+        - __verify_version_rolled_back != __verify_version_latest
+
+#
+# Backup and restore: side_effect ran the backup service once next to two
+# older dumps per name with postgresql_backup_keep 1 (on Rocky 9 through
+# the deprecated postgresql_backup_retention).
+#
+
+- name: Verify — Backup and Restore
+  hosts: all
+  gather_facts: true
+
+  # The converge settings: the play runs the role for the restore
+  vars:
+    postgresql_enabled: true
+    postgresql_ssl_enabled: false
+    postgresql_firewalld_enabled: false
+    postgresql_shared_buffers: '64MB'
+    postgresql_effective_cache_size: '128MB'
+    postgresql_lc_messages: 'en_US.UTF-8'
+    postgresql_lc_monetary: 'en_US.UTF-8'
+    postgresql_lc_numeric: 'en_US.UTF-8'
+    postgresql_lc_time: 'en_US.UTF-8'
+    postgresql_databases:
+      - name: testdb
+        owner: testuser
+    postgresql_users:
+      - name: testuser
+        password: testpassword
+    postgresql_extensions:
+      - name: pgcrypto
+        database: testdb
+    __verify_backup_dir: '/var/backups/postgresql'
+    __verify_dump_re: '_[0-9]{8}_[0-9]{6}\.sql\.gz$'
+
+  tasks:
+    - name: Verify | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Verify | Load OS-specific variables
+      ansible.builtin.include_vars: '{{ item }}'
+      with_first_found:
+        - files:
+            - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["distribution"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}.yml'
+          paths:
+            - '../../vars'
+
+    - name: Verify | Stat the backup script and directory
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+        - '{{ __postgresql_backup_script }}'
+        - '{{ __verify_backup_dir }}'
+      register: __verify_backup_paths
+
+    - name: Verify | Assert the backup script and directory belong to root
+      ansible.builtin.assert:
+        that:
+          - __verify_backup_paths.results[0].stat.exists
+          - __verify_backup_paths.results[0].stat.mode == '0750'
+          - __verify_backup_paths.results[0].stat.pw_name == 'root'
+          - __verify_backup_paths.results[1].stat.isdir
+          - __verify_backup_paths.results[1].stat.mode == '0700'
+          - __verify_backup_paths.results[1].stat.pw_name == 'root'
+
+    - name: Verify | Read the backup timer state
+      ansible.builtin.systemd_service:
+        name: '{{ __postgresql_backup_timer_name }}'
+      register: __verify_backup_timer
+
+    - name: Verify | Assert the backup timer is enabled and active
+      ansible.builtin.assert:
+        that:
+          - __verify_backup_timer.status.UnitFileState == 'enabled'
+          - __verify_backup_timer.status.ActiveState == 'active'
+        fail_msg: >-
+          UnitFileState={{ __verify_backup_timer.status.UnitFileState }}
+          ActiveState={{ __verify_backup_timer.status.ActiveState }}
+
+    - name: Verify | Read the backup service state
+      ansible.builtin.systemd_service:
+        name: '{{ __postgresql_backup_service_name }}'
+      register: __verify_backup_service
+
+    - name: Verify | Assert the backup service ran after PostgreSQL and succeeded
+      ansible.builtin.assert:
+        that:
+          - __postgresql_service_unit in __verify_backup_service.status.After.split()
+          - __verify_backup_service.status.Result == 'success'
+          - __verify_backup_service.status.ExecMainStatus == '0'
+        fail_msg: >-
+          After={{ __verify_backup_service.status.After }}
+          Result={{ __verify_backup_service.status.Result }}
+          ExecMainStatus={{ __verify_backup_service.status.ExecMainStatus }}
+
+    - name: Verify | List the dumps
+      ansible.builtin.find:
+        paths: '{{ __verify_backup_dir }}'
+        patterns: '*'
+      register: __verify_dumps
+
+    # testdb and the globals keep the new dump only; postgres is not dumped;
+    # the dump of a database whose name extends testdb is not part of the
+    # testdb rotation.
+    - name: Verify | Assert the rotation kept the newest dump per name
+      ansible.builtin.assert:
+        that:
+          - __verify_dump_names | select('match', '^testdb' ~ __verify_dump_re) | list | length == 1
+          - __verify_dump_names | select('match', '^globals' ~ __verify_dump_re) | list | length == 1
+          - "'testdb_20250102_000000.sql.gz' not in __verify_dump_names"
+          - "'globals_20250102_000000.sql.gz' not in __verify_dump_names"
+          - "'testdb_archive_20250101_000000.sql.gz' in __verify_dump_names"
+          - __verify_dump_names | select('match', '^postgres_') | list | length == 0
+          - __verify_dump_names | select('search', '[.]partial$') | list | length == 0
+          - __verify_dumps.files | rejectattr('pw_name', 'equalto', 'root') | list | length == 0
+          - __verify_dumps.files | rejectattr('mode', 'equalto', '0600') | list | length == 0
+        fail_msg: 'Dumps: {{ __verify_dump_names | sort }}'
+      vars:
+        __verify_dump_names: "{{ __verify_dumps.files | map(attribute='path') | map('basename') | list }}"
+
+    - name: Verify | Set the dump to restore
+      ansible.builtin.set_fact:
+        __verify_restore_dump: >-
+          {{ __verify_dumps.files | map(attribute='path') | map('basename')
+             | select('match', '^testdb' ~ __verify_dump_re) | first }}
+
+    # A database that is not managed through postgresql_databases (the
+    # globals) must be refused before anything changes.
+    - name: Verify | Restore the globals dump
+      block:
+        - name: Verify | Include postgresql role with the globals dump  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            postgresql_restore: >-
+              {{ __verify_dumps.files | map(attribute='path') | map('basename')
+                 | select('match', '^globals' ~ __verify_dump_re) | first }}
+      rescue:
+        - name: Verify | Record the refused restore
+          ansible.builtin.set_fact:
+            __verify_restore_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Assert the restore of the globals dump was refused
+      ansible.builtin.assert:
+        that:
+          - __verify_restore_error is defined
+          - "'is not a dump of a database' in __verify_restore_error"
+        fail_msg: 'The restore of a globals dump was not refused'
+
+    - name: Verify | Change the data after the backup
+      community.postgresql.postgresql_query:
+        login_db: testdb
+        query: INSERT INTO restore_marker (note) VALUES ('after the backup')
+      become: true
+      become_user: '{{ __postgresql_user }}'
+
+    # An open session on testdb: the restore has to terminate it to drop
+    # the database.
+    - name: Verify | Open a session on the database
+      ansible.builtin.command:
+        argv:
+          - runuser
+          - '-u'
+          - '{{ __postgresql_user }}'
+          - '--'
+          - '{{ __postgresql_bin_dir }}/psql'
+          - '-X'
+          - '-d'
+          - testdb
+          - '-c'
+          - SELECT pg_sleep(600)
+      async: 600
+      poll: 0
+      changed_when: false
+
+    - name: Verify | Wait for the session on the database
+      community.postgresql.postgresql_query:
+        login_db: postgres
+        query: >-
+          SELECT count(*) AS sessions FROM pg_stat_activity
+          WHERE datname = 'testdb' AND query LIKE 'SELECT pg_sleep%'
+      become: true
+      become_user: '{{ __postgresql_user }}'
+      register: __verify_sessions
+      until: __verify_sessions.query_result[0].sessions | int > 0
+      retries: 10
+      delay: 1
+
+    - name: Verify | Include postgresql role (restore)  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        postgresql_restore: '{{ __verify_restore_dump }}'
+
+    - name: Verify | Read the marker rows after the restore
+      community.postgresql.postgresql_query:
+        login_db: testdb
+        query: SELECT note FROM restore_marker ORDER BY note
+      become: true
+      become_user: '{{ __postgresql_user }}'
+      register: __verify_marker
+
+    - name: Verify | Assert the database holds the state of the dump
+      ansible.builtin.assert:
+        that:
+          - __verify_marker.query_result | map(attribute='note') | list == ['before the backup']
+        fail_msg: 'restore_marker: {{ __verify_marker.query_result }}'
+
+    - name: Verify | Read the database owner after the restore
+      community.postgresql.postgresql_query:
+        login_db: postgres
+        query: >-
+          SELECT pg_get_userbyid(datdba) AS owner FROM pg_database
+          WHERE datname = 'testdb'
+      become: true
+      become_user: '{{ __postgresql_user }}'
+      register: __verify_owner
+
+    - name: Verify | Assert the database was recreated with its owner
+      ansible.builtin.assert:
+        that:
+          - __verify_owner.query_result[0].owner == 'testuser'
+
+    - name: Verify | Count the sessions on the database after the restore
+      community.postgresql.postgresql_query:
+        login_db: postgres
+        query: >-
+          SELECT count(*) AS sessions FROM pg_stat_activity
+          WHERE datname = 'testdb' AND query LIKE 'SELECT pg_sleep%'
+      become: true
+      become_user: '{{ __postgresql_user }}'
+      register: __verify_sessions_after
+
+    - name: Verify | Assert the restore terminated the open session
+      ansible.builtin.assert:
+        that:
+          - __verify_sessions_after.query_result[0].sessions | int == 0
+
+    - name: Verify | List the dumps after the restore
+      ansible.builtin.find:
+        paths: '{{ __verify_backup_dir }}'
+        patterns: 'testdb_*.sql.gz'
+      register: __verify_dumps_after
+
+    # The restore dumped the state before it; with keep 1 the rotation of
+    # that dump must leave the restored dump alone.
+    - name: Verify | Assert the state before the restore was dumped
+      ansible.builtin.assert:
+        that:
+          - __verify_restore_dump in __verify_names_after
+          - __verify_testdb_after | length == 2
+          - __verify_testdb_after | reject('equalto', __verify_restore_dump) | first > __verify_restore_dump
+        fail_msg: 'Dumps: {{ __verify_names_after | sort }}'
+      vars:
+        __verify_names_after: "{{ __verify_dumps_after.files | map(attribute='path') | map('basename') | list }}"
+        __verify_testdb_after: "{{ __verify_names_after | select('match', '^testdb' ~ __verify_dump_re) | list }}"

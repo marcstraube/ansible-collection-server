@@ -1,8 +1,9 @@
 ---
 # Update scenario: prepare deploys the previous release, converge updates
-# to the role default (stop, backup set, image pull, readiness), verify then
-# exercises the downgrade guard and the restore of the backup set. One
-# platform only — every stage pulls an n8n image.
+# to the role default (stop, backup set, image pull, readiness),
+# side_effect runs the scheduled backup, verify then exercises the
+# downgrade guard and the restore of the pre-update set. One platform only
+# — every stage pulls an n8n image.
 driver:
   name: podman
 platforms:
@@ -21,6 +22,7 @@ provisioner:
   playbooks:
     prepare: prepare.yml
     converge: converge.yml
+    side_effect: side_effect.yml
     verify: verify.yml
   inventory:
     group_vars:
@@ -56,6 +58,20 @@ provisioner:
             ignore_chown_errors: 'true'
         # Release installed by prepare; converge updates to the role default
         n8n_update_previous_version: '2.42.0'
+        # A first start copies the image layers into the user namespace of the
+        # n8n user; on a host whose audit rules throttle the chown of every
+        # file that takes longer than the role defaults allow
+        n8n_service_start_timeout: 900
+        n8n_ready_timeout: 900
+        # Tag of another repository that the image cleanup must keep
+        n8n_update_unrelated_image: 'localhost/molecule/unrelated:1'
+        # side_effect runs the scheduled backup twice; the pre-update set
+        # of the converge run has to survive the scheduled retention
+        n8n_backup_keep: 1
+        # The deprecated name of the pre-update retention has to take
+        # effect until its removal; verify expects the rotation of the
+        # restore to keep two pre-update sets besides the restored one
+        n8n_update_backup_keep: 2
     host_vars:
       n8n-update-debian-trixie:
         ansible_python_interpreter: /usr/bin/python3
@@ -71,5 +87,6 @@ scenario:
     - prepare
     - converge
     - idempotence
+    - side_effect
     - verify
     - destroy

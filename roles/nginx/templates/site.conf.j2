@@ -1,4 +1,7 @@
 {{ ansible_managed | comment }}
+{% set __nginx_https_port = '' if item.listen_ssl | default(443) | int == 443 else ':' ~ item.listen_ssl %}
+{% set __nginx_http_port = '' if item.listen | default(80) | int == 80 else ':' ~ item.listen %}
+{% set __nginx_site_port = __nginx_https_port if item.ssl is defined and item.ssl.enabled | default(false) else __nginx_http_port %}
 
 {% if item.http_redirect | default(false) and item.ssl is defined and item.ssl.enabled | default(false) %}
 # HTTP to HTTPS redirect
@@ -14,7 +17,7 @@ server {
 {% endfor %}
 
     location / {
-        return 301 https://$host$request_uri;
+        return 301 https://$host{{ __nginx_https_port }}$request_uri;
     }
 }
 {% endif %}
@@ -33,10 +36,10 @@ server {
 {% endif %}
 {% if item.www_redirect == 'non-www' %}
     server_name www.{{ item.server_names[0] }};
-    return 301 $scheme://{{ item.server_names[0] }}$request_uri;
+    return 301 $scheme://{{ item.server_names[0] }}{{ __nginx_site_port }}$request_uri;
 {% else %}
     server_name {{ item.server_names[0] }};
-    return 301 $scheme://www.{{ item.server_names[0] }}$request_uri;
+    return 301 $scheme://www.{{ item.server_names[0] }}{{ __nginx_site_port }}$request_uri;
 {% endif %}
 }
 {% endif %}

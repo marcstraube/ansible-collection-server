@@ -1,0 +1,54 @@
+---
+#
+# Activepieces — Shared Variables
+#
+
+# Service name (role-created unit, no OS variation)
+__activepieces_service_name: 'activepieces.service'
+
+# Backup script and the units that run it on a schedule
+__activepieces_backup_script: '/usr/local/bin/activepieces-backup'
+__activepieces_backup_service_name: 'activepieces-backup.service'
+__activepieces_backup_timer_name: 'activepieces-backup.timer'
+
+# Environment file of the container (secrets, mode 0600)
+__activepieces_config_dir: '/etc/activepieces'
+__activepieces_env_file: '{{ __activepieces_config_dir }}/activepieces.env'
+
+# Piece cache of the worker (/usr/src/app/cache in the container); kept
+# across restarts, not part of the backup
+__activepieces_cache_dir: '{{ activepieces_user_home }}/cache'
+
+# Runtime state of the rootless podman instance; the service unit creates
+# it as its RuntimeDirectory. It lives under /run/user/<uid>, the only
+# place the AppArmor profile of pasta (Debian, Ubuntu) lets pasta open the
+# network namespace of the container. The UID comes from the lookup in
+# main.yml and install.yml; before the user exists (first check run) it
+# is empty.
+__activepieces_uid: >-
+  {{ ((__activepieces_user_entry.ansible_facts.getent_passwd | default({}))[activepieces_user]
+     | default(['', ''], true))[1] }}
+__activepieces_runtime_dir: '/run/user/{{ __activepieces_uid }}'
+
+# Container paths of the image
+__activepieces_container_data_dir: '/root/.activepieces'
+__activepieces_container_cache_dir: '/usr/src/app/cache'
+
+# Release tags the downgrade guard compares: X.Y.Z with an optional
+# -hotfix.N suffix
+__activepieces_version_pattern: '^[0-9]+\.[0-9]+\.[0-9]+(-hotfix\.[0-9]+)?$'
+
+# Addresses of a PostgreSQL server on the host itself; the container
+# reaches them through a port forward to the loopback of the host
+__activepieces_loopback_hosts:
+  - 'localhost'
+  - '127.0.0.1'
+  - '::1'
+
+# PostgreSQL runs on the host itself
+__activepieces_db_local: >-
+  {{ activepieces_db_type == 'POSTGRES'
+     and activepieces_db_host in __activepieces_loopback_hosts }}
+
+# Unit names of a PostgreSQL server: the distribution packages and PGDG
+__activepieces_db_unit_pattern: '^postgresql(-[0-9]+)?\.service$'

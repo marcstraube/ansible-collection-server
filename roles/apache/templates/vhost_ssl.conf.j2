@@ -1,6 +1,6 @@
 {{ ansible_managed | comment }}
 
-<VirtualHost *:{{ item.listen_port | default(443) }}>
+<VirtualHost {{ item.listen_address | default('*') }}:{{ item.listen_port | default(443) }}>
     ServerName {{ item.server_name }}
 {% if item.server_alias is defined %}
 {% for alias in item.server_alias %}
@@ -38,25 +38,7 @@
     Protocols h2 http/1.1
 
 {% endif %}
-{% if apache_php_fpm_enabled | default(false) %}
-{% set __apache_fpm_global = apache_php_fpm_scope | default('vhost') == 'global' %}
-{% if not __apache_fpm_global or item.php_fpm_socket is defined %}
-    # PHP-FPM proxy
-{% set __apache_fpm_raw = item.php_fpm_socket | default(apache_php_fpm_socket) %}
-{# Same rule as __apache_php_fpm_handler in vars/main.yml: the placeholder URL
-   belongs to a Unix socket only. See the comment there. #}
-{% set __apache_fpm_socket = __apache_fpm_raw ~ '|fcgi://localhost' if (__apache_fpm_raw.startswith('unix:') and '|' not in __apache_fpm_raw) else __apache_fpm_raw %}
-    <FilesMatch "\.php$">
-        SetHandler "proxy:{{ __apache_fpm_socket }}"
-    </FilesMatch>
-{% endif %}
-{% if not __apache_fpm_global or item.php_fpm_timeout is defined %}
-    ProxyTimeout {{ item.php_fpm_timeout | default(apache_php_fpm_timeout) }}
-{% endif %}
-{% if not __apache_fpm_global or item.php_fpm_socket is defined or item.php_fpm_timeout is defined %}
-
-{% endif %}
-{% endif %}
+{% include 'vhost_php_fpm.conf.j2' %}
     # Logging
     ErrorLog {{ __apache_log_dir }}/{{ item.server_name }}-ssl-error.log
     CustomLog {{ __apache_log_dir }}/{{ item.server_name }}-ssl-access.log combined

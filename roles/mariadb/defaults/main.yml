@@ -1,0 +1,263 @@
+---
+#
+# Role Control
+#
+
+# Enable the mariadb role
+mariadb_enabled: false
+
+# Enable and start the MariaDB service
+mariadb_service_enabled: true
+
+#
+# Version
+#
+
+# Package source:
+#   'distro'   - Distribution packages: Debian main, the EL AppStream (module
+#                stream on EL 9, package set on EL 10), the Arch official
+#                repo. Versions follow the distro lifecycle.
+#   'upstream' - MariaDB Foundation repository (deb.mariadb.org,
+#                rpm.mariadb.org). Every supported major version is
+#                available. On EL the packages are named MariaDB-* and
+#                replace the AppStream mariadb packages; on EL 9 the role
+#                disables the AppStream mariadb module.
+# Ignored on Arch Linux (official repository only, see mariadb_arch_package).
+mariadb_repo: 'distro'
+
+# Major version, honored with every source:
+#   'distro'   - Debian 13 ships 11.8 only. EL 9 selects the AppStream
+#                module stream (10.11, 11.8; 10.5 is the non-modular
+#                default). EL 10 selects the package set (10.11 as
+#                mariadb-server, 11.8 as mariadb11.8-server).
+#   'upstream' - Debian 13: 11.8, 12.3, 13.0, 13.1. EL 9 and 10: 10.11, 11.4,
+#                11.8, 12.3, 13.0, 13.1.
+# A version the source does not carry fails the run. The role never
+# upgrades a major version: a host with another installed version fails
+# with both versions (see README). Ignored on Arch Linux.
+mariadb_version: '11.8'
+
+# Arch Linux package: 'mariadb' (current release) or 'mariadb-lts' (long-term
+# support release). The two conflict; switching on an installed host replaces
+# the server and needs a mariadb-upgrade run afterwards.
+mariadb_arch_package: 'mariadb'
+
+#
+# Package Updates
+#
+
+# State of the MariaDB packages:
+#   'present' installs missing packages and never updates (default).
+#   'latest'  updates the installed MariaDB packages in one transaction and
+#             restarts the MariaDB service while it still runs the replaced
+#             binary.
+# Pass 'latest' for a targeted update instead of setting it in inventory:
+#   --tags mariadb -e mariadb_packages_state=latest
+# Ignored on Arch Linux: updating single packages is a partial upgrade there,
+# MariaDB updates with the full system upgrade.
+mariadb_packages_state: 'present'
+
+# Lowest acceptable version, checked before the update (nothing changes when
+# the repository does not offer it yet) and again after it. Meant to be passed
+# with the update command to require a fix. Either an upstream version, which
+# accepts every distribution release of it:
+#   -e mariadb_packages_minimum=11.8.6
+# or the full distribution version, which also covers fixes the distribution
+# backports without a new upstream version:
+#   -e mariadb_packages_minimum=1:11.8.6-0+deb13u1
+# A mapping per platform (keys '<os_family>-<major>' or '<os_family>') covers
+# mixed hosts in one run; a host without a matching key fails:
+#   -e @mariadb-minimum.yml
+mariadb_packages_minimum: ''
+
+#
+# Network
+#
+
+# Address the server listens on (127.0.0.1 = local only, 0.0.0.0 = all;
+# see README Notes for the firewall requirements of a remote-reachable server)
+mariadb_bind_address: '127.0.0.1'
+
+# Port
+mariadb_port: 3306
+
+# Maximum simultaneous client connections
+mariadb_max_connections: 151
+
+# Resolve client host names (off = IP addresses only in grants, faster logins)
+mariadb_skip_name_resolve: true
+
+#
+# Character Set
+#
+
+# Default character set and collation of new databases
+mariadb_character_set_server: 'utf8mb4'
+mariadb_collation_server: 'utf8mb4_unicode_ci'
+
+#
+# InnoDB
+#
+
+# Buffer pool size (typically 50-70% of RAM on a dedicated database server)
+mariadb_innodb_buffer_pool_size: '128M'
+
+# Redo log size
+mariadb_innodb_log_file_size: '96M'
+
+# Flush the redo log at every commit (1 = durable, 2 = flush once per second)
+mariadb_innodb_flush_log_at_trx_commit: 1
+
+# Flush method for data files (O_DIRECT bypasses the OS page cache)
+mariadb_innodb_flush_method: 'O_DIRECT'
+
+# One tablespace file per table
+mariadb_innodb_file_per_table: true
+
+#
+# Connections
+#
+
+# Largest packet a client may send (large BLOBs, bulk inserts)
+mariadb_max_allowed_packet: '64M'
+
+# Seconds an idle non-interactive / interactive connection stays open
+mariadb_wait_timeout: 600
+mariadb_interactive_timeout: 600
+
+# Threads kept for reuse
+mariadb_thread_cache_size: 16
+
+# Open table cache
+mariadb_table_open_cache: 2000
+
+# Largest in-memory temporary table (both must be equal to take effect)
+mariadb_tmp_table_size: '32M'
+mariadb_max_heap_table_size: '32M'
+
+#
+# Logging
+#
+
+# Error log file. Empty leaves the destination to the distribution:
+# /var/log/mariadb/mariadb.log on EL, the journal on Debian and Arch Linux.
+# The role creates the parent directory of a configured path.
+mariadb_log_error: ''
+
+# Log queries slower than mariadb_long_query_time seconds
+mariadb_slow_query_log: false
+
+# Slow query log file (empty = <data directory>/<hostname>-slow.log)
+mariadb_slow_query_log_file: ''
+
+# Threshold for the slow query log in seconds
+mariadb_long_query_time: 10
+
+# Also log queries that use no index
+mariadb_log_queries_not_using_indexes: false
+
+# Log every statement (debugging only, large files)
+mariadb_general_log: false
+
+#
+# TLS
+#
+
+# Enable TLS — disabled by default. Loopback connections do not need it, and
+# a wrong certificate or key path keeps the server from starting. When
+# enabled, the role asserts that certificate and key exist.
+mariadb_ssl_enabled: false
+
+# Certificate file — empty falls back to the OS default in vars/ (Debian:
+# the ssl-cert snakeoil pair; EL and Arch Linux have none, set a path).
+mariadb_ssl_cert_file: ''
+
+# Key file — same fallback as mariadb_ssl_cert_file. Must be readable by
+# the mysql user.
+mariadb_ssl_key_file: ''
+
+# CA certificate file (empty = none; needed for client certificate checks)
+mariadb_ssl_ca_file: ''
+
+# Accepted TLS protocol versions
+mariadb_tls_version: 'TLSv1.2,TLSv1.3'
+
+# Reject unencrypted TCP connections (unix socket connections stay allowed)
+mariadb_require_secure_transport: false
+
+#
+# Databases
+#
+
+# Databases to create
+mariadb_databases: []
+# Example:
+#   - name: 'myapp'
+#     encoding: 'utf8mb4'
+#     collation: 'utf8mb4_unicode_ci'
+
+#
+# Users
+#
+
+# Users to create. priv uses the ansible.mariadb.mariadb_user format
+# ('db.table:PRIV1,PRIV2/db2.*:PRIV'); host defaults to 'localhost'.
+mariadb_users: []
+# Example:
+#   - name: 'myapp'
+#     password: 'secret'
+#     host: 'localhost'
+#     priv: 'myapp.*:ALL'
+
+#
+# Backup
+#
+# The script /usr/local/bin/mariadb-backup writes one compressed
+# mariadb-dump per database to mariadb_backup_dir, named
+# <database>_<YYYYmmdd_HHMMSS>.sql.gz; mariadb-backup.timer runs it on a
+# schedule and a restore runs it first for the database it replaces. The
+# retention is count-based per database.
+
+# Enable the scheduled backup (mariadb-backup.timer)
+mariadb_backup_enabled: false
+
+# Backup directory
+mariadb_backup_dir: '/var/backups/mariadb'
+
+# Dumps to keep per database (the newest N stay, older ones are removed
+# after each successful dump)
+mariadb_backup_keep: 7
+
+# Databases to back up (empty = all except the system schemas)
+mariadb_backup_databases: []
+
+# Enable and start the mariadb-backup timer
+mariadb_backup_timer_enabled: true
+
+# Schedule of the timer (systemd OnCalendar)
+mariadb_backup_on_calendar: '*-*-* 03:00:00'
+
+# Dump file in mariadb_backup_dir to restore, e.g.
+# 'myapp_20261104_000000.sql.gz'. The database must be managed through
+# mariadb_databases: the role takes a fresh dump of it, drops and recreates
+# it and loads the dump. One-shot: pass it with -e for one run, never set it
+# in inventory.
+mariadb_restore: ''
+
+# DEPRECATED: Use mariadb_backup_keep instead (removed in the next major version)
+# mariadb_backup_retention: {{ mariadb_backup_keep }}
+
+# DEPRECATED: Use mariadb_backup_on_calendar instead (removed in the next
+# major version). While set (cron format, e.g. '0 3 * * *'), the backup runs
+# from a cron job instead of the timer.
+# mariadb_backup_schedule: '0 3 * * *'
+
+#
+# Extra Configuration
+#
+
+# Extra [mysqld] options (key-value pairs, rendered as key = value)
+mariadb_extra_config: {}
+# Example:
+#   innodb_io_capacity: 2000
+#   sql_mode: 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'

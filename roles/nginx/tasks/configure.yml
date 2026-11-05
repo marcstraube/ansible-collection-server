@@ -1,4 +1,6 @@
 ---
+# A proxy site reaches its backend with or without an upstream definition;
+# without the boolean the policy only allows backend ports in http_port_t.
 - name: Configure | Allow nginx network connections (SELinux)
   ansible.posix.seboolean:
     name: httpd_can_network_connect
@@ -7,7 +9,44 @@
   when:
     - ansible_facts['os_family'] == 'RedHat'
     - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
-    - nginx_upstreams | length > 0
+    - >-
+      nginx_upstreams | length > 0
+      or nginx_sites | selectattr('type', 'defined') | selectattr('type', 'eq', 'proxy') | list | length > 0
+
+# The policy only lets nginx bind the ports in http_port_t (80, 81, 443, 488,
+# 8008, 8009, 8443 and 9000). Any other port of an enabled site needs the
+# label, or nginx fails to bind it with "Permission denied". A site listens on
+# listen_ssl with SSL, on listen without SSL or for the HTTP redirect.
+- name: Configure | Label additional site ports for SELinux
+  community.general.seport:
+    ports: '{{ __nginx_selinux_ports }}'
+    proto: tcp
+    setype: http_port_t
+    state: present
+  vars:
+    __nginx_selinux_sites: >-
+      {{
+        nginx_sites | selectattr('enabled', 'undefined') | list
+        + nginx_sites | selectattr('enabled', 'defined') | selectattr('enabled') | list
+      }}
+    __nginx_selinux_ssl_sites: >-
+      {{
+        __nginx_selinux_sites | selectattr('ssl', 'defined')
+        | selectattr('ssl.enabled', 'defined') | selectattr('ssl.enabled') | list
+      }}
+    __nginx_selinux_ports: >-
+      {{
+        (__nginx_selinux_ssl_sites | map(attribute='listen_ssl', default=443) | list
+         + __nginx_selinux_sites | reject('in', __nginx_selinux_ssl_sites)
+           | map(attribute='listen', default=80) | list
+         + __nginx_selinux_ssl_sites | selectattr('http_redirect', 'defined')
+           | selectattr('http_redirect') | map(attribute='listen', default=80) | list)
+        | map('string') | reject('in', __nginx_selinux_default_ports) | unique | list
+      }}
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+    - __nginx_selinux_ports | length > 0
 
 - name: Configure | Create required directories
   ansible.builtin.file:
