@@ -134,7 +134,7 @@ See [Enrollment Authentication](#enrollment-authentication) under Notes.
 | -------------------------- | ------------------------- | ------------------------------------------------ |
 | `wazuh_server_http_proxy`  | `''`                      | HTTP proxy of the manager, empty for none        |
 | `wazuh_server_https_proxy` | `wazuh_server_http_proxy` | HTTPS proxy of the manager                       |
-| `wazuh_server_no_proxy`    | `'localhost,127.0.0.1'`   | Comma-separated hosts that bypass the proxy      |
+| `wazuh_server_no_proxy`    | `'localhost,127.0.0.1'`   | Additional hosts that bypass the proxy           |
 
 See [Outgoing Proxy](#outgoing-proxy-1) under Notes.
 
@@ -242,7 +242,9 @@ because keystore entries take precedence over `opensearch_dashboards.yml`.
 
 The enrollment service `wazuh-authd` accepts every agent by default. The
 role sets its options in the `<auth>` section of the package
-`/var/ossec/etc/ossec.conf` and leaves the rest of the file to the package:
+`/var/ossec/etc/ossec.conf` and, apart from the indexer address (see
+[Outgoing Proxy](#outgoing-proxy-1)), leaves the rest of the file to the
+package:
 
 - With `wazuh_server_enrollment_password`, agents have to send the password
   (`use_password`), which the role writes to `/var/ossec/etc/authd.pass`
@@ -272,15 +274,27 @@ with the three variables in upper and lower case, reloads systemd and
 restarts the manager. An empty proxy removes the drop-in and restarts the
 manager without it.
 
-The manager also connects to the indexer, and that connection must not go
-through the proxy. The default `wazuh_server_no_proxy` covers an indexer
-on `localhost` or `127.0.0.1`; when the indexer listens on another address
-(`wazuh_server_indexer_network_host`), add that address:
+The manager also connects to the indexer to store the vulnerability
+state. The role sets this connection in `<indexer><hosts><host>` of
+`ossec.conf` to `https://<wazuh_server_indexer_network_host>:<wazuh_server_indexer_http_port>`,
+the address Filebeat and the dashboard use, and checks afterwards that the
+element carries it. A changed address restarts the manager.
+
+That connection must not go through the proxy. libcurl matches `no_proxy`
+against the host name as written in the URL, so the role writes
+`wazuh_server_no_proxy` plus `wazuh_server_indexer_network_host` (without
+duplicates) to the drop-in. `wazuh_server_no_proxy` only needs the other
+hosts the manager reaches directly:
 
 ```yaml
 wazuh_server_http_proxy: 'http://proxy.example.com:3128'
-wazuh_server_no_proxy: 'localhost,127.0.0.1,192.0.2.10'
+wazuh_server_no_proxy: 'localhost,127.0.0.1,wazuh-mirror.example.com'
 ```
+
+The indexer certificate (`wazuh_server_node_cert_file`) has to cover
+`wazuh_server_indexer_network_host` in its subject alternative names,
+because Filebeat, the dashboard and the manager verify it against that
+address.
 
 The manager starts without contacting the proxy; a content download that
 fails is logged in `/var/ossec/logs/ossec.log` and retried with the next

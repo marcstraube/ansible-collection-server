@@ -272,6 +272,21 @@
         - '{{ __wazuh_server_filebeat_service_name }}'
         - '{{ __wazuh_server_dashboard_service_name }}'
 
+    - name: Verify | Read the manager configuration
+      ansible.builtin.slurp:
+        src: '{{ __wazuh_server_manager_config_file }}'
+      register: __verify_manager_config
+
+    - name: Verify | Assert the manager connects to the indexer address
+      ansible.builtin.assert:
+        that:
+          - "'<host>https://127.0.0.1:9200</host>' in __verify_manager_indexer_section"
+        fail_msg: 'The <indexer> section of ossec.conf does not point to https://127.0.0.1:9200'
+      vars:
+        __verify_manager_indexer_section: >-
+          {{ __verify_manager_config.content | b64decode
+             | regex_search('(?s)<indexer>.*?</indexer>') | default('', true) }}
+
     # The scenario sets a proxy: the drop-in is in place and the manager
     # daemons inherit the environment of the service
     - name: Verify | Stat the manager proxy drop-in
@@ -285,6 +300,23 @@
           - __verify_proxy_dropin.stat.exists
           - __verify_proxy_dropin.stat.mode == '0644'
         fail_msg: '{{ __wazuh_server_manager_proxy_dropin_file }} is missing or has the wrong mode'
+
+    # wazuh_server_no_proxy lacks the indexer address; the role adds it
+    - name: Verify | Read the manager proxy drop-in
+      ansible.builtin.slurp:
+        src: '{{ __wazuh_server_manager_proxy_dropin_file }}'
+      register: __verify_proxy_dropin_content
+
+    - name: Verify | Assert the manager proxy drop-in bypasses the proxy for the indexer
+      ansible.builtin.assert:
+        that:
+          - item in __verify_proxy_dropin_lines
+        fail_msg: '{{ __wazuh_server_manager_proxy_dropin_file }} lacks {{ item }}'
+      loop:
+        - 'Environment="no_proxy=localhost,127.0.0.1"'
+        - 'Environment="NO_PROXY=localhost,127.0.0.1"'
+      vars:
+        __verify_proxy_dropin_lines: '{{ (__verify_proxy_dropin_content.content | b64decode).splitlines() }}'
 
     - name: Verify | Read the PID of wazuh-modulesd
       ansible.builtin.command:
