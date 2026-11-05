@@ -111,6 +111,12 @@ __wazuh_server_enrollment_agent_ca_path: 'etc/authd-agent-ca.pem'
 __wazuh_server_manager_dropin_dir: '/etc/systemd/system/{{ __wazuh_server_manager_service_name }}.service.d'
 __wazuh_server_manager_proxy_dropin_file: '{{ __wazuh_server_manager_dropin_dir }}/proxy.conf'
 
+# Hosts that bypass the proxy of the manager: wazuh_server_no_proxy plus
+# the indexer address, so the indexer connection never goes through the proxy
+__wazuh_server_manager_no_proxy: >-
+  {{ (wazuh_server_no_proxy.split(',') + [wazuh_server_indexer_network_host])
+     | map('trim') | reject('equalto', '') | unique | join(',') }}
+
 # <auth> elements of ossec.conf the role sets
 __wazuh_server_enrollment_options:
   use_password: "{{ (wazuh_server_enrollment_password | length > 0) | ternary('yes', 'no') }}"

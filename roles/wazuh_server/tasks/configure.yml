@@ -53,7 +53,8 @@
 # Wazuh Manager
 #
 # ossec.conf stays the package file; the role only sets the enrollment
-# options inside its <auth> section.
+# options inside its <auth> section and the indexer address inside its
+# <indexer> section.
 #
 
 - name: Configure | Deploy enrollment password
@@ -100,8 +101,19 @@
                    '<!-- <ssl_agent_ca></ssl_agent_ca> -->') }}
   notify: Restart Wazuh manager
 
+# The manager connects to the indexer at this URL; the package default
+# https://0.0.0.0:9200 only works while the indexer listens on the loopback
+- name: Configure | Set manager indexer host
+  ansible.builtin.replace:
+    path: '{{ __wazuh_server_manager_config_file }}'
+    after: '<indexer>'
+    before: '</indexer>'
+    regexp: '<host>[^<]*</host>'
+    replace: '<host>{{ __wazuh_server_indexer_url }}</host>'
+  notify: Restart Wazuh manager
+
 # replace leaves the file unchanged when a pattern finds nothing, for
-# example after a Wazuh release changed the <auth> section
+# example after a Wazuh release changed the <auth> or <indexer> section
 - name: Configure | Read manager configuration
   ansible.builtin.slurp:
     src: '{{ __wazuh_server_manager_config_file }}'
@@ -127,6 +139,21 @@
     __wazuh_server_auth_section: >-
       {{ __wazuh_server_manager_config.content | b64decode
          | regex_search('(?s)<auth>.*?</auth>') | default('', true) }}
+  when: not ansible_check_mode
+
+- name: Configure | Assert manager indexer host is set
+  ansible.builtin.assert:
+    that:
+      - ('<host>' ~ __wazuh_server_indexer_url ~ '</host>') in __wazuh_server_indexer_section
+    fail_msg: >-
+      The <indexer> section of {{ __wazuh_server_manager_config_file }} has
+      no element host with the value {{ __wazuh_server_indexer_url }}. The
+      format of ossec.conf may have changed with this Wazuh release.
+    quiet: true
+  vars:
+    __wazuh_server_indexer_section: >-
+      {{ __wazuh_server_manager_config.content | b64decode
+         | regex_search('(?s)<indexer>.*?</indexer>') | default('', true) }}
   when: not ansible_check_mode
 
 # ossec.conf has no proxy option: the manager daemons take the proxy from

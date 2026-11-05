@@ -6,7 +6,5 @@ Environment="http_proxy={{ wazuh_server_http_proxy }}"
 Environment="HTTP_PROXY={{ wazuh_server_http_proxy }}"
 Environment="https_proxy={{ wazuh_server_https_proxy }}"
 Environment="HTTPS_PROXY={{ wazuh_server_https_proxy }}"
-{% if wazuh_server_no_proxy | length > 0 %}
-Environment="no_proxy={{ wazuh_server_no_proxy }}"
-Environment="NO_PROXY={{ wazuh_server_no_proxy }}"
-{% endif %}
+Environment="no_proxy={{ __wazuh_server_manager_no_proxy }}"
+Environment="NO_PROXY={{ __wazuh_server_manager_no_proxy }}"
