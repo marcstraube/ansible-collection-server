@@ -214,3 +214,65 @@
         fail_msg: 'An update across a major version did not fail the run'
         success_msg: 'The update refuses a new major version'
       when: ansible_facts['os_family'] == 'Archlinux'
+
+# Scheduled backup: a marker row in testdb that verify expects back after
+# the restore, two older dumps per name for the rotation (keep 1), then
+# one run of the backup service.
+- name: Side Effect — Backup
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __side_effect_backup_dir: '/var/backups/postgresql'
+
+  tasks:
+    - name: Side Effect | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Side Effect | Load OS-specific variables
+      ansible.builtin.include_vars: '{{ item }}'
+      with_first_found:
+        - files:
+            - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["distribution"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}.yml'
+          paths:
+            - '../../vars'
+
+    - name: Side Effect | Create the restore marker table
+      community.postgresql.postgresql_query:
+        login_db: testdb
+        query: CREATE TABLE IF NOT EXISTS restore_marker (note text NOT NULL)
+      become: true
+      become_user: '{{ __postgresql_user }}'
+
+    - name: Side Effect | Insert the marker row of the backup
+      community.postgresql.postgresql_query:
+        login_db: testdb
+        query: INSERT INTO restore_marker (note) VALUES ('before the backup')
+      become: true
+      become_user: '{{ __postgresql_user }}'
+
+    # Older than the dump of the service run by the timestamp in the name,
+    # including a database whose name extends testdb: the rotation of
+    # testdb must leave it alone.
+    - name: Side Effect | Create older dumps
+      ansible.builtin.copy:
+        content: ''
+        dest: '{{ __side_effect_backup_dir }}/{{ item }}'
+        owner: root
+        group: root
+        mode: '0600'
+      loop:
+        - testdb_20250101_000000.sql.gz
+        - testdb_20250102_000000.sql.gz
+        - globals_20250101_000000.sql.gz
+        - globals_20250102_000000.sql.gz
+        - testdb_archive_20250101_000000.sql.gz
+
+    - name: Side Effect | Run the backup service
+      ansible.builtin.systemd_service:
+        name: '{{ __postgresql_backup_service_name }}'
+        state: started

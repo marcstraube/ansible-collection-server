@@ -1,0 +1,13 @@
+{{ ansible_managed | comment }}
+
+[Unit]
+Description=PostgreSQL backup dumps
+Documentation=https://www.postgresql.org/docs/current/backup-dump.html
+After={{ __postgresql_service_unit }}
+
+[Service]
+Type=oneshot
+ExecStart={{ __postgresql_backup_script }}
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=postgresql-backup

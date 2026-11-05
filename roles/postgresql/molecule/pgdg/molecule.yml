@@ -50,6 +50,10 @@ provisioner:
         # service name and paths from it.
         postgresql_repo: 'pgdg'
         postgresql_version: '17'
+        # Shared by converge, side_effect and verify: the backup and restore
+        # checks of the default scenario run against the PGDG paths.
+        postgresql_backup_enabled: true
+        postgresql_backup_keep: 1
     host_vars:
       postgresql-pgdg-debian-trixie:
         ansible_python_interpreter: /usr/bin/python3

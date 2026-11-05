@@ -20,3 +20,10 @@
     state: reloaded
   listen: Reload cert services
   when: postgresql_service_enabled | bool
+
+- name: Restart PostgreSQL backup timer
+  ansible.builtin.systemd_service:
+    name: '{{ __postgresql_backup_timer_name }}'
+    state: restarted
+  when: __postgresql_backup_timer_active | bool
+  ignore_errors: '{{ ansible_check_mode }}'
