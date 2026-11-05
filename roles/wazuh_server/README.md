@@ -18,6 +18,7 @@ is the documented way to issue them (see [Certificates](#certificates)).
 ```yaml
 collections:
   - community.crypto
+  - community.general
 ```
 
 ## Supported Platforms
@@ -50,8 +51,11 @@ but are not actively tested. Use distro-specific vars overrides if needed.
 | `wazuh_server_filebeat_module_version` | `'0.5'`    | Wazuh Filebeat module release                        |
 
 The role does not update Wazuh. With Wazuh installed, a
-`wazuh_server_version` that differs from the installed packages fails the
-run with both versions.
+`wazuh_server_version` that differs from the installed indexer, manager or
+dashboard, or a `wazuh_server_filebeat_version` that differs from the
+installed Filebeat, fails the run with both versions. The packages are
+locked against a system upgrade, see [Package Lock](#package-lock) under
+Notes.
 
 ### Certificates
 
@@ -205,6 +209,30 @@ proxy, checks that the drop-in is gone and sets it again.
 
 ## Notes
 
+### Package Lock
+
+After the install the role holds `wazuh-indexer`, `wazuh-manager`,
+`filebeat` and `wazuh-dashboard` at the installed version on every run
+(`dpkg` hold on Debian, `dnf versionlock` on EL). A system upgrade
+(`apt upgrade`, `dnf upgrade`) leaves these packages untouched, so it can
+neither update them outside the upstream order nor make the next run fail
+the version check. The role never releases the locks.
+
+For a planned update, release the locks on the host and follow the Wazuh
+upgrade guide (see References):
+
+```bash
+# Debian
+apt-mark unhold wazuh-indexer wazuh-manager filebeat wazuh-dashboard
+
+# EL
+dnf versionlock delete wazuh-indexer wazuh-manager filebeat wazuh-dashboard
+```
+
+Afterwards set `wazuh_server_version` (and `wazuh_server_filebeat_version`,
+if the new release requires another Filebeat) to the installed versions.
+The next run passes the version check and sets the locks again.
+
 ### Certificates
 
 All certificates must come from one CA. The role copies them into the
@@ -351,6 +379,7 @@ binds to loopback by default.
 
 - [Wazuh Documentation](https://documentation.wazuh.com/current/)
 - [Wazuh Installation Guide](https://documentation.wazuh.com/current/installation-guide/)
+- [Wazuh Upgrade Guide](https://documentation.wazuh.com/current/upgrade-guide/)
 - [Wazuh Ansible Deployment](https://documentation.wazuh.com/current/deployment-options/deploying-with-ansible/guide/index.html)
 - [OpenSearch Snapshots](https://docs.opensearch.org/latest/tuning-your-cluster/availability-and-recovery/snapshots/snapshot-restore/)
 - [OpenSearch Snapshot Management API](https://docs.opensearch.org/latest/tuning-your-cluster/availability-and-recovery/snapshots/sm-api/)

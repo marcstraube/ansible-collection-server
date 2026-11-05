@@ -143,3 +143,11 @@ __wazuh_server_dn_attribute_names:
   stateOrProvinceName: 'ST'
   countryName: 'C'
   domainComponent: 'DC'
+
+# Package names (identical on every platform), held at the installed
+# version against a system upgrade
+__wazuh_server_package_names:
+  - 'wazuh-indexer'
+  - 'wazuh-manager'
+  - 'filebeat'
+  - 'wazuh-dashboard'
