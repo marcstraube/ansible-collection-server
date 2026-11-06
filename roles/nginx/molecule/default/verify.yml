@@ -181,6 +181,15 @@
         fail_msg: "Nginx configuration test failed"
         success_msg: "Nginx configuration syntax valid"
 
+    # The default site and test-redirect-default share port 443; different
+    # listen options on one port make nginx warn and drop the later ones.
+    - name: Verify | Assert the default site and the sites share the listen options
+      ansible.builtin.assert:
+        that:
+          - "'protocol options redefined' not in __nginx_test.stderr"
+        fail_msg: 'nginx -t warns about redefined protocol options: {{ __nginx_test.stderr }}'
+        success_msg: 'The default site and the sites on port 443 use the same listen options'
+
     #
     # Service Verification
     #

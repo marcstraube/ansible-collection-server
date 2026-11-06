@@ -17,8 +17,8 @@ __nginx_htpasswd_package: 'httpd-tools'
 # nginx-filesystem, dynamic modules)
 __nginx_update_pattern: '^nginx(-.+)?$'
 
-# Ports the SELinux policy labels http_port_t out of the box; site ports
-# outside this list get the label from the role.
+# TCP ports the SELinux policy labels http_port_t out of the box; site and
+# stream server ports outside this list get the label from the role.
 __nginx_selinux_default_ports:
   - '80'
   - '81'
