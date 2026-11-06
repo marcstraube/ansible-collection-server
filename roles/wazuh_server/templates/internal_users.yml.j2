@@ -1,0 +1,19 @@
+{{ ansible_managed | comment }}
+# Internal users of the indexer security plugin; the hashes are bcrypt
+# hashes from plugins/opensearch-security/tools/hash.sh
+
+_meta:
+  type: "internalusers"
+  config_version: 2
+
+admin:
+  hash: "{{ __wazuh_server_indexer_admin_hash }}"
+  reserved: true
+  backend_roles:
+    - "admin"
+  description: "admin user"
+
+kibanaserver:
+  hash: "{{ __wazuh_server_indexer_kibanaserver_hash }}"
+  reserved: true
+  description: "kibanaserver user"

@@ -1,0 +1,79 @@
+---
+- name: Configure | Resolve effective TLS cert and key paths
+  ansible.builtin.set_fact:
+    __mariadb_ssl_cert_path: '{{ mariadb_ssl_cert_file or __mariadb_ssl_cert_file }}'
+    __mariadb_ssl_key_path: '{{ mariadb_ssl_key_file or __mariadb_ssl_key_file }}'
+  when: mariadb_ssl_enabled | bool
+
+- name: Configure | Stat TLS cert file
+  ansible.builtin.stat:
+    path: '{{ __mariadb_ssl_cert_path }}'
+  register: __mariadb_ssl_cert_stat
+  when:
+    - mariadb_ssl_enabled | bool
+    - __mariadb_ssl_cert_path | length > 0
+
+- name: Configure | Stat TLS key file
+  ansible.builtin.stat:
+    path: '{{ __mariadb_ssl_key_path }}'
+  register: __mariadb_ssl_key_stat
+  when:
+    - mariadb_ssl_enabled | bool
+    - __mariadb_ssl_key_path | length > 0
+
+- name: Configure | Assert TLS cert and key files exist when TLS is enabled
+  ansible.builtin.assert:
+    that:
+      - __mariadb_ssl_cert_path | length > 0
+      - __mariadb_ssl_key_path | length > 0
+      - __mariadb_ssl_cert_stat.stat.exists | default(false)
+      - __mariadb_ssl_key_stat.stat.exists | default(false)
+    fail_msg: |
+      mariadb_ssl_enabled is true but the TLS certificate or key file is
+      missing on this host:
+
+        cert: {{ __mariadb_ssl_cert_path | default('(not set)', true) }}
+              ({{ 'OK' if __mariadb_ssl_cert_stat.stat.exists | default(false) else 'MISSING' }})
+        key : {{ __mariadb_ssl_key_path | default('(not set)', true) }}
+              ({{ 'OK' if __mariadb_ssl_key_stat.stat.exists | default(false) else 'MISSING' }})
+
+      Set mariadb_ssl_cert_file / mariadb_ssl_key_file in inventory to an
+      existing file pair readable by the {{ __mariadb_user }} user, for
+      example a certificate issued by marcstraube.common.pki. Only Debian
+      has a system-wide fallback (the ssl-cert snakeoil pair).
+  when: mariadb_ssl_enabled | bool
+
+- name: Configure | Stat TLS CA file
+  ansible.builtin.stat:
+    path: '{{ mariadb_ssl_ca_file }}'
+  register: __mariadb_ssl_ca_stat
+  when:
+    - mariadb_ssl_enabled | bool
+    - mariadb_ssl_ca_file | length > 0
+
+- name: Configure | Assert TLS CA file exists when configured
+  ansible.builtin.assert:
+    that:
+      - __mariadb_ssl_ca_stat.stat.exists
+    fail_msg: 'mariadb_ssl_ca_file {{ mariadb_ssl_ca_file }} is missing on this host'
+  when:
+    - mariadb_ssl_enabled | bool
+    - mariadb_ssl_ca_file | length > 0
+
+- name: Configure | Create the error log directory
+  ansible.builtin.file:
+    path: '{{ mariadb_log_error | dirname }}'
+    state: directory
+    owner: '{{ __mariadb_user }}'
+    group: '{{ __mariadb_group }}'
+    mode: '0750'
+  when: mariadb_log_error | length > 0
+
+- name: Configure | Deploy MariaDB configuration
+  ansible.builtin.template:
+    src: mariadb.cnf.j2
+    dest: '{{ __mariadb_config_file }}'
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart MariaDB

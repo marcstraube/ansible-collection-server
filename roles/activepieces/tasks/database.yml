@@ -1,0 +1,46 @@
+---
+# Creates the PostgreSQL database and user for Activepieces.
+# Requires the marcstraube.server.postgresql role to run first. The
+# database owner creates the ICU collation the migrations need.
+
+- name: Database | Create Activepieces PostgreSQL user
+  community.postgresql.postgresql_user:
+    name: '{{ activepieces_db_user }}'
+    password: '{{ activepieces_db_password }}'
+    state: present
+  become: true
+  become_user: postgres
+  no_log: true
+
+- name: Database | Create Activepieces PostgreSQL database
+  community.postgresql.postgresql_db:
+    name: '{{ activepieces_db_name }}'
+    owner: '{{ activepieces_db_user }}'
+    encoding: UTF8
+    lc_collate: en_US.UTF-8
+    lc_ctype: en_US.UTF-8
+    template: template0
+    state: present
+  become: true
+  become_user: postgres
+
+- name: Database | Grant schema privileges to Activepieces user (PostgreSQL 15+)
+  community.postgresql.postgresql_privs:
+    login_db: '{{ activepieces_db_name }}'
+    roles: '{{ activepieces_db_user }}'
+    privs: ALL
+    type: schema
+    objs: public
+    state: present
+  become: true
+  become_user: postgres
+
+- name: Database | Grant database privileges to Activepieces user
+  community.postgresql.postgresql_privs:
+    login_db: '{{ activepieces_db_name }}'
+    roles: '{{ activepieces_db_user }}'
+    privs: ALL
+    type: database
+    state: present
+  become: true
+  become_user: postgres

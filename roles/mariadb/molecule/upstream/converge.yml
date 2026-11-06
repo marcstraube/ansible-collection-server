@@ -1,0 +1,5 @@
+---
+# Same test variables as the default scenario; mariadb_repo, mariadb_version
+# and mariadb_arch_package come from the scenario inventory (molecule.yml).
+- name: Import default converge
+  ansible.builtin.import_playbook: ../default/converge.yml

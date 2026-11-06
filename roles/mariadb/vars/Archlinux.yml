@@ -1,0 +1,31 @@
+---
+# The official repository carries the current release as mariadb and the
+# long-term support release as mariadb-lts; the two conflict. mariadb_repo
+# and mariadb_version are ignored, so no version list applies.
+__mariadb_distro_versions: []
+__mariadb_upstream_minimum_version: ''
+
+__mariadb_packages:
+  - '{{ mariadb_arch_package }}'
+  - '{{ mariadb_arch_package }}-clients'
+  - python-pymysql
+
+# Package that carries the server version
+__mariadb_server_package: '{{ mariadb_arch_package }}'
+
+# Installed server packages (any variant) the major version guard reads
+__mariadb_installed_server_pattern: '^mariadb(-lts)?$'
+
+# Installed packages a targeted update moves along; unused on Arch Linux
+# (the system upgrade updates the packages)
+__mariadb_update_pattern: '^mariadb(-lts)?(-.+)?$'
+
+__mariadb_service_name: mariadb.service
+__mariadb_config_dir: /etc/my.cnf.d
+__mariadb_config_file: '/etc/my.cnf.d/{{ __mariadb_config_name }}'
+__mariadb_socket: /run/mysqld/mysqld.sock
+
+# TLS fallback paths — Arch Linux has no system-wide snakeoil certificate,
+# the operator sets mariadb_ssl_cert_file and mariadb_ssl_key_file.
+__mariadb_ssl_cert_file: ''
+__mariadb_ssl_key_file: ''

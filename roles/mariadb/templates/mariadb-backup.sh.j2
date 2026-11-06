@@ -1,0 +1,87 @@
+#!/bin/bash
+{{ ansible_managed | comment }}
+#
+# Writes one compressed mariadb-dump per database to
+# {{ mariadb_backup_dir }}, named <database>_<YYYYmmdd_HHMMSS>.sql.gz.
+#
+# Usage: mariadb-backup [<database> [<dump to keep>]]
+#
+#   no argument      Dumps {{ 'the databases ' ~ (mariadb_backup_databases | join(', ')) if mariadb_backup_databases | length > 0 else 'every database except the system schemas' }}.
+#                    Run by {{ __mariadb_backup_service_name }}.
+#   <database>       Dumps this database only; the role runs it before a
+#                    restore.
+#   <dump to keep>   File name in the backup directory that the rotation
+#                    never removes (the dump a restore reads).
+#
+# The retention is count-based per database: the dump just written counts,
+# older dumps of the same database beyond the count are removed, so a
+# failing schedule never removes the last good dump.
+# Dumps kept per database: {{ mariadb_backup_keep | int }}
+
+set -euo pipefail
+umask 077
+
+if [ "$#" -gt 2 ]; then
+    echo "Usage: $0 [<database> [<dump to keep>]]" >&2
+    exit 64
+fi
+
+BACKUP_DIR="{{ mariadb_backup_dir }}"
+BACKUP_DIR="${BACKUP_DIR%/}"
+KEEP={{ mariadb_backup_keep | int }}
+SOCKET="{{ __mariadb_socket }}"
+PROTECT="${2:-}"
+DATE=$(date +%Y%m%d_%H%M%S)
+# Timestamp part of a dump name, so that the rotation of a database never
+# matches the dumps of another database whose name starts the same
+STAMP='[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]'
+
+if [ "$#" -gt 0 ]; then
+    DATABASES=("$1")
+else
+{% if mariadb_backup_databases | length > 0 %}
+    DATABASES=({% for db in mariadb_backup_databases %}{{ db | quote }}{{ ' ' if not loop.last else '' }}{% endfor %})
+{% else %}
+    LIST=$(mariadb --protocol=socket --socket="${SOCKET}" --batch --skip-column-names \
+        --execute="SELECT schema_name FROM information_schema.schemata
+                   WHERE schema_name NOT IN ({{ __mariadb_backup_system_schemas | map('regex_replace', '^(.*)$', "'\\1'") | join(', ') }})")
+    DATABASES=()
+    if [ -n "${LIST}" ]; then
+        mapfile -t DATABASES <<< "${LIST}"
+    fi
+{% endif %}
+fi
+
+mkdir -p "${BACKUP_DIR}"
+
+# A failed dump leaves no partial file that the rotation would count
+PARTIAL=""
+trap '[ -z "${PARTIAL}" ] || rm -f -- "${PARTIAL}"' EXIT
+
+for DB in "${DATABASES[@]}"; do
+    BACKUP_FILE="${BACKUP_DIR}/${DB}_${DATE}.sql.gz"
+    PARTIAL="${BACKUP_FILE}.partial"
+    echo "Backing up ${DB} to ${BACKUP_FILE}"
+    mariadb-dump --protocol=socket --socket="${SOCKET}" \
+        --single-transaction --routines --triggers --events "${DB}" \
+        | gzip > "${PARTIAL}"
+    mv -f -- "${PARTIAL}" "${BACKUP_FILE}"
+    PARTIAL=""
+
+    # Rotation: dumps of this database, newest first, without the dump just
+    # written and the protected dump; everything beyond the retention is
+    # removed. The timestamp in the name sorts chronologically.
+    FIND_ARGS=("${BACKUP_DIR}" -mindepth 1 -maxdepth 1 -type f -name "${DB}_${STAMP}.sql.gz" ! -path "${BACKUP_FILE}")
+    if [ -n "${PROTECT}" ]; then
+        FIND_ARGS+=(! -name "${PROTECT}")
+    fi
+    find "${FIND_ARGS[@]}" -printf '%f\n' \
+        | sort -r \
+        | tail -n +$((KEEP > 1 ? KEEP : 1)) \
+        | while IFS= read -r OLD_DUMP; do
+            echo "Removing ${BACKUP_DIR}/${OLD_DUMP} beyond the retention of ${KEEP}"
+            rm -f -- "${BACKUP_DIR:?}/${OLD_DUMP}"
+        done
+done
+
+echo "Backup completed: $(date)"

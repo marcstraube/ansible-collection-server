@@ -1,0 +1,23 @@
+---
+galaxy_info:
+  author: Marc Straube
+  description: Install and configure a Wazuh all-in-one server (indexer, manager, dashboard)
+  license: MIT
+  min_ansible_version: '2.19'
+
+  platforms:
+    - name: Debian
+      versions:
+        - trixie
+    - name: EL
+      versions:
+        - all
+
+  galaxy_tags:
+    - wazuh
+    - siem
+    - xdr
+    - security
+    - monitoring
+
+dependencies: []

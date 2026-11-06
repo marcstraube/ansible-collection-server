@@ -1,0 +1,90 @@
+---
+# Installs Activepieces as a rootless Podman container. Podman itself comes
+# from the marcstraube.common.podman role.
+
+- name: Install | Verify podman is available
+  ansible.builtin.command: podman --version
+  register: __activepieces_podman_version
+  changed_when: false
+
+- name: Install | Create Activepieces system group
+  ansible.builtin.group:
+    name: '{{ activepieces_group }}'
+    system: true
+    state: present
+
+- name: Install | Create Activepieces system user
+  ansible.builtin.user:
+    name: '{{ activepieces_user }}'
+    group: '{{ activepieces_group }}'
+    home: '{{ activepieces_user_home }}'
+    shell: '{{ activepieces_user_shell }}'
+    system: true
+    create_home: true
+    state: present
+
+- name: Install | Look up the Activepieces user
+  ansible.builtin.getent:
+    database: passwd
+    key: '{{ activepieces_user }}'
+    fail_key: false
+  register: __activepieces_user_entry
+
+- name: Install | Create Activepieces directories
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    owner: '{{ activepieces_user }}'
+    group: '{{ activepieces_group }}'
+    mode: '0750'
+  loop:
+    - '{{ activepieces_data_dir }}'
+    - '{{ __activepieces_cache_dir }}'
+    - '{{ __activepieces_config_dir }}'
+
+# Rootless podman maps the users of the container onto a subordinate ID
+# range of the activepieces user.
+- name: Install | Configure subordinate UIDs
+  ansible.builtin.lineinfile:
+    path: /etc/subuid
+    regexp: '^{{ activepieces_user }}:'
+    line: '{{ activepieces_user }}:{{ activepieces_subid_start }}:{{ activepieces_subid_count }}'
+    create: true
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Install | Configure subordinate GIDs
+  ansible.builtin.lineinfile:
+    path: /etc/subgid
+    regexp: '^{{ activepieces_user }}:'
+    line: '{{ activepieces_user }}:{{ activepieces_subid_start }}:{{ activepieces_subid_count }}'
+    create: true
+    owner: root
+    group: root
+    mode: '0644'
+
+# Rootless podman keeps its runtime state in XDG_RUNTIME_DIR. The service
+# unit has systemd create the directory; the image pull below runs before
+# the unit exists.
+- name: Install | Create the podman runtime directory
+  ansible.builtin.file:
+    path: '{{ __activepieces_runtime_dir }}'
+    state: directory
+    owner: '{{ activepieces_user }}'
+    group: '{{ activepieces_group }}'
+    mode: '0700'
+
+- name: Install | Pull Activepieces container image
+  containers.podman.podman_image:
+    name: '{{ activepieces_podman_image }}'
+    tag: '{{ activepieces_version }}'
+    pull: "{{ activepieces_podman_pull_policy != 'never' }}"
+    force: "{{ activepieces_podman_pull_policy == 'always' }}"
+  retries: 5
+  delay: 10
+  become: true
+  become_user: '{{ activepieces_user }}'
+  environment:
+    XDG_RUNTIME_DIR: '{{ __activepieces_runtime_dir }}'
+  notify: Restart Activepieces

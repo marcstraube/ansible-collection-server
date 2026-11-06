@@ -7,6 +7,25 @@
 __n8n_service_name: 'n8n.service'
 __n8n_runner_service_name: 'n8n-runner.service'
 
+# Backup script and the units that run it on a schedule
+__n8n_backup_script: '/usr/local/bin/n8n-backup'
+__n8n_backup_service_name: 'n8n-backup.service'
+__n8n_backup_timer_name: 'n8n-backup.timer'
+
 # Runtime state of the rootless podman instance; the service unit creates
 # it as its RuntimeDirectory
 __n8n_runtime_dir: '/run/n8n'
+
+# Addresses of a PostgreSQL server on the host itself
+__n8n_loopback_hosts:
+  - 'localhost'
+  - '127.0.0.1'
+  - '::1'
+
+# PostgreSQL runs on the host itself
+__n8n_db_local: >-
+  {{ n8n_db_type == 'postgresdb'
+     and n8n_db_host in __n8n_loopback_hosts }}
+
+# Unit names of a PostgreSQL server: the distribution packages and PGDG
+__n8n_db_unit_pattern: '^postgresql(-[0-9]+)?\.service$'

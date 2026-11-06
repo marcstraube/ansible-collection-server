@@ -1,0 +1,97 @@
+---
+# Restores one database from a dump in postgresql_backup_dir
+# (<database>_<YYYYmmdd_HHMMSS>.sql.gz). The current state of the database
+# is dumped first; the database is then dropped, recreated with the
+# settings of its postgresql_databases entry and loaded with psql in one
+# transaction. The backup script never rotates the dump named here.
+
+- name: Restore | Set the database to restore
+  ansible.builtin.set_fact:
+    __postgresql_restore_db: >-
+      {{ postgresql_restore | regex_replace(__postgresql_restore_pattern, '\1')
+         if postgresql_restore is match(__postgresql_restore_pattern) else '' }}
+
+- name: Restore | Find the dumps in the backup directory
+  ansible.builtin.find:
+    paths: '{{ postgresql_backup_dir }}'
+    patterns: '*.sql.gz'
+  register: __postgresql_restore_dumps
+
+- name: Restore | Validate the dump to restore
+  ansible.builtin.assert:
+    that:
+      - __postgresql_restore_db | length > 0
+      - postgresql_restore in __postgresql_restore_names
+      - __postgresql_restore_db in (postgresql_databases | map(attribute='name'))
+    fail_msg: |
+      postgresql_restore '{{ postgresql_restore }}' is not a dump of a database
+      managed through postgresql_databases in {{ postgresql_backup_dir }}.
+      A dump is named <database>_<YYYYmmdd_HHMMSS>.sql.gz; globals_* dumps
+      (roles, tablespaces) are not restored by the role. Available dumps:
+
+      {% for dump in __postgresql_restore_names | sort %}
+        - {{ dump }}
+      {% else %}
+        (none)
+      {% endfor %}
+  vars:
+    __postgresql_restore_names: >-
+      {{ __postgresql_restore_dumps.files | default([])
+         | map(attribute='path') | map('basename') | list }}
+
+- name: Restore | Dump the current state of the database
+  ansible.builtin.command:
+    argv:
+      - '{{ __postgresql_backup_script }}'
+      - '-k'
+      - '{{ postgresql_restore }}'
+      - '{{ __postgresql_restore_db }}'
+  register: __postgresql_restore_backup
+  changed_when: true
+
+# WITH (FORCE) terminates the connections to the database before the drop.
+- name: Restore | Drop the database
+  community.postgresql.postgresql_db:
+    name: '{{ __postgresql_restore_db }}'
+    state: absent
+    force: true
+  become: true
+  become_user: '{{ __postgresql_user }}'
+
+- name: Restore | Recreate the database
+  community.postgresql.postgresql_db:
+    name: '{{ __postgresql_restore_db }}'
+    owner: '{{ __postgresql_restore_entry.owner | default(omit) }}'
+    encoding: '{{ __postgresql_restore_entry.encoding | default("UTF8") }}'
+    lc_collate: '{{ __postgresql_restore_entry.lc_collate | default("en_US.UTF-8") }}'
+    lc_ctype: '{{ __postgresql_restore_entry.lc_ctype | default("en_US.UTF-8") }}'
+    template: '{{ __postgresql_restore_entry.template | default("template0") }}'
+    state: present
+  become: true
+  become_user: '{{ __postgresql_user }}'
+  vars:
+    __postgresql_restore_entry: >-
+      {{ postgresql_databases | selectattr('name', 'equalto', __postgresql_restore_db) | first }}
+
+# ON_ERROR_STOP with one transaction: a failing statement leaves the
+# recreated database empty instead of half loaded. The dump of the state
+# before the restore brings it back.
+- name: Restore | Load the dump into the database
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      gzip -dc -- {{ (postgresql_backup_dir ~ '/' ~ postgresql_restore) | quote }}
+      | runuser -u {{ __postgresql_user }} --
+      {{ __postgresql_bin_dir }}/psql -X -q -v ON_ERROR_STOP=1 --single-transaction
+      -d {{ __postgresql_restore_db | quote }} > /dev/null
+    executable: /bin/bash
+  changed_when: true
+
+- name: Restore | Report the restored dump
+  ansible.builtin.debug:
+    msg: >-
+      Database {{ __postgresql_restore_db }} restored from {{ postgresql_restore }}.
+      The state before the restore: {{ __postgresql_restore_backup.stdout_lines
+      | default([]) | select('match', '^Dumping ') | map('regex_replace', '^Dumping [^ ]+ to ', '')
+      | join(', ') }}. postgresql_restore is meant for one run with -e; a
+      value in the inventory restores the dump again on every run.

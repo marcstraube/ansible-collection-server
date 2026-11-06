@@ -16,7 +16,7 @@ n8n_service_enabled: true
 # n8n release: the tag of the container image the role runs. The default
 # follows the npm `stable` channel and is bumped by the update-n8n-version
 # workflow once the image tag is published.
-n8n_version: '2.43.8'
+n8n_version: '2.45.7'
 
 # Container image and runtime settings
 n8n_podman_image: 'docker.io/n8nio/n8n'
@@ -36,33 +36,84 @@ n8n_subid_count: 65536
 # Updates
 #
 # A change of n8n_version on a host with a deployed n8n is an update: the
-# role stops the service, backs up the data, pulls the new image and waits
-# for /healthz/readiness.
+# role stops the service, backs up the data, pulls the new image, waits
+# for /healthz/readiness and removes the images of the replaced release.
 # n8n migrates its database on start, and migrations are forward-only, so
 # a lower version is refused unless the backup set taken before the
 # upgrade is restored with it (n8n_update_restore).
 
-# Back up n8n_data_dir (and the PostgreSQL database with n8n_db_type
-# 'postgresdb') before every version change and before a restore
-n8n_update_backup_enabled: true
-
-# Directory for the backup sets, one subdirectory per set:
-# n8n-<installed version>-<timestamp>/{data.tar.gz,db.dump}
-n8n_update_backup_dir: '/var/backups/n8n'
-
-# Backup sets to keep; older sets are removed after a new backup
-n8n_update_backup_keep: 3
-
-# Name of a backup set to restore, e.g. 'n8n-2.42.0-20261014T120000'.
-# Replaces n8n_data_dir (and recreates the database) from that set and
-# requires n8n_version to match the version in the set name. One-shot:
-# remove the variable after the run, otherwise the next run restores the
-# same set again.
+# Name of a backup set to restore, e.g. 'n8n-2.42.0-20261014T120000' or
+# 'n8n-scheduled-2.42.0-20261015T030000'. Replaces n8n_data_dir (and
+# recreates the database) from that set and requires n8n_version to match
+# the version in the set name. One-shot: remove the variable after the
+# run, otherwise the next run restores the same set again.
 n8n_update_restore: ''
 
 # Seconds to wait for /healthz/readiness after a service (re)start;
 # migrations run before the endpoint reports ready
 n8n_ready_timeout: 300
+
+# Start timeout of the n8n and task runner units (TimeoutStartSec). The
+# first start after an image change copies the image layers into the user
+# namespace of the n8n user, which takes minutes on a host whose audit
+# rules throttle the chown of every file; the runner unit waits for that
+# start in its pre-start command.
+n8n_service_start_timeout: 300
+
+# Remove the images of other releases from the podman storage of the n8n
+# user after a version change, once n8n and the task runner launcher
+# report healthy: every tag of n8n_podman_image and n8n_runners_podman_image
+# except the two the services run. Images of other containers stay. A
+# failed update keeps the previous image; a restore pulls the image of
+# the backup set again.
+n8n_update_remove_old_images: true
+
+#
+# Backup
+#
+# A backup set is a subdirectory of n8n_backup_dir with data.tar.gz
+# (n8n_data_dir, entries relative to n8n_user_home) and, with n8n_db_type
+# 'postgresdb', db.dump (pg_dump -Fc). The script /usr/local/bin/n8n-backup
+# writes a set; n8n-backup.timer runs it on a schedule and the update runs
+# it before a version change or a restore. Scheduled sets are named
+# n8n-scheduled-<version>-<timestamp>, pre-update sets
+# n8n-<version>-<timestamp>; the retention is count-based and separate
+# per kind, so a scheduled set never pushes out the set taken before the
+# last update and a failing timer never removes the last good set.
+
+# Back up n8n_data_dir (and the PostgreSQL database) on the schedule of
+# the timer and before every version change or restore
+n8n_backup_enabled: true
+
+# Directory for the backup sets
+n8n_backup_dir: '/var/backups/n8n'
+
+# Scheduled sets to keep (n8n-scheduled-<version>-<timestamp>)
+n8n_backup_keep: 7
+
+# Pre-update sets to keep (n8n-<version>-<timestamp>)
+n8n_backup_update_keep: 3
+
+# Stop n8n (and the task runners bound to it) while a scheduled set is
+# written, for a consistent copy of the SQLite database and the data
+# directory; the service starts again afterwards, also when the backup
+# fails. With false the set is taken from the running instance.
+n8n_backup_stop_service: true
+
+# Enable and start the n8n-backup timer
+n8n_backup_timer_enabled: true
+
+# Schedule of the timer (systemd OnCalendar)
+n8n_backup_on_calendar: 'daily'
+
+# DEPRECATED: Use n8n_backup_enabled instead (removed in the next major version)
+# n8n_update_backup_enabled: {{ n8n_backup_enabled }}
+
+# DEPRECATED: Use n8n_backup_dir instead (removed in the next major version)
+# n8n_update_backup_dir: {{ n8n_backup_dir }}
+
+# DEPRECATED: Use n8n_backup_update_keep instead (removed in the next major version)
+# n8n_update_backup_keep: {{ n8n_backup_update_keep }}
 
 #
 # User and Directory
@@ -96,18 +147,28 @@ n8n_port: 5678
 n8n_protocol: 'http'
 
 # Webhook URL (REQUIRED for webhooks to work)
-# MUST use HTTPS for production webhooks
+# MUST use HTTPS for production webhooks; includes the URL path prefix
+# (n8n_path), if any
 # Example: https://n8n.example.com
 n8n_webhook_url: ''
 
-# Editor URL (for accessing n8n UI)
+# Editor URL (for accessing n8n UI); includes the URL path prefix, if any
 n8n_editor_base_url: ''
+
+# URL path prefix the editor is served under (N8N_PATH), with leading and
+# trailing slash, e.g. '/n8n/'. n8n keeps its backend routes at the root;
+# the prefix only shapes the URLs of the editor, so the reverse proxy strips
+# it (see README)
+n8n_path: '/'
+
+# DEPRECATED: Use n8n_path instead (removed in the next major version)
+# n8n_endpoints_rest: {{ n8n_path }}
 
 #
 # Database
 #
 
-# Database type: sqlite, postgresdb, mysqldb, mariadb
+# Database type: sqlite, postgresdb
 # SECURITY: Use PostgreSQL for production
 n8n_db_type: 'sqlite'
 
@@ -121,6 +182,12 @@ n8n_db_ssl: false
 
 # Create PostgreSQL database and user
 n8n_db_create: true
+
+# PostgreSQL unit the service requires when n8n_db_host is an address of
+# the host itself. Empty detects postgresql.service or
+# postgresql-<version>.service (PGDG on Rocky Linux) from the installed
+# unit files; set it when several versions are installed.
+n8n_db_service: ''
 
 #
 # Security
@@ -294,6 +361,14 @@ n8n_log_file_max_size: '10m'
 n8n_log_file_max_count: 5
 
 #
+# Metrics
+#
+
+# Serve Prometheus metrics on /metrics (N8N_METRICS). The endpoint has no
+# authentication of its own, so the reverse proxy restricts access to it
+n8n_metrics_enabled: false
+
+#
 # Telemetry and Updates
 #
 
@@ -373,8 +448,7 @@ n8n_nodes_include: ''
 # Endpoints
 #
 
-# Disable specific endpoints for security
-n8n_endpoints_rest: '/'
+# Paths of the webhook endpoints below the root
 n8n_endpoints_webhook: 'webhook'
 n8n_endpoints_webhook_test: 'webhook-test'
 n8n_endpoints_webhook_waiting: 'webhook-waiting'
@@ -408,10 +482,15 @@ n8n_user_management_disabled: false
 # Firewall
 #
 
-# Enable firewalld rule for n8n port
+# DEPRECATED: Firewall rules belong to marcstraube.common.firewalld (removed
+# in the next major version together with the firewall tasks and the
+# n8n:firewall tag). n8n listens on 127.0.0.1 behind a reverse proxy, so its
+# port needs no rule. true opens n8n_port in firewalld, false removes the
+# rule again.
 n8n_firewalld_enabled: true
 
-# Firewalld zone for n8n port
+# DEPRECATED: Firewalld zone of the n8n port rule (removed in the next major
+# version)
 n8n_firewalld_zone: 'public'
 
 #
@@ -434,7 +513,14 @@ n8n_env_file: '/etc/n8n/n8n.env'
 # SECURITY: Default to true - production deployments should use reverse proxy
 n8n_behind_reverse_proxy: true
 
-# Trusted proxy IPs (comma-separated)
+# Number of reverse proxies in front of n8n (N8N_PROXY_HOPS): n8n takes the
+# client address from the X-Forwarded-For header that many hops back, for
+# its rate limits and audit log. Rendered only when behind a reverse proxy
+n8n_proxy_hops: 1
+
+# DEPRECATED: no effect, removed in the next major version. n8n has no list
+# of trusted proxy addresses; it counts the proxies in front of it
+# (n8n_proxy_hops)
 n8n_trusted_proxy_ips: ''
 
 #

@@ -72,7 +72,7 @@ See [defaults/main.yml](defaults/main.yml) for all available variables.
 | `postgresql_shared_buffers`      | `'256MB'`         | Shared buffer memory                    |
 | `postgresql_ssl_enabled`         | `false`           | Enable SSL/TLS (see SSL section below)  |
 | `postgresql_firewalld_enabled`   | `true`            | Manage firewalld rule                   |
-| `postgresql_backup_enabled`      | `false`           | Enable automated backup via cron        |
+| `postgresql_backup_enabled`      | `false`           | Scheduled dumps (see Backup below)      |
 
 ### `postgresql_repo` — Distribution packages vs. PGDG
 
@@ -108,6 +108,146 @@ upgrade**, which the role does not perform. Two guards make this explicit:
 Upgrade the cluster by hand (`pg_upgrade`, on Debian `pg_upgradecluster`,
 on Arch Linux with the previous binaries from `postgresql-old-upgrade`),
 remove the old data directory afterwards, then rerun the role.
+
+### Package Updates
+
+| Variable                      | Default     | Description                                                     |
+| ----------------------------- | ----------- | --------------------------------------------------------------- |
+| `postgresql_packages_state`   | `'present'` | `present` installs missing packages only, `latest` updates them |
+| `postgresql_packages_minimum` | `''`        | Lowest acceptable server version, checked after the packages    |
+
+A regular run never updates PostgreSQL. A targeted update, for example for a
+security release, is requested on the command line:
+
+```bash
+ansible-playbook site.yml --tags postgresql \
+  -e postgresql_packages_state=latest \
+  -e postgresql_packages_minimum=17.7
+```
+
+With `latest` the role refreshes the package metadata and updates every
+installed PostgreSQL package in one transaction. The packages usually
+restart the server themselves; when they did not, for example because of a
+`policy-rc.d`, the running server still executes the replaced binary and
+the role restarts it. The update covers the parts pulled in as
+dependencies: on Debian the `postgresql-*` packages and `libpq5`, on EL the
+AppStream `postgresql*` packages or, with `postgresql_repo: 'pgdg'`, the
+`postgresql<NN>*` packages of the configured version. Minor releases only:
+the major version stays as selected (see above).
+
+`postgresql_packages_minimum` then fails the run when the installed server
+is still older, which shows that the repository does not carry the fix yet.
+The check is skipped under `--check`.
+
+On Arch Linux the rolling repository moves to a new major version without
+notice, and the server does not start on the cluster of the previous one.
+The role therefore places a pacman drop-in
+(`/etc/pacman.d/ignore.d/postgresql.conf`, `IgnorePkg = postgresql
+postgresql-libs`) that keeps the system upgrade away from PostgreSQL.
+pacman reads it when `pacman.conf` includes `/etc/pacman.d/ignore.d/*.conf`,
+as `marcstraube.common.package_management` sets up; otherwise the role
+prints a warning. With `latest` the role installs the version of the
+package databases of the last system upgrade, so run the update together
+with it, and fails when that is a new major version:
+
+```bash
+ansible-playbook marcstraube.server.database_server --tags system-update,postgresql \
+  -e postgresql_packages_state=latest
+```
+
+A new major version needs a manual cluster upgrade (`pg_upgrade` with the
+previous binaries from `postgresql-old-upgrade`) before the role updates
+the packages.
+
+### Backup
+
+The role deploys `/usr/local/bin/postgresql-backup`, which writes one
+compressed plain-format dump per database
+(`<database>_<YYYYmmdd_HHMMSS>.sql.gz`, `pg_dump`) and one of the roles and
+tablespaces (`globals_<YYYYmmdd_HHMMSS>.sql.gz`,
+`pg_dumpall --globals-only`) into `postgresql_backup_dir`. Without
+`postgresql_backup_databases` it dumps every database except the templates
+and `postgres`. The client programs run as `postgres` over the local socket;
+the directory and the dumps belong to root (`0700`, `0600`).
+
+`postgresql-backup.service` is a oneshot unit ordered after the PostgreSQL
+service, and `postgresql-backup.timer` starts it on
+`postgresql_backup_on_calendar` (`Persistent=true`, so a run missed while
+the host was down follows at the next boot).
+`systemctl start postgresql-backup.service` takes the dumps at any time and
+returns once they are written.
+
+The retention is count-based: the newest `postgresql_backup_keep` dumps of
+every database and of the globals stay, older ones are removed after a
+successful dump. A dump is written to a temporary file first, so a failed
+dump never removes an older one and a failing timer never removes the last
+good dump. When the dump of one database fails, the script continues with
+the next one and the service fails at the end.
+
+| Variable                          | Default                     | Description                                   |
+| --------------------------------- | --------------------------- | --------------------------------------------- |
+| `postgresql_backup_enabled`       | `false`                     | Scheduled dumps                               |
+| `postgresql_backup_dir`           | `'/var/backups/postgresql'` | Directory for the dumps                       |
+| `postgresql_backup_keep`          | `7`                         | Dumps to keep per database and of the globals |
+| `postgresql_backup_databases`     | `[]`                        | Databases to dump (empty: all but templates)  |
+| `postgresql_backup_timer_enabled` | `true`                      | Enable and start `postgresql-backup.timer`    |
+| `postgresql_backup_on_calendar`   | `'*-*-* 03:00:00'`          | Schedule of the timer (systemd `OnCalendar`)  |
+| `postgresql_restore`              | `''`                        | Dump to restore, passed with `-e` for one run |
+
+The script and the units are always deployed. `postgresql_backup_enabled:
+false` or `postgresql_backup_timer_enabled: false` stops and disables the
+timer; the script, the units and the existing dumps stay. The role never
+removes a dump other than through the retention.
+
+> **Deprecation:** `postgresql_backup_schedule` (cron format) and
+> `postgresql_backup_retention` (days) will be removed in the next major
+> version. Use `postgresql_backup_on_calendar` and `postgresql_backup_keep`
+> instead. While `postgresql_backup_schedule` is set, the role keeps
+> running the backup from a cron job (`PostgreSQL backup` in the crontab of
+> root, `systemctl start postgresql-backup.service`) instead of the timer.
+> Without it, the role removes the cron job it created (in the crontab of
+> root, or of `postgres` from earlier role versions) and the timer takes
+> over at the same time of day as the former default schedule `0 3 * * *`
+> (`*-*-* 03:00:00`).
+> A set `postgresql_backup_retention` takes effect as the number of dumps
+> to keep per database. Both print a deprecation warning on every run
+> while they are set.
+
+Earlier role versions deployed the script as
+`/usr/local/bin/postgresql-backup.sh`. The role leaves it in place; nothing
+runs it any more, remove it by hand.
+
+A host backup takes the dumps instead of the running data directory: it
+runs `systemctl start postgresql-backup.service` as its pre-sync step and
+copies `postgresql_backup_dir`.
+
+#### Restore
+
+`postgresql_restore` names a dump in `postgresql_backup_dir` and restores
+that database. Pass it with `-e` for one run, never set it in the
+inventory:
+
+```bash
+ansible-playbook site.yml --tags postgresql -l db1 \
+  -e postgresql_restore=myapp_20261104_000000.sql.gz
+```
+
+The database in the name must be managed through `postgresql_databases`;
+otherwise the run fails before anything changes (the role does not restore
+`globals_*` dumps). The role then
+
+1. dumps the current state of the database (rotated as usual; the named
+   dump is never rotated),
+2. drops the database, terminating its connections
+   (`DROP DATABASE … WITH (FORCE)`),
+3. recreates it with the owner, encoding and locale of its
+   `postgresql_databases` entry, and
+4. loads the dump with `psql` in one transaction (`ON_ERROR_STOP`).
+
+The roles the dump refers to must exist (`postgresql_users`). When a
+statement fails, the database stays empty; the dump of step 1 restores the
+previous state. Applications reconnect on their own; stop them first when
+they must not see the empty database during the load.
 
 ### Authentication
 
@@ -187,7 +327,8 @@ postgresql_extra_config:
 | `postgresql:users`     | User/role management              |
 | `postgresql:databases` | Database and extension management |
 | `postgresql:service`   | Systemd service management        |
-| `postgresql:backup`    | Backup script and cron setup      |
+| `postgresql:backup`    | Backup script, service and timer  |
+| `postgresql:restore`   | Restore of `postgresql_restore`   |
 | `postgresql:firewall`  | Firewalld rule management         |
 
 ## Example Playbook
@@ -242,9 +383,9 @@ platforms), `pgdg` (`postgresql_repo: 'pgdg'`, Debian Trixie and EL).
   Debian Trixie. With `postgresql_repo: 'distro'` the metapackage decides
   the installed version, so `postgresql_version` must match the release;
   with `'pgdg'` it selects the package
-- The backup script uses plain SQL dumps compressed with gzip. For
-  production environments, consider using `marcstraube.common.restic` for
-  encrypted offsite backups
+- The backup writes plain SQL dumps compressed with gzip, unencrypted. For
+  encrypted offsite copies, let a host backup such as
+  `marcstraube.common.restic` copy `postgresql_backup_dir` (see Backup)
 - `password_encryption` is explicitly set to `scram-sha-256` for consistent
   security across all supported PostgreSQL versions
 

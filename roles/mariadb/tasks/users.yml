@@ -1,0 +1,32 @@
+---
+# All connections go through the unix socket as the root OS user, which the
+# unix_socket plugin maps to the root database user; no password and no
+# /root/.my.cnf are needed.
+
+- name: Users | Authenticate root through the unix socket only
+  ansible.mariadb.mariadb_user:
+    name: root
+    host: localhost
+    plugin: unix_socket
+    login_unix_socket: '{{ __mariadb_socket }}'
+    state: present
+
+- name: Users | Remove anonymous users
+  ansible.mariadb.mariadb_user:
+    name: ''
+    host_all: true
+    login_unix_socket: '{{ __mariadb_socket }}'
+    state: absent
+
+- name: Users | Create MariaDB users
+  ansible.mariadb.mariadb_user:
+    name: '{{ item.name }}'
+    host: '{{ item.host | default("localhost") }}'
+    password: '{{ item.password | default(omit) }}'
+    priv: '{{ item.priv | default(omit) }}'
+    login_unix_socket: '{{ __mariadb_socket }}'
+    state: present
+  loop: '{{ mariadb_users }}'
+  loop_control:
+    label: '{{ item.name }}@{{ item.host | default("localhost") }}'
+  no_log: true

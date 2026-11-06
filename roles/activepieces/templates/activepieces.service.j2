@@ -1,0 +1,85 @@
+{{ ansible_managed | comment }}
+
+[Unit]
+Description=Activepieces - Workflow Automation
+Documentation=https://www.activepieces.com/docs
+After=network-online.target
+Wants=network-online.target
+{% if __activepieces_db_local | bool %}
+Requires={{ __activepieces_db_service | default('postgresql.service', true) }}
+After={{ __activepieces_db_service | default('postgresql.service', true) }}
+{% endif %}
+
+[Service]
+Type=simple
+User={{ activepieces_user }}
+Group={{ activepieces_group }}
+
+# Rootless podman keeps its runtime state in XDG_RUNTIME_DIR; systemd
+# creates the directory and keeps it across restarts
+RuntimeDirectory={{ __activepieces_runtime_dir | regex_replace('^/run/', '') }}
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+Environment="XDG_RUNTIME_DIR={{ __activepieces_runtime_dir }}"
+
+# The first start after an image change copies the image layers into the
+# user namespace of the activepieces user, which can take minutes
+TimeoutStartSec={{ activepieces_service_start_timeout }}
+
+# Remove any existing container before starting
+ExecStartPre=-/usr/bin/podman rm -f {{ activepieces_podman_container_name }}
+
+# The image runs Activepieces as root; keep-id maps the activepieces user
+# onto container UID 0, so the data directory on the host stays owned by
+# activepieces whatever userns default containers.conf sets. Activepieces
+# listens on all addresses of its own network namespace; the port is
+# published on 127.0.0.1 of the host only.
+{% if __activepieces_db_local | bool %}
+# The pasta port forward (-T) connects the PostgreSQL port on the loopback
+# of the container to the loopback of the host.
+{% endif %}
+# Activepieces needs no capabilities and no privilege escalation.
+ExecStart=/usr/bin/podman run \
+  --name={{ activepieces_podman_container_name }} \
+  --rm \
+  --replace \
+  --log-driver=passthrough \
+  --userns=keep-id:uid=0,gid=0 \
+{% if __activepieces_db_local | bool %}
+  --network=pasta:-T,{{ activepieces_db_port }} \
+{% else %}
+  --network=pasta \
+{% endif %}
+  --publish=127.0.0.1:{{ activepieces_port }}:{{ activepieces_port }} \
+  --env-file={{ __activepieces_env_file }} \
+  --cap-drop=all \
+  --security-opt=no-new-privileges \
+{% if activepieces_podman_memory | length > 0 %}
+  --memory={{ activepieces_podman_memory }} \
+{% endif %}
+{% if activepieces_podman_cpus | length > 0 %}
+  --cpus={{ activepieces_podman_cpus }} \
+{% endif %}
+{% for arg in activepieces_podman_extra_args %}
+  {{ arg }} \
+{% endfor %}
+  --volume={{ activepieces_data_dir }}:{{ __activepieces_container_data_dir }}:Z \
+  --volume={{ __activepieces_cache_dir }}:{{ __activepieces_container_cache_dir }}:Z \
+  {{ activepieces_podman_image }}:{{ activepieces_version }}
+
+ExecStop=/usr/bin/podman stop -t 30 {{ activepieces_podman_container_name }}
+
+# Restart behavior
+Restart=on-failure
+RestartSec=10
+
+# Resource limits
+LimitNOFILE=65536
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=activepieces
+
+[Install]
+WantedBy=multi-user.target

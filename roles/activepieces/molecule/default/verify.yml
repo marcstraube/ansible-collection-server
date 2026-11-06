@@ -1,0 +1,271 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  vars:
+    # __activepieces_runtime_dir of the role vars is built from the UID
+    # of this user
+    activepieces_user: activepieces
+
+  tasks:
+    - name: Verify | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Verify | Look up the activepieces user
+      ansible.builtin.getent:
+        database: passwd
+        key: activepieces
+      register: __activepieces_user_entry
+
+    - name: Verify | Load role defaults
+      ansible.builtin.include_vars:
+        file: '../../defaults/main.yml'
+        name: __verify_defaults
+
+    - name: Verify | Assert activepieces user exists
+      ansible.builtin.user:
+        name: activepieces
+      register: __verify_user
+      check_mode: true
+      failed_when: __verify_user.changed
+
+    - name: Verify | Assert the subordinate ID range exists
+      ansible.builtin.lineinfile:
+        path: '{{ item }}'
+        regexp: '^activepieces:'
+        state: absent
+      check_mode: true
+      register: __verify_subid
+      failed_when: not __verify_subid.changed
+      loop:
+        - /etc/subuid
+        - /etc/subgid
+
+    - name: Verify | Stat the environment file
+      ansible.builtin.stat:
+        path: '{{ __activepieces_env_file }}'
+      register: __verify_env_file
+
+    - name: Verify | Assert the environment file is private
+      ansible.builtin.assert:
+        that:
+          - __verify_env_file.stat.exists
+          - __verify_env_file.stat.mode == '0600'
+          - __verify_env_file.stat.pw_name == 'activepieces'
+
+    # The file is mode 0600, so it is read through slurp.
+    - name: Verify | Read the environment file
+      ansible.builtin.slurp:
+        src: '{{ __activepieces_env_file }}'
+      register: __verify_env
+
+    - name: Verify | Assert the environment settings
+      ansible.builtin.assert:
+        that:
+          - "'AP_PORT=' ~ activepieces_port in __verify_env_lines"
+          - "'AP_FRONTEND_URL=' ~ activepieces_frontend_url in __verify_env_lines"
+          - "'AP_DB_TYPE=' ~ activepieces_db_type in __verify_env_lines"
+          - "'AP_REDIS_TYPE=MEMORY' in __verify_env_lines"
+          - "'AP_EXECUTION_MODE=SANDBOX_CODE_ONLY' in __verify_env_lines"
+          - "'AP_TELEMETRY_ENABLED=false' in __verify_env_lines"
+        fail_msg: >-
+          {{ __verify_env_lines
+             | reject('match', '^AP_(ENCRYPTION_KEY|JWT_SECRET|POSTGRES_PASSWORD)=') | list }}
+      vars:
+        __verify_env_lines: "{{ (__verify_env.content | b64decode).splitlines() }}"
+
+    - name: Verify | Read the service state
+      ansible.builtin.systemd_service:
+        name: '{{ __activepieces_service_name }}'
+      register: __verify_service
+
+    - name: Verify | Assert the service is enabled and running
+      ansible.builtin.assert:
+        that:
+          - __verify_service.status.UnitFileState == 'enabled'
+          - __verify_service.status.ActiveState == 'active'
+        fail_msg: >-
+          UnitFileState={{ __verify_service.status.UnitFileState }}
+          ActiveState={{ __verify_service.status.ActiveState }}
+
+    # With a local PostgreSQL the unit requires the detected server unit
+    - name: Verify | Assert the service requires the PostgreSQL unit
+      ansible.builtin.assert:
+        that:
+          - __verify_service.status.Requires is search('(^| )postgresql(-[0-9]+)?\\.service( |$)')
+        fail_msg: 'Requires={{ __verify_service.status.Requires }}'
+      when: activepieces_db_type == 'POSTGRES'
+
+    - name: Verify | Read the running container
+      ansible.builtin.command:
+        cmd: podman ps --filter name=^activepieces$ --format '{{ "{{" }}.Image{{ "}}" }}'
+      become: true
+      become_user: activepieces
+      environment:
+        XDG_RUNTIME_DIR: '{{ __activepieces_runtime_dir }}'
+      register: __verify_container
+      changed_when: false
+
+    - name: Verify | Assert the pinned image is running
+      ansible.builtin.assert:
+        that:
+          - >-
+            __verify_container.stdout | trim
+            == __verify_defaults.activepieces_podman_image ~ ':' ~ __verify_defaults.activepieces_version
+        fail_msg: 'Running: {{ __verify_container.stdout | trim }}'
+
+    - name: Verify | Assert Activepieces reports healthy
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1:{{ activepieces_port }}/api/v1/health'
+        status_code: 200
+
+    - name: Verify | Fetch the frontend
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1:{{ activepieces_port }}/'
+        return_content: true
+      register: __verify_frontend
+
+    - name: Verify | Assert the frontend is served
+      ansible.builtin.assert:
+        that:
+          - __verify_frontend.content is search('<html', ignorecase=true)
+
+    # The port is published on 127.0.0.1 only; the address of the default
+    # interface must refuse the connection.
+    - name: Verify | Connect to the port on the address of the default interface
+      ansible.builtin.uri:
+        url: 'http://{{ ansible_facts["default_ipv4"]["address"] }}:{{ activepieces_port }}/api/v1/health'
+        timeout: 5
+      register: __verify_external
+      failed_when: false
+      when: ansible_facts['default_ipv4']['address'] is defined
+
+    - name: Verify | Assert the port is not reachable from outside the loopback
+      ansible.builtin.assert:
+        that:
+          - __verify_external.status | default(-1) == -1
+        fail_msg: 'Status {{ __verify_external.status }} on {{ ansible_facts["default_ipv4"]["address"] }}'
+      when: ansible_facts['default_ipv4']['address'] is defined
+
+    # The image runs Activepieces as root; keep-id maps it onto the
+    # activepieces user, so the files Activepieces writes stay owned by it
+    # on the host. With PostgreSQL the data directory may stay empty.
+    - name: Verify | Stat the data written by Activepieces
+      ansible.builtin.find:
+        paths: '/var/lib/activepieces/data'
+        file_type: any
+      register: __verify_data
+
+    - name: Verify | Assert the data directory stays owned by activepieces
+      ansible.builtin.assert:
+        that:
+          - __verify_data.files | length > 0 or activepieces_db_type == 'POSTGRES'
+          - __verify_data.files | map(attribute='pw_name') | reject('equalto', 'activepieces') | list | length == 0
+        fail_msg: >-
+          Owners: {{ __verify_data.files | map(attribute='path')
+             | zip(__verify_data.files | map(attribute='pw_name')) | list }}
+
+    - name: Verify | Assert the PGlite database lives in the data directory
+      ansible.builtin.stat:
+        path: '/var/lib/activepieces/data/pglite'
+      register: __verify_pglite
+      failed_when: >-
+        __verify_pglite.stat.exists != (activepieces_db_type == 'PGLITE')
+
+    #
+    # Scheduled backup: side_effect ran the service twice with
+    # activepieces_backup_keep 1, so exactly one scheduled set remains,
+    # with the archive of the data directory and, with PostgreSQL, the
+    # database dump.
+    #
+
+    - name: Verify | Stat the backup script
+      ansible.builtin.stat:
+        path: '{{ __activepieces_backup_script }}'
+      register: __verify_backup_script
+
+    - name: Verify | Assert the backup script is deployed
+      ansible.builtin.assert:
+        that:
+          - __verify_backup_script.stat.exists
+          - __verify_backup_script.stat.mode == '0750'
+          - __verify_backup_script.stat.pw_name == 'root'
+
+    - name: Verify | Read the backup timer state
+      ansible.builtin.systemd_service:
+        name: '{{ __activepieces_backup_timer_name }}'
+      register: __verify_backup_timer
+
+    - name: Verify | Assert the backup timer is enabled and active
+      ansible.builtin.assert:
+        that:
+          - __verify_backup_timer.status.UnitFileState == 'enabled'
+          - __verify_backup_timer.status.ActiveState == 'active'
+        fail_msg: >-
+          UnitFileState={{ __verify_backup_timer.status.UnitFileState }}
+          ActiveState={{ __verify_backup_timer.status.ActiveState }}
+
+    - name: Verify | List backup sets
+      ansible.builtin.find:
+        paths: '{{ __verify_defaults.activepieces_backup_dir }}'
+        file_type: directory
+        patterns: 'activepieces-*'
+      register: __verify_sets
+
+    - name: Verify | Assert exactly one scheduled set remains
+      ansible.builtin.assert:
+        that:
+          - __verify_sets.files | length == 1
+          - >-
+            __verify_sets.files[0].path | basename
+            is match('^activepieces-scheduled-' ~ (__verify_defaults.activepieces_version | regex_escape)
+                     ~ '-[0-9]{8}T[0-9]{6}$')
+        fail_msg: 'Backup sets: {{ __verify_sets.files | map(attribute="path") | list }}'
+
+    - name: Verify | Stat the files of the scheduled set
+      ansible.builtin.stat:
+        path: '{{ __verify_sets.files[0].path }}/{{ item }}'
+      register: __verify_set_files
+      loop:
+        - data.tar.gz
+        - db.dump
+
+    - name: Verify | Assert the set holds the archive and the dump of the database type
+      ansible.builtin.assert:
+        that:
+          - __verify_set_files.results[0].stat.exists
+          - __verify_set_files.results[0].stat.mode == '0600'
+          - __verify_set_files.results[1].stat.exists == (activepieces_db_type == 'POSTGRES')
+
+    # Listing an archive has no module equivalent.
+    - name: Verify | Assert the backup archive contains the data directory  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        cmd: 'tar -tzf {{ __verify_sets.files[0].path }}/data.tar.gz data/'
+      changed_when: false
+
+    - name: Verify | Assert the backup archive contains the PGlite database  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        cmd: 'tar -tzf {{ __verify_sets.files[0].path }}/data.tar.gz data/pglite/'
+      changed_when: false
+      when: activepieces_db_type == 'PGLITE'
+
+    #
+    # PostgreSQL: the migrations ran in the database the role created.
+    #
+
+    - name: Verify | Count the applied migrations
+      community.postgresql.postgresql_query:
+        login_db: '{{ activepieces_db_name | default(__verify_defaults.activepieces_db_name) }}'
+        query: 'SELECT count(*) AS applied FROM migrations'
+      become: true
+      become_user: postgres
+      register: __verify_migrations
+      when: activepieces_db_type == 'POSTGRES'
+
+    - name: Verify | Assert the migrations ran in PostgreSQL
+      ansible.builtin.assert:
+        that:
+          - __verify_migrations.query_result[0].applied > 0
+      when: activepieces_db_type == 'POSTGRES'

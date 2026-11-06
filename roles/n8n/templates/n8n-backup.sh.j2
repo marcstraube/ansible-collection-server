@@ -1,0 +1,118 @@
+#!/bin/bash
+{{ ansible_managed | comment }}
+#
+# Writes one backup set of n8n: data.tar.gz with the data directory
+# (entries relative to {{ n8n_user_home }}) and, with PostgreSQL, db.dump
+# (pg_dump -Fc). The version in the set name is the image tag of the
+# deployed service unit.
+#
+# Usage: n8n-backup [scheduled|update [<set to keep>]]
+#
+#   scheduled  (default) Set n8n-scheduled-<version>-<timestamp>, run by
+#              {{ __n8n_backup_service_name }}.
+{% if n8n_backup_stop_service | bool %}
+#              Stops n8n (and the task runners bound to it) while the set
+#              is written and starts it again afterwards, also when the
+#              backup fails.
+{% else %}
+#              Takes the set from the running instance.
+{% endif %}
+#   update     Set n8n-<version>-<timestamp>, run by the role before a
+#              version change or a restore with n8n already stopped. The
+#              set named as the second argument (the set a restore reads)
+#              is never removed.
+#
+# The retention is count-based and separate per kind: the set just written
+# counts, older sets of the same kind beyond the count are removed.
+# Scheduled sets kept: {{ n8n_backup_keep | int }}
+# Pre-update sets kept: {{ n8n_backup_update_keep | int }}
+
+set -euo pipefail
+umask 077
+
+KIND="${1:-scheduled}"
+PROTECT="${2:-}"
+BACKUP_DIR="{{ n8n_backup_dir }}"
+BACKUP_DIR="${BACKUP_DIR%/}"
+DATA_DIR="{{ n8n_data_dir }}"
+UNIT_FILE="/etc/systemd/system/{{ __n8n_service_name }}"
+IMAGE="{{ n8n_podman_image }}"
+
+case "${KIND}" in
+    scheduled)
+        PREFIX="n8n-scheduled-"
+        KEEP={{ n8n_backup_keep | int }}
+        ;;
+    update)
+        PREFIX="n8n-"
+        KEEP={{ n8n_backup_update_keep | int }}
+        ;;
+    *)
+        echo "Usage: $0 [scheduled|update [<set to keep>]]" >&2
+        exit 64
+        ;;
+esac
+
+# The deployed unit carries the image reference of the running release
+# (the same source the role reads the installed version from).
+IMAGE_LINE=$(grep -F -m 1 -- "${IMAGE}:" "${UNIT_FILE}" 2>/dev/null || true)
+VERSION="${IMAGE_LINE##*:}"
+VERSION="${VERSION//[[:space:]]/}"
+if [ -z "${VERSION}" ]; then
+    echo "n8n is not deployed: no image tag of ${IMAGE} in ${UNIT_FILE}" >&2
+    exit 1
+fi
+
+SET="${BACKUP_DIR}/${PREFIX}${VERSION}-$(date +%Y%m%dT%H%M%S)"
+echo "Writing backup set ${SET}"
+mkdir -p "${BACKUP_DIR}"
+mkdir -m 0700 "${SET}"
+
+{% if n8n_backup_stop_service | bool %}
+# A scheduled set is taken with n8n stopped; the service starts again on
+# every exit, so a failing dump does not leave n8n down. The update kind
+# runs with n8n already stopped by the role.
+if [ "${KIND}" = scheduled ] && systemctl is-active --quiet {{ __n8n_service_name }}; then
+    trap 'systemctl start {{ __n8n_service_name }}' EXIT
+    echo "Stopping {{ __n8n_service_name }} for the backup"
+    systemctl stop {{ __n8n_service_name }}
+fi
+
+{% endif %}
+# Entries are relative to the parent of the data directory, ownership is
+# kept. tar exits 1 when a file changed while it was read, which a copy of
+# a running instance accepts.
+TAR_RC=0
+tar --warning=no-file-changed -czf "${SET}/data.tar.gz" \
+    -C "$(dirname "${DATA_DIR}")" "$(basename "${DATA_DIR}")" || TAR_RC=$?
+if [ "${TAR_RC}" -gt 1 ]; then
+    echo "Archiving ${DATA_DIR} failed (tar exit status ${TAR_RC})" >&2
+    exit "${TAR_RC}"
+fi
+
+{% if n8n_db_type == 'postgresdb' %}
+# pg_dump runs as the postgres user over the local socket (peer auth, as
+# the role creates the database); the redirect keeps the dump root-owned.
+runuser -u postgres -- pg_dump -Fc {{ n8n_db_name }} > "${SET}/db.dump"
+
+{% endif %}
+# Rotation: sets of this kind, newest first, without the set just written
+# and the protected set; everything beyond the retention is removed. A
+# pre-update rotation leaves the scheduled sets alone.
+FIND_ARGS=("${BACKUP_DIR}" -mindepth 1 -maxdepth 1 -type d -name "${PREFIX}*" ! -path "${SET}")
+if [ "${KIND}" = update ]; then
+    FIND_ARGS+=(! -name 'n8n-scheduled-*')
+fi
+if [ -n "${PROTECT}" ]; then
+    FIND_ARGS+=(! -path "${BACKUP_DIR}/${PROTECT}")
+fi
+find "${FIND_ARGS[@]}" -printf '%T@ %p\n' \
+    | sort -rn \
+    | tail -n +$((KEEP > 1 ? KEEP : 1)) \
+    | cut -d' ' -f2- \
+    | while IFS= read -r OLD_SET; do
+        echo "Removing backup set ${OLD_SET} beyond the retention of ${KEEP}"
+        rm -rf -- "${OLD_SET}"
+    done
+
+echo "Backup set ${SET} completed: $(date)"

@@ -1,0 +1,381 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  vars:
+    # vars/main.yml builds the indexer URL from these role defaults, which a
+    # play outside the role does not load
+    wazuh_server_indexer_network_host: '127.0.0.1'
+    wazuh_server_indexer_http_port: 9200
+
+  tasks:
+    - name: Verify | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Verify | Gather package facts
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Verify | Assert Wazuh packages are installed
+      ansible.builtin.assert:
+        that:
+          - item in ansible_facts.packages
+        fail_msg: '{{ item }} is not installed'
+      loop:
+        - wazuh-indexer
+        - wazuh-manager
+        - filebeat
+        - wazuh-dashboard
+
+    # A system upgrade must leave the packages alone
+    - name: Verify | Read package holds (Debian)
+      ansible.builtin.command:
+        cmd: dpkg --get-selections {{ __wazuh_server_package_names | join(' ') }}
+      register: __verify_package_holds
+      changed_when: false
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Verify | Assert Wazuh packages are held (Debian)
+      ansible.builtin.assert:
+        that:
+          - (item ~ ' hold') in __verify_package_hold_lines
+        fail_msg: '{{ item }} is not held'
+      loop: '{{ __wazuh_server_package_names }}'
+      vars:
+        __verify_package_hold_lines: >-
+          {{ __verify_package_holds.stdout_lines | map('regex_replace', '\s+', ' ') | list }}
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Verify | Read version locks (RedHat)
+      ansible.builtin.command:
+        cmd: dnf versionlock list
+      register: __verify_version_locks
+      changed_when: false
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Verify | Assert Wazuh package versions are locked (RedHat)
+      ansible.builtin.assert:
+        that:
+          - __verify_version_locks.stdout is regex('(?m)^' ~ item ~ '-[0-9]+:')
+        fail_msg: '{{ item }} is not locked'
+      loop: '{{ __wazuh_server_package_names }}'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Verify | Stat indexer certificates
+      ansible.builtin.stat:
+        path: '{{ __wazuh_server_indexer_certs_dir }}/{{ item }}'
+      register: __verify_indexer_certs
+      loop:
+        - '{{ __wazuh_server_ca_cert_name }}'
+        - '{{ __wazuh_server_node_cert_name }}'
+        - '{{ __wazuh_server_node_key_name }}'
+        - '{{ __wazuh_server_admin_cert_name }}'
+        - '{{ __wazuh_server_admin_key_name }}'
+
+    - name: Verify | Assert indexer certificates are owned by the indexer
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.pw_name == __wazuh_server_indexer_user
+          - item.stat.mode == '0400'
+      loop: '{{ __verify_indexer_certs.results }}'
+      loop_control:
+        label: '{{ item.item }}'
+
+    - name: Verify | Read indexer node key
+      ansible.builtin.slurp:
+        src: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_node_key_name }}'
+      register: __verify_node_key
+      no_log: true
+
+    - name: Verify | Assert indexer node key is PKCS#8
+      ansible.builtin.assert:
+        that:
+          - (__verify_node_key.content | b64decode).startswith('-----BEGIN PRIVATE KEY-----')
+        fail_msg: The indexer node key is not a PKCS#8 key
+      no_log: true
+
+    - name: Verify | Read indexer configuration
+      ansible.builtin.slurp:
+        src: '{{ __wazuh_server_indexer_config_file }}'
+      register: __verify_indexer_config
+
+    - name: Verify | Assert DNs from the certificates
+      ansible.builtin.assert:
+        that:
+          - "'CN=wazuh-node,O=Wazuh Test' in __verify_indexer_config_text"
+          - "'CN=admin' in __verify_indexer_config_text"
+      vars:
+        __verify_indexer_config_text: '{{ __verify_indexer_config.content | b64decode }}'
+
+    # side_effect.yml disabled the snapshots after asserting the enabled
+    # state: no path.repo, no repository, no policy, the directory stays
+    - name: Verify | Assert path.repo is left out
+      ansible.builtin.assert:
+        that:
+          - "'path.repo' not in __verify_indexer_config_text"
+        fail_msg: 'opensearch.yml still sets path.repo with an empty snapshot path'
+      vars:
+        __verify_indexer_config_text: '{{ __verify_indexer_config.content | b64decode }}'
+
+    - name: Verify | Stat snapshot directory
+      ansible.builtin.stat:
+        path: '{{ wazuh_server_indexer_snapshot_path }}'
+      register: __verify_snapshot_dir
+
+    - name: Verify | Assert snapshot directory is kept
+      ansible.builtin.assert:
+        that:
+          - __verify_snapshot_dir.stat.isdir | default(false)
+          - __verify_snapshot_dir.stat.pw_name == __wazuh_server_indexer_user
+        fail_msg: '{{ wazuh_server_indexer_snapshot_path }} was removed with the snapshots disabled'
+
+    - name: Verify | Wait for the indexer HTTPS port
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 9200
+        timeout: 180
+
+    - name: Verify | Authenticate indexer users over HTTPS
+      ansible.builtin.uri:
+        url: 'https://127.0.0.1:9200/_plugins/_security/authinfo'
+        url_username: '{{ item.name }}'
+        url_password: '{{ item.password }}'
+        force_basic_auth: true
+        ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+      register: __verify_indexer_auth
+      retries: 12
+      delay: 10
+      until: __verify_indexer_auth is not failed
+      loop:
+        - { name: 'admin', password: '{{ wazuh_server_indexer_admin_password }}' }
+        - { name: 'kibanaserver', password: '{{ wazuh_server_indexer_kibanaserver_password }}' }
+      loop_control:
+        label: '{{ item.name }}'
+
+    - name: Verify | Assert indexer demo users are gone
+      ansible.builtin.uri:
+        url: 'https://127.0.0.1:9200/_plugins/_security/authinfo'
+        url_username: 'kibanaro'
+        url_password: 'kibanaro'
+        force_basic_auth: true
+        ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+        status_code: 401
+
+    - name: Verify | Assert snapshot repository is deregistered
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_indexer_snapshot_repository_url }}'
+        client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+        client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+        ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+        status_code: 404
+
+    - name: Verify | Assert snapshot management policy is deleted
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_indexer_snapshot_policy_url }}'
+        client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+        client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+        ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+        status_code: 404
+
+    - name: Verify | Test Filebeat connection to the indexer
+      ansible.builtin.command:
+        cmd: filebeat test output
+      register: __verify_filebeat_output
+      changed_when: false
+      retries: 6
+      delay: 10
+      until: __verify_filebeat_output.rc == 0
+
+    - name: Verify | Authenticate Wazuh API users
+      ansible.builtin.uri:
+        url: 'https://127.0.0.1:55000/security/user/authenticate'
+        method: POST
+        url_username: '{{ item.name }}'
+        url_password: '{{ item.password }}'
+        force_basic_auth: true
+        validate_certs: false
+      loop:
+        - { name: 'wazuh', password: '{{ wazuh_server_api_wazuh_password }}' }
+        - { name: 'wazuh-wui', password: '{{ wazuh_server_api_wui_password }}' }
+      loop_control:
+        label: '{{ item.name }}'
+
+    - name: Verify | Assert Wazuh API default passwords are rejected
+      ansible.builtin.uri:
+        url: 'https://127.0.0.1:55000/security/user/authenticate'
+        method: POST
+        url_username: '{{ item }}'
+        url_password: '{{ item }}'
+        force_basic_auth: true
+        validate_certs: false
+        status_code: 401
+      loop:
+        - 'wazuh'
+        - 'wazuh-wui'
+
+    - name: Verify | Wait for the dashboard
+      ansible.builtin.uri:
+        url: 'https://127.0.0.1:443/api/status'
+        url_username: 'admin'
+        url_password: '{{ wazuh_server_indexer_admin_password }}'
+        force_basic_auth: true
+        ca_path: '{{ __wazuh_server_dashboard_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+      register: __verify_dashboard_status
+      retries: 30
+      delay: 10
+      until: __verify_dashboard_status is not failed
+
+    - name: Verify | Read dashboard plugin configuration
+      ansible.builtin.slurp:
+        src: '{{ __wazuh_server_dashboard_plugin_config_file }}'
+      register: __verify_dashboard_plugin_config
+      no_log: true
+
+    - name: Verify | Assert enrollment address in dashboard plugin configuration
+      ansible.builtin.assert:
+        that:
+          - __verify_plugin_config['enrollment.dns'] == wazuh_server_dashboard_enrollment_dns
+        fail_msg: 'wazuh.yml does not set enrollment.dns to {{ wazuh_server_dashboard_enrollment_dns }}'
+      vars:
+        __verify_plugin_config: '{{ __verify_dashboard_plugin_config.content | b64decode | from_yaml }}'
+
+    # The scenario sets the address; the template without it covers the default
+    - name: Verify | Assert empty enrollment address is left out
+      ansible.builtin.assert:
+        that:
+          - "'enrollment.dns' not in (__verify_plugin_config_default | from_yaml)"
+        fail_msg: 'wazuh.yml renders enrollment.dns for an empty address'
+      vars:
+        __verify_plugin_config_default: >-
+          {{ lookup('ansible.builtin.template', playbook_dir ~ '/../../templates/wazuh.yml.j2',
+                    template_vars={'wazuh_server_dashboard_enrollment_dns': ''}) }}
+
+    # Enrollment requests in the wazuh-authd protocol; the CA check of the
+    # TLS connection fails unless the manager serves the node certificate
+    - name: Verify | Wait for the enrollment service
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 1515
+        timeout: 120
+
+    - name: Verify | Request enrollment
+      ansible.builtin.command:
+        argv: >-
+          {{ ['timeout', '30', 'openssl', 's_client', '-connect', '127.0.0.1:1515', '-quiet',
+              '-CAfile', wazuh_server_enrollment_agent_ca_file, '-verify_return_error']
+             + (item.cert | ternary(['-cert', '/etc/ssl/certs/wazuh-agent.crt',
+                                     '-key', '/etc/ssl/private/wazuh-agent.key'], [])) }}
+        stdin: >-
+          {{ (item.password | length > 0) | ternary('OSSEC PASS: ' ~ item.password ~ ' ', '')
+             ~ "OSSEC A:'" ~ item.name ~ "'" }}
+      register: __verify_enrollment
+      changed_when: false
+      failed_when: false
+      loop:
+        - { name: 'no-password', password: '', cert: true }
+        - { name: 'wrong-password', password: 'Wrong-Pass1', cert: true }
+        - { name: 'no-certificate', password: '{{ wazuh_server_enrollment_password }}', cert: false }
+        - { name: 'enrolled', password: '{{ wazuh_server_enrollment_password }}', cert: true }
+      loop_control:
+        label: '{{ item.name }}'
+
+    - name: Verify | Assert enrollment needs password and certificate
+      ansible.builtin.assert:
+        that:
+          - ("OSSEC K:'" in item.stdout) == (item.item.name == 'enrolled')
+        fail_msg: >-
+          Enrollment {{ item.item.name }}: expected
+          {{ (item.item.name == 'enrolled') | ternary('a key', 'a rejection') }},
+          got rc={{ item.rc }} stdout={{ item.stdout | regex_replace('OSSEC K:.*', 'OSSEC K:<key>') }}
+          stderr={{ item.stderr | default('') | truncate(300) }}
+      loop: '{{ __verify_enrollment.results }}'
+      loop_control:
+        label: '{{ item.item.name }}'
+
+    - name: Verify | Assert services are running
+      ansible.builtin.systemd_service:
+        name: '{{ item }}'
+      register: __verify_service
+      failed_when: __verify_service.status.ActiveState != 'active'
+      loop:
+        - '{{ __wazuh_server_indexer_service_name }}'
+        - '{{ __wazuh_server_manager_service_name }}'
+        - '{{ __wazuh_server_filebeat_service_name }}'
+        - '{{ __wazuh_server_dashboard_service_name }}'
+
+    - name: Verify | Read the manager configuration
+      ansible.builtin.slurp:
+        src: '{{ __wazuh_server_manager_config_file }}'
+      register: __verify_manager_config
+
+    - name: Verify | Assert the manager connects to the indexer address
+      ansible.builtin.assert:
+        that:
+          - "'<host>https://127.0.0.1:9200</host>' in __verify_manager_indexer_section"
+        fail_msg: 'The <indexer> section of ossec.conf does not point to https://127.0.0.1:9200'
+      vars:
+        __verify_manager_indexer_section: >-
+          {{ __verify_manager_config.content | b64decode
+             | regex_search('(?s)<indexer>.*?</indexer>') | default('', true) }}
+
+    # The scenario sets a proxy: the drop-in is in place and the manager
+    # daemons inherit the environment of the service
+    - name: Verify | Stat the manager proxy drop-in
+      ansible.builtin.stat:
+        path: '{{ __wazuh_server_manager_proxy_dropin_file }}'
+      register: __verify_proxy_dropin
+
+    - name: Verify | Assert the manager proxy drop-in is deployed
+      ansible.builtin.assert:
+        that:
+          - __verify_proxy_dropin.stat.exists
+          - __verify_proxy_dropin.stat.mode == '0644'
+        fail_msg: '{{ __wazuh_server_manager_proxy_dropin_file }} is missing or has the wrong mode'
+
+    # wazuh_server_no_proxy lacks the indexer address; the role adds it
+    - name: Verify | Read the manager proxy drop-in
+      ansible.builtin.slurp:
+        src: '{{ __wazuh_server_manager_proxy_dropin_file }}'
+      register: __verify_proxy_dropin_content
+
+    - name: Verify | Assert the manager proxy drop-in bypasses the proxy for the indexer
+      ansible.builtin.assert:
+        that:
+          - item in __verify_proxy_dropin_lines
+        fail_msg: '{{ __wazuh_server_manager_proxy_dropin_file }} lacks {{ item }}'
+      loop:
+        - 'Environment="no_proxy=localhost,127.0.0.1"'
+        - 'Environment="NO_PROXY=localhost,127.0.0.1"'
+      vars:
+        __verify_proxy_dropin_lines: '{{ (__verify_proxy_dropin_content.content | b64decode).splitlines() }}'
+
+    - name: Verify | Read the PID of wazuh-modulesd
+      ansible.builtin.command:
+        argv: ['pidof', '-s', 'wazuh-modulesd']
+      register: __verify_modulesd_pid
+      changed_when: false
+
+    - name: Verify | Read the environment of wazuh-modulesd
+      ansible.builtin.slurp:
+        src: '/proc/{{ __verify_modulesd_pid.stdout | trim }}/environ'
+      register: __verify_modulesd_environ
+
+    - name: Verify | Assert the manager runs with the proxy
+      ansible.builtin.assert:
+        that:
+          - item in __verify_modulesd_environ_entries
+        fail_msg: 'wazuh-modulesd runs without {{ item }}'
+      loop:
+        - 'http_proxy={{ wazuh_server_http_proxy }}'
+        - 'HTTP_PROXY={{ wazuh_server_http_proxy }}'
+        - 'https_proxy={{ wazuh_server_http_proxy }}'
+        - 'HTTPS_PROXY={{ wazuh_server_http_proxy }}'
+        - 'no_proxy=localhost,127.0.0.1'
+        - 'NO_PROXY=localhost,127.0.0.1'
+      vars:
+        # NUL-separated entries
+        __verify_modulesd_environ_entries: >-
+          {{ __verify_modulesd_environ.content | b64decode | regex_findall('[^\x00]+') }}

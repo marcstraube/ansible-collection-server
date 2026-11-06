@@ -1,0 +1,294 @@
+---
+#
+# Wazuh Indexer
+#
+
+# The snapshot repository location has to exist before the indexer verifies
+# the repository. The directory stays with its data when the path is
+# emptied.
+- name: Configure | Create indexer snapshot directory
+  ansible.builtin.file:
+    path: '{{ wazuh_server_indexer_snapshot_path }}'
+    state: directory
+    owner: '{{ __wazuh_server_indexer_user }}'
+    group: '{{ __wazuh_server_indexer_user }}'
+    mode: '0750'
+  when: wazuh_server_indexer_snapshot_path | length > 0
+
+- name: Configure | Deploy indexer configuration
+  ansible.builtin.template:
+    src: opensearch.yml.j2
+    dest: '{{ __wazuh_server_indexer_config_file }}'
+    owner: root
+    group: '{{ __wazuh_server_indexer_user }}'
+    mode: '0640'
+  notify: Restart Wazuh indexer
+
+- name: Configure | Create indexer JVM options directory
+  ansible.builtin.file:
+    path: '{{ __wazuh_server_indexer_jvm_options_dir }}'
+    state: directory
+    owner: root
+    group: '{{ __wazuh_server_indexer_user }}'
+    mode: '0750'
+
+- name: Configure | Deploy indexer heap size
+  ansible.builtin.template:
+    src: heap.options.j2
+    dest: '{{ __wazuh_server_indexer_heap_config_file }}'
+    owner: root
+    group: '{{ __wazuh_server_indexer_user }}'
+    mode: '0640'
+  when: wazuh_server_indexer_heap_size | length > 0
+  notify: Restart Wazuh indexer
+
+- name: Configure | Remove indexer heap size override
+  ansible.builtin.file:
+    path: '{{ __wazuh_server_indexer_heap_config_file }}'
+    state: absent
+  when: wazuh_server_indexer_heap_size | length == 0
+  notify: Restart Wazuh indexer
+
+#
+# Wazuh Manager
+#
+# ossec.conf stays the package file; the role only sets the enrollment
+# options inside its <auth> section and the indexer address inside its
+# <indexer> section.
+#
+
+- name: Configure | Deploy enrollment password
+  ansible.builtin.copy:
+    content: "{{ wazuh_server_enrollment_password }}\n"
+    dest: '{{ __wazuh_server_enrollment_password_file }}'
+    owner: root
+    group: '{{ __wazuh_server_manager_group }}'
+    mode: '0640'
+  no_log: true
+  when: wazuh_server_enrollment_password | length > 0
+  notify: Restart Wazuh manager
+
+- name: Configure | Remove enrollment password
+  ansible.builtin.file:
+    path: '{{ __wazuh_server_enrollment_password_file }}'
+    state: absent
+  when: wazuh_server_enrollment_password | length == 0
+  notify: Restart Wazuh manager
+
+- name: Configure | Set enrollment options
+  ansible.builtin.replace:
+    path: '{{ __wazuh_server_manager_config_file }}'
+    after: '<auth>'
+    before: '</auth>'
+    regexp: '<{{ item.key }}>[^<]*</{{ item.key }}>'
+    replace: '<{{ item.key }}>{{ item.value }}</{{ item.key }}>'
+  loop: '{{ __wazuh_server_enrollment_options | dict2items }}'
+  loop_control:
+    label: '{{ item.key }}'
+  notify: Restart Wazuh manager
+
+# The package ships the element commented out; without an agent CA the
+# role restores that line
+- name: Configure | Set enrollment agent CA
+  ansible.builtin.replace:
+    path: '{{ __wazuh_server_manager_config_file }}'
+    after: '<auth>'
+    before: '</auth>'
+    regexp: '(<!-- )?<ssl_agent_ca>[^<]*</ssl_agent_ca>( -->)?'
+    replace: >-
+      {{ (wazuh_server_enrollment_agent_ca_file | length > 0)
+         | ternary('<ssl_agent_ca>' ~ __wazuh_server_enrollment_agent_ca_path ~ '</ssl_agent_ca>',
+                   '<!-- <ssl_agent_ca></ssl_agent_ca> -->') }}
+  notify: Restart Wazuh manager
+
+# The manager connects to the indexer at this URL; the package default
+# https://0.0.0.0:9200 only works while the indexer listens on the loopback
+- name: Configure | Set manager indexer host
+  ansible.builtin.replace:
+    path: '{{ __wazuh_server_manager_config_file }}'
+    after: '<indexer>'
+    before: '</indexer>'
+    regexp: '<host>[^<]*</host>'
+    replace: '<host>{{ __wazuh_server_indexer_url }}</host>'
+  notify: Restart Wazuh manager
+
+# replace leaves the file unchanged when a pattern finds nothing, for
+# example after a Wazuh release changed the <auth> or <indexer> section
+- name: Configure | Read manager configuration
+  ansible.builtin.slurp:
+    src: '{{ __wazuh_server_manager_config_file }}'
+  register: __wazuh_server_manager_config
+  when: not ansible_check_mode
+
+- name: Configure | Assert enrollment options are set
+  ansible.builtin.assert:
+    that:
+      - ('<' ~ item.key ~ '>' ~ item.value ~ '</' ~ item.key ~ '>') in __wazuh_server_auth_section
+    fail_msg: >-
+      The <auth> section of {{ __wazuh_server_manager_config_file }} has no
+      element {{ item.key }} with the value {{ item.value }}. The format of
+      ossec.conf may have changed with this Wazuh release.
+    quiet: true
+  loop: >-
+    {{ __wazuh_server_enrollment_options | dict2items
+       + ((wazuh_server_enrollment_agent_ca_file | length > 0)
+          | ternary([{'key': 'ssl_agent_ca', 'value': __wazuh_server_enrollment_agent_ca_path}], [])) }}
+  loop_control:
+    label: '{{ item.key }}'
+  vars:
+    __wazuh_server_auth_section: >-
+      {{ __wazuh_server_manager_config.content | b64decode
+         | regex_search('(?s)<auth>.*?</auth>') | default('', true) }}
+  when: not ansible_check_mode
+
+- name: Configure | Assert manager indexer host is set
+  ansible.builtin.assert:
+    that:
+      - ('<host>' ~ __wazuh_server_indexer_url ~ '</host>') in __wazuh_server_indexer_section
+    fail_msg: >-
+      The <indexer> section of {{ __wazuh_server_manager_config_file }} has
+      no element host with the value {{ __wazuh_server_indexer_url }}. The
+      format of ossec.conf may have changed with this Wazuh release.
+    quiet: true
+  vars:
+    __wazuh_server_indexer_section: >-
+      {{ __wazuh_server_manager_config.content | b64decode
+         | regex_search('(?s)<indexer>.*?</indexer>') | default('', true) }}
+  when: not ansible_check_mode
+
+# ossec.conf has no proxy option: the manager daemons take the proxy from
+# the environment of their service, which the drop-in sets. The environment
+# only reaches freshly started daemons, so a change restarts the manager.
+- name: Configure | Create manager systemd drop-in directory
+  ansible.builtin.file:
+    path: '{{ __wazuh_server_manager_dropin_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: wazuh_server_http_proxy | length > 0
+
+- name: Configure | Deploy manager proxy drop-in
+  ansible.builtin.template:
+    src: proxy.conf.j2
+    dest: '{{ __wazuh_server_manager_proxy_dropin_file }}'
+    owner: root
+    group: root
+    mode: '0644'
+  when: wazuh_server_http_proxy | length > 0
+  notify:
+    - Reload Wazuh systemd units
+    - Restart Wazuh manager
+
+- name: Configure | Remove manager proxy drop-in
+  ansible.builtin.file:
+    path: '{{ __wazuh_server_manager_proxy_dropin_file }}'
+    state: absent
+  when: wazuh_server_http_proxy | length == 0
+  notify:
+    - Reload Wazuh systemd units
+    - Restart Wazuh manager
+
+#
+# Filebeat
+#
+
+- name: Configure | Deploy Filebeat configuration
+  ansible.builtin.template:
+    src: filebeat.yml.j2
+    dest: '{{ __wazuh_server_filebeat_config_file }}'
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+  notify: Restart Filebeat
+
+# Fetched in check mode as well, so the deployment compares the content
+- name: Configure | Download Wazuh index template
+  ansible.builtin.uri:
+    url: '{{ __wazuh_server_filebeat_template_url }}'
+    return_content: true
+  register: __wazuh_server_filebeat_template
+  retries: 5
+  delay: 10
+  until: __wazuh_server_filebeat_template is not failed
+  check_mode: false
+
+- name: Configure | Deploy Wazuh index template
+  ansible.builtin.copy:
+    content: '{{ __wazuh_server_filebeat_template.content }}'
+    dest: '{{ __wazuh_server_filebeat_template_file }}'
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart Filebeat
+
+- name: Configure | Install Wazuh Filebeat module
+  ansible.builtin.unarchive:
+    src: '{{ __wazuh_server_filebeat_module_url }}'
+    dest: '{{ __wazuh_server_filebeat_module_parent_dir }}'
+    remote_src: true
+    creates: '{{ __wazuh_server_filebeat_module_dir }}'
+    owner: root
+    group: root
+  retries: 5
+  delay: 10
+  notify: Restart Filebeat
+
+#
+# Wazuh Dashboard
+#
+
+- name: Configure | Deploy dashboard configuration
+  ansible.builtin.template:
+    src: opensearch_dashboards.yml.j2
+    dest: '{{ __wazuh_server_dashboard_config_file }}'
+    owner: '{{ __wazuh_server_dashboard_user }}'
+    group: '{{ __wazuh_server_dashboard_user }}'
+    mode: '0640'
+  no_log: true
+  notify: Restart Wazuh dashboard
+
+# The package seeds the dashboard keystore with the default kibanaserver
+# credentials, which take precedence over opensearch_dashboards.yml
+- name: Configure | List dashboard keystore entries
+  ansible.builtin.command:
+    argv:
+      - '{{ __wazuh_server_dashboard_keystore_bin }}'
+      - 'list'
+      - '--allow-root'
+  register: __wazuh_server_dashboard_keystore
+  changed_when: false
+  # Read-only; check mode needs the entries
+  check_mode: false
+
+- name: Configure | Remove package credentials from the dashboard keystore
+  ansible.builtin.command:
+    argv:
+      - '{{ __wazuh_server_dashboard_keystore_bin }}'
+      - 'remove'
+      - '{{ item }}'
+      - '--allow-root'
+  loop: >-
+    {{ ['opensearch.username', 'opensearch.password']
+       | intersect(__wazuh_server_dashboard_keystore.stdout_lines) }}
+  changed_when: true
+  notify: Restart Wazuh dashboard
+
+- name: Configure | Create dashboard plugin configuration directory
+  ansible.builtin.file:
+    path: '{{ __wazuh_server_dashboard_plugin_config_dir }}'
+    state: directory
+    owner: '{{ __wazuh_server_dashboard_user }}'
+    group: '{{ __wazuh_server_dashboard_user }}'
+    mode: '0750'
+
+- name: Configure | Deploy dashboard plugin configuration
+  ansible.builtin.template:
+    src: wazuh.yml.j2
+    dest: '{{ __wazuh_server_dashboard_plugin_config_file }}'
+    owner: '{{ __wazuh_server_dashboard_user }}'
+    group: '{{ __wazuh_server_dashboard_user }}'
+    mode: '0640'
+  no_log: true
+  notify: Restart Wazuh dashboard

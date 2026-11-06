@@ -42,6 +42,23 @@
       register: __verify_env_file
       failed_when: not __verify_env_file.stat.exists
 
+    # The file is mode 0600, so it is read through slurp. With the
+    # defaults n8n sits behind one reverse proxy and serves no metrics.
+    - name: Verify | Read the environment file
+      ansible.builtin.slurp:
+        src: /etc/n8n/n8n.env
+      register: __verify_env
+
+    - name: Verify | Assert the reverse proxy and metrics settings
+      ansible.builtin.assert:
+        that:
+          - "'N8N_PROXY_HOPS=1' in __verify_env_lines"
+          - __verify_env_lines | select('match', '^N8N_METRICS=') | length == 0
+        fail_msg: >-
+          {{ __verify_env_lines | select('match', '^N8N_(PROXY_HOPS|METRICS)=') | list }}
+      vars:
+        __verify_env_lines: "{{ (__verify_env.content | b64decode).splitlines() }}"
+
     - name: Verify | Assert systemd service file exists
       ansible.builtin.stat:
         path: '/etc/systemd/system/{{ __n8n_service_name }}'
@@ -56,6 +73,15 @@
       loop:
         - '{{ __n8n_service_name }}'
         - '{{ __n8n_runner_service_name }}'
+
+    # Converge runs SQLite: the unit requires no PostgreSQL unit
+    - name: Verify | Assert the service requires no PostgreSQL unit
+      ansible.builtin.assert:
+        that:
+          - >-
+            __verify_service_status.results[0].status.Requires | default('')
+            is not search('(^| )postgresql(-[0-9]+)?\\.service( |$)')
+        fail_msg: 'Requires={{ __verify_service_status.results[0].status.Requires | default("") }}'
 
     - name: Verify | Read the running containers
       ansible.builtin.command:
@@ -86,10 +112,109 @@
         url: 'http://127.0.0.1:5680/healthz'
         status_code: 200
 
+    # The URL path prefix (n8n_path, or its deprecated name
+    # n8n_endpoints_rest) reaches the editor only: n8n keeps its backend
+    # routes at the root, so readiness answers unprefixed on every platform
+    # while the editor requests its assets under the prefix of the platform.
     - name: Verify | Assert n8n reports ready
       ansible.builtin.uri:
         url: 'http://127.0.0.1:5678/healthz/readiness'
         status_code: 200
+
+    - name: Verify | Fetch the editor page
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1:5678/'
+        return_content: true
+      register: __verify_editor
+
+    - name: Verify | Fetch the base path script of the editor
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1:5678/static/base-path.js'
+        return_content: true
+      register: __verify_base_path
+
+    - name: Verify | Assert the editor is served under the URL path prefix
+      ansible.builtin.assert:
+        that:
+          - __verify_editor.content is search('=.' ~ (__verify_prefix | regex_escape) ~ 'static/base-path\.js')
+          - ("window.BASE_PATH = '" ~ __verify_prefix ~ "';") in __verify_base_path.content
+        fail_msg: >-
+          prefix={{ __verify_prefix }}
+          base-path.js={{ __verify_base_path.content | trim }}
+      vars:
+        __verify_prefix: >-
+          {{ n8n_path if n8n_path is defined
+             else n8n_endpoints_rest if n8n_endpoints_rest is defined
+             else __verify_defaults.n8n_path }}
+
+    #
+    # Scheduled backup: side_effect ran the service twice with
+    # n8n_backup_keep 1, so exactly one scheduled set with the archive of
+    # the data directory remains (SQLite, so no db.dump).
+    #
+
+    - name: Verify | Stat the backup script
+      ansible.builtin.stat:
+        path: '{{ __n8n_backup_script }}'
+      register: __verify_backup_script
+
+    - name: Verify | Assert the backup script is deployed
+      ansible.builtin.assert:
+        that:
+          - __verify_backup_script.stat.exists
+          - __verify_backup_script.stat.mode == '0750'
+          - __verify_backup_script.stat.pw_name == 'root'
+
+    - name: Verify | Read the backup timer state
+      ansible.builtin.systemd_service:
+        name: '{{ __n8n_backup_timer_name }}'
+      register: __verify_backup_timer
+
+    - name: Verify | Assert the backup timer is enabled and active
+      ansible.builtin.assert:
+        that:
+          - __verify_backup_timer.status.UnitFileState == 'enabled'
+          - __verify_backup_timer.status.ActiveState == 'active'
+        fail_msg: >-
+          UnitFileState={{ __verify_backup_timer.status.UnitFileState }}
+          ActiveState={{ __verify_backup_timer.status.ActiveState }}
+
+    - name: Verify | List backup sets
+      ansible.builtin.find:
+        paths: '{{ __verify_defaults.n8n_backup_dir }}'
+        file_type: directory
+        patterns: 'n8n-*'
+      register: __verify_sets
+
+    - name: Verify | Assert exactly one scheduled set remains
+      ansible.builtin.assert:
+        that:
+          - __verify_sets.files | length == 1
+          - >-
+            __verify_sets.files[0].path | basename
+            is match('^n8n-scheduled-' ~ (__verify_defaults.n8n_version | regex_escape) ~ '-[0-9]{8}T[0-9]{6}$')
+        fail_msg: 'Backup sets: {{ __verify_sets.files | map(attribute="path") | list }}'
+
+    - name: Verify | Stat the files of the scheduled set
+      ansible.builtin.stat:
+        path: '{{ __verify_sets.files[0].path }}/{{ item }}'
+      register: __verify_set_files
+      loop:
+        - data.tar.gz
+        - db.dump
+
+    - name: Verify | Assert the set holds the archive and no database dump
+      ansible.builtin.assert:
+        that:
+          - __verify_set_files.results[0].stat.exists
+          - __verify_set_files.results[0].stat.mode == '0600'
+          - not __verify_set_files.results[1].stat.exists
+
+    # Listing an archive has no module equivalent.
+    - name: Verify | Assert the backup archive contains the SQLite database  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        cmd: 'tar -tzf {{ __verify_sets.files[0].path }}/data.tar.gz .n8n/database.sqlite'
+      changed_when: false
 
     # n8n writes its instance settings on first start; the keep-id mapping
     # keeps the files owned by the n8n user on the host.
@@ -129,3 +254,28 @@
         that:
           - __verify_deprecations | length == 0
         fail_msg: '{{ __verify_deprecations }}'
+
+    #
+    # Database type: n8n 2.0 removed MySQL and MariaDB, the role refuses them
+    # before it changes anything.
+    #
+
+    - name: Verify | Run the role with a removed database type
+      block:
+        - name: Verify | Include n8n role (mariadb)  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            n8n_enabled: true
+            n8n_db_type: 'mariadb'
+      rescue:
+        - name: Verify | Record the database type failure
+          ansible.builtin.set_fact:
+            __verify_db_type_msg: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Assert the removed database type was refused
+      ansible.builtin.assert:
+        that:
+          - __verify_db_type_msg is defined
+          - "'n8n 2.0 removed MySQL and MariaDB' in __verify_db_type_msg"
+        fail_msg: 'Database type result: {{ __verify_db_type_msg | default("role run succeeded") }}'

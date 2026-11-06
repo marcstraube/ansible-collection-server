@@ -15,6 +15,12 @@ __postgresql_pgdg_packages:
   - 'postgresql-{{ __postgresql_version }}'
   - python3-psycopg2
 
+# Installed packages a targeted update moves along (server, client,
+# contrib, postgresql-common, libpq) and the package that carries the
+# server version
+__postgresql_update_pattern: '^(postgresql(-.+)?|libpq5)$'
+__postgresql_server_package: 'postgresql-{{ __postgresql_version }}'
+
 __postgresql_service_name: postgresql
 __postgresql_config_dir: '/etc/postgresql/{{ __postgresql_version }}/main'
 __postgresql_data_dir: '/var/lib/postgresql/{{ __postgresql_version }}/main'
@@ -33,3 +39,6 @@ __postgresql_pgdg_apt_key_url: https://www.postgresql.org/media/keys/ACCC4CF8.as
 # postgresql_ssl_cert_file/_key_file are left empty in inventory.
 __postgresql_ssl_cert_file: '/etc/ssl/certs/ssl-cert-snakeoil.pem'
 __postgresql_ssl_key_file: '/etc/ssl/private/ssl-cert-snakeoil.key'
+
+# Directory of the user crontabs
+__postgresql_cron_spool_dir: /var/spool/cron/crontabs

@@ -1,0 +1,12 @@
+{{ ansible_managed | comment }}
+
+[Unit]
+Description=Activepieces backup set
+Documentation=https://www.activepieces.com/docs
+
+[Service]
+Type=oneshot
+ExecStart={{ __activepieces_backup_script }} scheduled
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=activepieces-backup

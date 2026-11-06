@@ -19,3 +19,6 @@ __apache_ssl_stapling_cache: 'shmcb:/run/httpd/ocsp(128000)'
 __apache_modules_available_dir: '/etc/httpd/conf/modules'
 __apache_modules_enabled_dir: '/etc/httpd/conf/modules'
 __apache_use_mods_enabled: false
+
+# Main process PID (compiled-in DEFAULT_PIDLOG)
+__apache_pid_file: '/run/httpd/httpd.pid'
