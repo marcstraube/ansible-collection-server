@@ -2,6 +2,17 @@
 
 All notable changes to this collection will be documented in this file.
 
+## 1.0.3 (2026-11-05)
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+## What's Changed
+### Bug Fixes
+* fix(apache): neutralize the package ssl.conf instead of deleting it by @marcstraube in https://github.com/marcstraube/ansible-collection-server/pull/109
+
+
+**Full Changelog**: https://github.com/marcstraube/ansible-collection-server/compare/v1.0.2...v1.0.3
+
 ## 1.0.2 (2026-10-23)
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
