@@ -185,13 +185,21 @@ the redirect. The HTTP redirect (`http_redirect`) and the www redirect
 HTTP redirect points to `https://<host>:8444/`, with `443` the URL carries
 no port.
 
-On SELinux systems nginx may only bind ports labeled `http_port_t` (80, 81,
-443, 488, 8008, 8009, 8443 and 9000). Every other `listen` and `listen_ssl`
-port of an enabled site gets that label from the role; without it nginx
-cannot bind the port. Labels the role added stay in place when a port is
-removed from the sites. The role also enables the `httpd_can_network_connect`
-boolean when a site of type `proxy` or an upstream exists, so nginx can reach
-backends on any port.
+On SELinux systems nginx may only bind TCP ports labeled `http_port_t` (80,
+81, 443, 488, 8008, 8009, 8443 and 9000) and no UDP port. Every other
+`listen` and `listen_ssl` port of an enabled site and, with
+`nginx_stream_enabled`, every `listen` port of a stream server (TCP, or UDP
+with `udp: true`) gets that label from the role;
+without it nginx cannot bind the port. A port of another type, such as 3306
+(`mysqld_port_t`), is relabeled `http_port_t`. Labels the role added stay in
+place when a port is removed from the configuration. The role also enables
+the `httpd_can_network_connect` boolean when an upstream, a site of type
+`proxy`, an enabled site with `authentik.enabled` or a stream server exists,
+so nginx can reach backends, the Authentik outpost and stream upstreams on
+any port.
+
+The default site listens on 80 and on `443 ssl http2`, the same options as
+the SSL sites, so the sites can share port 443 with it.
 
 ### Upstreams
 
