@@ -74,6 +74,13 @@ See [defaults/main.yml](defaults/main.yml) for all available variables.
 | `postgresql_firewalld_enabled`   | `true`            | Manage firewalld rule                   |
 | `postgresql_backup_enabled`      | `false`           | Scheduled dumps (see Backup below)      |
 
+The role connects to the server on `postgresql_port` through the first
+entry of `postgresql_unix_socket_directories` (default
+`'/var/run/postgresql'`): the `community.postgresql` tasks for users,
+databases, extensions and the restore, and `psql`, `pg_dump` and
+`pg_dumpall` in the backup script and the restore. A non-default port or
+socket directory needs no further settings.
+
 ### `postgresql_repo` — Distribution packages vs. PGDG
 
 | Aspect             | `'distro'` (default)                      | `'pgdg'`                                          |
@@ -164,11 +171,19 @@ the packages.
 The role deploys `/usr/local/bin/postgresql-backup`, which writes one
 compressed plain-format dump per database
 (`<database>_<YYYYmmdd_HHMMSS>.sql.gz`, `pg_dump`) and one of the roles and
-tablespaces (`globals_<YYYYmmdd_HHMMSS>.sql.gz`,
+tablespaces (`globals_<YYYYmmdd_HHMMSS>.dumpall.sql.gz`,
 `pg_dumpall --globals-only`) into `postgresql_backup_dir`. Without
 `postgresql_backup_databases` it dumps every database except the templates
-and `postgres`. The client programs run as `postgres` over the local socket;
-the directory and the dumps belong to root (`0700`, `0600`).
+and `postgres`. The client programs run as `postgres` over the first socket
+directory on `postgresql_port`; the directory and the dumps belong to root
+(`0700`, `0600`).
+
+A database dump always ends in `_<HHMMSS>.sql.gz`, so no database name,
+not even `globals`, yields the name of a globals dump. Earlier role
+versions named the globals dumps `globals_<YYYYmmdd_HHMMSS>.sql.gz`, the
+name of the dumps of a database called `globals`. The script tells them
+apart by the header `pg_dumpall` writes: such a dump rotates together with
+the new globals dumps and ages out, never with a database.
 
 `postgresql-backup.service` is a oneshot unit ordered after the PostgreSQL
 service, and `postgresql-backup.timer` starts it on
@@ -233,8 +248,11 @@ ansible-playbook site.yml --tags postgresql -l db1 \
 ```
 
 The database in the name must be managed through `postgresql_databases`;
-otherwise the run fails before anything changes (the role does not restore
-`globals_*` dumps). The role then
+otherwise the run fails before anything changes. The role does not restore
+the globals dumps, neither `globals_<YYYYmmdd_HHMMSS>.dumpall.sql.gz` nor
+the `globals_<YYYYmmdd_HHMMSS>.sql.gz` dumps of earlier role versions
+(recognized by their `pg_dumpall` header, so the dumps of a database called
+`globals` still restore). The role then
 
 1. dumps the current state of the database (rotated as usual; the named
    dump is never rotated),
@@ -373,6 +391,9 @@ molecule verify
 
 Driver: `podman` | Scenarios: `default` (distribution packages, all
 platforms), `pgdg` (`postgresql_repo: 'pgdg'`, Debian Trixie and EL).
+In the `default` scenario, Debian Trixie runs on `postgresql_port: 5433`,
+so the users, databases, backup and restore are tested against a
+non-default port.
 
 ## Notes
 

@@ -5,6 +5,8 @@
     password: '{{ item.password | default(omit) }}'
     role_attr_flags: '{{ item.role_attr_flags | default("NOSUPERUSER,NOCREATEDB") }}'
     state: present
+    login_port: '{{ postgresql_port }}'
+    login_unix_socket: '{{ __postgresql_socket_dir }}'
   become: true
   become_user: '{{ __postgresql_user }}'
   loop: '{{ postgresql_users }}'

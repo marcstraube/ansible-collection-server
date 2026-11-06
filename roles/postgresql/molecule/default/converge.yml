@@ -13,9 +13,12 @@
     postgresql_lc_monetary: 'en_US.UTF-8'
     postgresql_lc_numeric: 'en_US.UTF-8'
     postgresql_lc_time: 'en_US.UTF-8'
+    # globals: a database with the name of the globals dumps of earlier
+    # role versions
     postgresql_databases:
       - name: testdb
         owner: testuser
+      - name: globals
     postgresql_users:
       - name: testuser
         password: testpassword

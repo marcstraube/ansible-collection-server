@@ -3,6 +3,13 @@
   hosts: all
   gather_facts: true
 
+  vars:
+    # Connection of the role (defaults: port 5432, /var/run/postgresql)
+    __verify_login_port: '{{ postgresql_port | default(5432) }}'
+    __verify_socket_dir: >-
+      {{ (postgresql_unix_socket_directories | default('/var/run/postgresql')).split(',')
+         | first | trim }}
+
   tasks:
     - name: Verify | Load shared variables
       ansible.builtin.include_vars:
@@ -28,9 +35,17 @@
     - name: Verify | Assert PostgreSQL is listening on configured port
       ansible.builtin.wait_for:
         host: 127.0.0.1
-        port: 5432
+        port: '{{ __verify_login_port }}'
         timeout: 10
         state: started
+
+    - name: Verify | Assert PostgreSQL is not listening on the default port
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 5432
+        timeout: 5
+        state: stopped
+      when: __verify_login_port | int != 5432
 
     - name: Verify | Assert postgresql.conf exists with correct permissions
       ansible.builtin.stat:
@@ -59,6 +74,8 @@
 
     - name: Verify | Assert test database exists
       community.postgresql.postgresql_db:
+        login_port: '{{ __verify_login_port }}'
+        login_unix_socket: '{{ __verify_socket_dir }}'
         name: testdb
         state: present
       become: true
@@ -69,6 +86,8 @@
 
     - name: Verify | Assert test user exists
       community.postgresql.postgresql_user:
+        login_port: '{{ __verify_login_port }}'
+        login_unix_socket: '{{ __verify_socket_dir }}'
         name: testuser
         state: present
       become: true
@@ -79,6 +98,8 @@
 
     - name: Verify | Assert test extension exists
       community.postgresql.postgresql_ext:
+        login_port: '{{ __verify_login_port }}'
+        login_unix_socket: '{{ __verify_socket_dir }}'
         name: pgcrypto
         login_db: testdb
         state: present
@@ -225,6 +246,7 @@
     postgresql_databases:
       - name: testdb
         owner: testuser
+      - name: globals
     postgresql_users:
       - name: testuser
         password: testpassword
@@ -233,6 +255,12 @@
         database: testdb
     __verify_backup_dir: '/var/backups/postgresql'
     __verify_dump_re: '_[0-9]{8}_[0-9]{6}\.sql\.gz$'
+    __verify_globals_re: '^globals_[0-9]{8}_[0-9]{6}\.dumpall\.sql\.gz$'
+    # Connection of the role (defaults: port 5432, /var/run/postgresql)
+    __verify_login_port: '{{ postgresql_port | default(5432) }}'
+    __verify_socket_dir: >-
+      {{ (postgresql_unix_socket_directories | default('/var/run/postgresql')).split(',')
+         | first | trim }}
 
   tasks:
     - name: Verify | Load shared variables
@@ -304,16 +332,21 @@
         patterns: '*'
       register: __verify_dumps
 
-    # testdb and the globals keep the new dump only; postgres is not dumped;
-    # the dump of a database whose name extends testdb is not part of the
-    # testdb rotation.
+    # testdb, the database globals and the globals keep the new dump only,
+    # the globals dumps of the previous name age out with the globals;
+    # postgres is not dumped; the dump of a database whose name extends
+    # testdb is not part of the testdb rotation.
     - name: Verify | Assert the rotation kept the newest dump per name
       ansible.builtin.assert:
         that:
           - __verify_dump_names | select('match', '^testdb' ~ __verify_dump_re) | list | length == 1
           - __verify_dump_names | select('match', '^globals' ~ __verify_dump_re) | list | length == 1
+          - __verify_dump_names | select('match', __verify_globals_re) | list | length == 1
           - "'testdb_20250102_000000.sql.gz' not in __verify_dump_names"
+          - "'globals_20250101_000000.sql.gz' not in __verify_dump_names"
           - "'globals_20250102_000000.sql.gz' not in __verify_dump_names"
+          - "'globals_20250103_000000.sql.gz' not in __verify_dump_names"
+          - "'globals_20250101_000000.dumpall.sql.gz' not in __verify_dump_names"
           - "'testdb_archive_20250101_000000.sql.gz' in __verify_dump_names"
           - __verify_dump_names | select('match', '^postgres_') | list | length == 0
           - __verify_dump_names | select('search', '[.]partial$') | list | length == 0
@@ -323,37 +356,95 @@
       vars:
         __verify_dump_names: "{{ __verify_dumps.files | map(attribute='path') | map('basename') | list }}"
 
-    - name: Verify | Set the dump to restore
+    - name: Verify | Set the dumps of the backup run
       ansible.builtin.set_fact:
         __verify_restore_dump: >-
           {{ __verify_dumps.files | map(attribute='path') | map('basename')
              | select('match', '^testdb' ~ __verify_dump_re) | first }}
+        __verify_globals_dump: >-
+          {{ __verify_dumps.files | map(attribute='path') | map('basename')
+             | select('match', __verify_globals_re) | first }}
+        __verify_globals_db_dump: >-
+          {{ __verify_dumps.files | map(attribute='path') | map('basename')
+             | select('match', '^globals' ~ __verify_dump_re) | first }}
 
-    # A database that is not managed through postgresql_databases (the
-    # globals) must be refused before anything changes.
+    # The subshell keeps the early exit of head from failing gzip.
+    - name: Verify | Read the headers of the globals dump and of the database globals
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          { gzip -dc -- {{ (__verify_backup_dir ~ '/' ~ item) | quote }} || true; }
+          | head -n 10
+        executable: /bin/bash
+      loop:
+        - '{{ __verify_globals_dump }}'
+        - '{{ __verify_globals_db_dump }}'
+      register: __verify_dump_headers
+      changed_when: false
+
+    - name: Verify | Assert pg_dumpall wrote the globals and pg_dump the database globals
+      ansible.builtin.assert:
+        that:
+          - "'PostgreSQL database cluster dump' in __verify_dump_headers.results[0].stdout"
+          - "'PostgreSQL database dump' in __verify_dump_headers.results[1].stdout"
+          - "'cluster dump' not in __verify_dump_headers.results[1].stdout"
+        fail_msg: >-
+          {{ __verify_dump_headers.results | map(attribute='stdout') | list }}
+
+    # Globals dumps must be refused before anything changes: the new name
+    # matches no database, the previous name that of the managed database
+    # globals, which only the header of pg_dumpall tells apart.
+    - name: Verify | Create a globals dump of the previous name
+      ansible.builtin.copy:
+        src: '{{ __verify_backup_dir }}/{{ __verify_globals_dump }}'
+        dest: '{{ __verify_backup_dir }}/globals_20250104_000000.sql.gz'
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0600'
+
     - name: Verify | Restore the globals dump
       block:
         - name: Verify | Include postgresql role with the globals dump  # noqa: role-name[path]
           ansible.builtin.include_role:
             name: '{{ playbook_dir }}/../..'
           vars:
-            postgresql_restore: >-
-              {{ __verify_dumps.files | map(attribute='path') | map('basename')
-                 | select('match', '^globals' ~ __verify_dump_re) | first }}
+            postgresql_restore: '{{ __verify_globals_dump }}'
       rescue:
-        - name: Verify | Record the refused restore
+        - name: Verify | Record the refused restore of the globals dump
           ansible.builtin.set_fact:
             __verify_restore_error: '{{ ansible_failed_result.msg | default("") }}'
 
-    - name: Verify | Assert the restore of the globals dump was refused
+    - name: Verify | Restore the globals dump of the previous name
+      block:
+        - name: Verify | Include postgresql role with the globals dump of the previous name  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            postgresql_restore: globals_20250104_000000.sql.gz
+      rescue:
+        - name: Verify | Record the refused restore of the globals dump of the previous name
+          ansible.builtin.set_fact:
+            __verify_restore_legacy_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Assert the restore of the globals dumps was refused
       ansible.builtin.assert:
         that:
           - __verify_restore_error is defined
           - "'is not a dump of a database' in __verify_restore_error"
+          - __verify_restore_legacy_error is defined
+          - "'is not a dump of a database' in __verify_restore_legacy_error"
         fail_msg: 'The restore of a globals dump was not refused'
+
+    - name: Verify | Remove the globals dump of the previous name
+      ansible.builtin.file:
+        path: '{{ __verify_backup_dir }}/globals_20250104_000000.sql.gz'
+        state: absent
 
     - name: Verify | Change the data after the backup
       community.postgresql.postgresql_query:
+        login_port: '{{ __verify_login_port }}'
+        login_unix_socket: '{{ __verify_socket_dir }}'
         login_db: testdb
         query: INSERT INTO restore_marker (note) VALUES ('after the backup')
       become: true
@@ -370,6 +461,10 @@
           - '--'
           - '{{ __postgresql_bin_dir }}/psql'
           - '-X'
+          - '-h'
+          - '{{ __verify_socket_dir }}'
+          - '-p'
+          - '{{ __verify_login_port }}'
           - '-d'
           - testdb
           - '-c'
@@ -380,6 +475,8 @@
 
     - name: Verify | Wait for the session on the database
       community.postgresql.postgresql_query:
+        login_port: '{{ __verify_login_port }}'
+        login_unix_socket: '{{ __verify_socket_dir }}'
         login_db: postgres
         query: >-
           SELECT count(*) AS sessions FROM pg_stat_activity
@@ -399,6 +496,8 @@
 
     - name: Verify | Read the marker rows after the restore
       community.postgresql.postgresql_query:
+        login_port: '{{ __verify_login_port }}'
+        login_unix_socket: '{{ __verify_socket_dir }}'
         login_db: testdb
         query: SELECT note FROM restore_marker ORDER BY note
       become: true
@@ -413,6 +512,8 @@
 
     - name: Verify | Read the database owner after the restore
       community.postgresql.postgresql_query:
+        login_port: '{{ __verify_login_port }}'
+        login_unix_socket: '{{ __verify_socket_dir }}'
         login_db: postgres
         query: >-
           SELECT pg_get_userbyid(datdba) AS owner FROM pg_database
@@ -428,6 +529,8 @@
 
     - name: Verify | Count the sessions on the database after the restore
       community.postgresql.postgresql_query:
+        login_port: '{{ __verify_login_port }}'
+        login_unix_socket: '{{ __verify_socket_dir }}'
         login_db: postgres
         query: >-
           SELECT count(*) AS sessions FROM pg_stat_activity

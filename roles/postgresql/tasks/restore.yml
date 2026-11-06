@@ -4,6 +4,10 @@
 # is dumped first; the database is then dropped, recreated with the
 # settings of its postgresql_databases entry and loaded with psql in one
 # transaction. The backup script never rotates the dump named here.
+# The globals dumps (globals_<YYYYmmdd_HHMMSS>.dumpall.sql.gz) are not
+# restored; those of earlier role versions (globals_<YYYYmmdd_HHMMSS>.sql.gz)
+# carry the name of a dump of a database called globals and are told apart
+# by the header pg_dumpall writes.
 
 - name: Restore | Set the database to restore
   ansible.builtin.set_fact:
@@ -17,27 +21,48 @@
     patterns: '*.sql.gz'
   register: __postgresql_restore_dumps
 
+- name: Restore | Set the dumps in the backup directory
+  ansible.builtin.set_fact:
+    __postgresql_restore_names: >-
+      {{ __postgresql_restore_dumps.files | default([])
+         | map(attribute='path') | map('basename') | list }}
+
+# Only the name globals is shared with the globals dumps of earlier role
+# versions. The subshell keeps the early exit of head from failing gzip.
+- name: Restore | Read the header of the dump
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      { gzip -dc -- {{ (postgresql_backup_dir ~ '/' ~ postgresql_restore) | quote }}
+      2> /dev/null || true; } | head -n 10
+    executable: /bin/bash
+  register: __postgresql_restore_header
+  changed_when: false
+  check_mode: false
+  when:
+    - __postgresql_restore_db == 'globals'
+    - postgresql_restore in __postgresql_restore_names
+
 - name: Restore | Validate the dump to restore
   ansible.builtin.assert:
     that:
       - __postgresql_restore_db | length > 0
       - postgresql_restore in __postgresql_restore_names
       - __postgresql_restore_db in (postgresql_databases | map(attribute='name'))
+      - __postgresql_cluster_dump_header not in (__postgresql_restore_header.stdout | default(''))
     fail_msg: |
       postgresql_restore '{{ postgresql_restore }}' is not a dump of a database
       managed through postgresql_databases in {{ postgresql_backup_dir }}.
-      A dump is named <database>_<YYYYmmdd_HHMMSS>.sql.gz; globals_* dumps
-      (roles, tablespaces) are not restored by the role. Available dumps:
+      A dump is named <database>_<YYYYmmdd_HHMMSS>.sql.gz. The globals dumps
+      (roles, tablespaces: globals_<YYYYmmdd_HHMMSS>.dumpall.sql.gz, and
+      globals_<YYYYmmdd_HHMMSS>.sql.gz from earlier role versions) are not
+      restored by the role. Available dumps:
 
       {% for dump in __postgresql_restore_names | sort %}
         - {{ dump }}
       {% else %}
         (none)
       {% endfor %}
-  vars:
-    __postgresql_restore_names: >-
-      {{ __postgresql_restore_dumps.files | default([])
-         | map(attribute='path') | map('basename') | list }}
 
 - name: Restore | Dump the current state of the database
   ansible.builtin.command:
@@ -54,6 +79,8 @@
   community.postgresql.postgresql_db:
     name: '{{ __postgresql_restore_db }}'
     state: absent
+    login_port: '{{ postgresql_port }}'
+    login_unix_socket: '{{ __postgresql_socket_dir }}'
     force: true
   become: true
   become_user: '{{ __postgresql_user }}'
@@ -67,6 +94,8 @@
     lc_ctype: '{{ __postgresql_restore_entry.lc_ctype | default("en_US.UTF-8") }}'
     template: '{{ __postgresql_restore_entry.template | default("template0") }}'
     state: present
+    login_port: '{{ postgresql_port }}'
+    login_unix_socket: '{{ __postgresql_socket_dir }}'
   become: true
   become_user: '{{ __postgresql_user }}'
   vars:
@@ -83,6 +112,7 @@
       gzip -dc -- {{ (postgresql_backup_dir ~ '/' ~ postgresql_restore) | quote }}
       | runuser -u {{ __postgresql_user }} --
       {{ __postgresql_bin_dir }}/psql -X -q -v ON_ERROR_STOP=1 --single-transaction
+      -h {{ __postgresql_socket_dir | quote }} -p {{ postgresql_port | int }}
       -d {{ __postgresql_restore_db | quote }} > /dev/null
     executable: /bin/bash
   changed_when: true

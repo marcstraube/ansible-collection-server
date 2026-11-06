@@ -65,6 +65,10 @@ provisioner:
         ansible_python_interpreter: /usr/bin/python
       postgresql-debian-trixie:
         ansible_python_interpreter: /usr/bin/python3
+        # Non-default port: converge, idempotence, the backup run of
+        # side_effect and the restore of verify connect on it; the other
+        # platforms keep the default.
+        postgresql_port: 5433
       postgresql-rocky-9:
         ansible_python_interpreter: /usr/bin/python3
         # The deprecated retention has to take effect until its removal and
