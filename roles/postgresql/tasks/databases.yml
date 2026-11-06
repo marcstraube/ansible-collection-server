@@ -8,6 +8,8 @@
     lc_ctype: '{{ item.lc_ctype | default("en_US.UTF-8") }}'
     template: '{{ item.template | default("template0") }}'
     state: present
+    login_port: '{{ postgresql_port }}'
+    login_unix_socket: '{{ __postgresql_socket_dir }}'
   become: true
   become_user: '{{ __postgresql_user }}'
   loop: '{{ postgresql_databases }}'
@@ -19,6 +21,8 @@
     name: '{{ item.name }}'
     login_db: '{{ item.database }}'
     state: present
+    login_port: '{{ postgresql_port }}'
+    login_unix_socket: '{{ __postgresql_socket_dir }}'
   become: true
   become_user: '{{ __postgresql_user }}'
   loop: '{{ postgresql_extensions }}'

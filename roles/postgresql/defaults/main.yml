@@ -67,10 +67,11 @@ postgresql_packages_minimum: ''
 # Listen addresses (* = all, localhost = local only)
 postgresql_listen_addresses: 'localhost'
 
-# Port
+# Port. The role tasks, the backup script and the restore connect on it.
 postgresql_port: 5432
 
-# Unix socket directory
+# Unix socket directories (comma-separated). The role tasks, the backup
+# script and the restore connect through the first one.
 postgresql_unix_socket_directories: '/var/run/postgresql'
 
 # Maximum connections
@@ -316,10 +317,10 @@ postgresql_extensions: []
 # The script /usr/local/bin/postgresql-backup writes one compressed
 # plain-format dump per database (<database>_<YYYYmmdd_HHMMSS>.sql.gz,
 # pg_dump) and one of the roles and tablespaces
-# (globals_<YYYYmmdd_HHMMSS>.sql.gz, pg_dumpall --globals-only);
-# postgresql-backup.timer runs it on a schedule. The retention is
-# count-based per database and for the globals, so a failing timer never
-# removes the last good dump.
+# (globals_<YYYYmmdd_HHMMSS>.dumpall.sql.gz, pg_dumpall --globals-only,
+# a name no database dump can take); postgresql-backup.timer runs it on a
+# schedule. The retention is count-based per database and for the globals,
+# so a failing timer never removes the last good dump.
 
 # Back up the databases on the schedule of the timer
 postgresql_backup_enabled: false

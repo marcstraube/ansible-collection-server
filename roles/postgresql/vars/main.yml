@@ -2,6 +2,11 @@
 __postgresql_user: postgres
 __postgresql_group: postgres
 
+# Socket directory the clients connect through (the role tasks, the backup
+# script and the restore): the first entry of the comma-separated
+# postgresql_unix_socket_directories, together with postgresql_port
+__postgresql_socket_dir: "{{ postgresql_unix_socket_directories.split(',') | first | trim }}"
+
 # Backup script and the units that run it
 __postgresql_backup_script: '/usr/local/bin/postgresql-backup'
 __postgresql_backup_service_name: 'postgresql-backup.service'
@@ -27,3 +32,8 @@ __postgresql_backup_timer_active: >-
 
 # File name of a dump a restore accepts; the group is the database
 __postgresql_restore_pattern: '^([^/]+)_[0-9]{8}_[0-9]{6}\.sql\.gz$'
+
+# First line of the comment header pg_dumpall writes. Earlier role versions
+# named the globals dumps globals_<YYYYmmdd_HHMMSS>.sql.gz, the name of a
+# dump of a database called globals; only the header tells them apart.
+__postgresql_cluster_dump_header: '-- PostgreSQL database cluster dump'
