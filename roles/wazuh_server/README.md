@@ -73,7 +73,7 @@ Notes.
 
 | Variable                                     | Default | Description                                                 |
 | -------------------------------------------- | ------- | ----------------------------------------------------------- |
-| `wazuh_server_indexer_admin_password`        | `''`    | Indexer user `admin`: dashboard login, Filebeat (required)  |
+| `wazuh_server_indexer_admin_password`        | `''`    | Indexer `admin`: dashboard, Filebeat, manager (required)    |
 | `wazuh_server_indexer_kibanaserver_password` | `''`    | Indexer user `kibanaserver`: dashboard backend (required)   |
 | `wazuh_server_api_wazuh_password`            | `''`    | Wazuh API user `wazuh`: administrator (required)            |
 | `wazuh_server_api_wui_password`              | `''`    | Wazuh API user `wazuh-wui`: dashboard API access (required) |
@@ -107,20 +107,28 @@ See [Snapshots](#snapshots) under Notes.
 
 ### Wazuh Manager, Filebeat and Dashboard
 
-| Variable                                 | Default     | Description                                  |
-| ---------------------------------------- | ----------- | -------------------------------------------- |
-| `wazuh_server_manager_service_enabled`   | `true`      | Enable and start the Wazuh manager service   |
-| `wazuh_server_filebeat_service_enabled`  | `true`      | Enable and start the Filebeat service        |
-| `wazuh_server_dashboard_service_enabled` | `true`      | Enable and start the Wazuh dashboard service |
-| `wazuh_server_dashboard_server_host`     | `'0.0.0.0'` | Dashboard bind address                       |
-| `wazuh_server_dashboard_server_port`     | `443`       | Dashboard HTTPS port                         |
-| `wazuh_server_dashboard_enrollment_dns`  | `''`        | Agent enrollment address, empty for none     |
+| Variable                                   | Default          | Description                                  |
+| ------------------------------------------ | ---------------- | -------------------------------------------- |
+| `wazuh_server_manager_service_enabled`     | `true`           | Enable and start the Wazuh manager service   |
+| `wazuh_server_filebeat_service_enabled`    | `true`           | Enable and start the Filebeat service        |
+| `wazuh_server_dashboard_service_enabled`   | `true`           | Enable and start the Wazuh dashboard service |
+| `wazuh_server_dashboard_server_host`       | `'0.0.0.0'`      | Dashboard bind address                       |
+| `wazuh_server_dashboard_server_port`       | `443`            | Dashboard HTTPS port                         |
+| `wazuh_server_dashboard_enrollment_dns`    | `''`             | Agent enrollment address, empty for none     |
+| `wazuh_server_dashboard_session_ttl`       | `900000`         | Login session and cookie lifetime in ms      |
+| `wazuh_server_dashboard_session_keepalive` | `true`           | Extend the session on every request          |
+| `wazuh_server_dashboard_default_route`     | `'/app/wz-home'` | Page the dashboard opens after the login     |
 
 The dashboard offers `wazuh_server_dashboard_enrollment_dns` in the
 "Deploy new agent" wizard and puts it into the generated install command.
 The role owns the dashboard plugin configuration (`wazuh.yml`), so set the
 address here instead of in the dashboard: the next run replaces a value set
 in the dashboard.
+
+`wazuh_server_dashboard_session_ttl` sets both the session and its cookie,
+so a session never outlives its cookie or the other way round. With
+`wazuh_server_dashboard_session_keepalive`, every request extends the
+session, so it ends only after that time without activity.
 
 ### Agent Enrollment
 
@@ -261,10 +269,20 @@ on the first run or after a password change, it:
 Filebeat (`/etc/filebeat/filebeat.yml`, `0600`), the dashboard
 (`opensearch_dashboards.yml`, `0640`) and the dashboard plugin
 (`wazuh.yml`, `0640`) receive the passwords in their configuration files.
-The keystores are not used: their values cannot be read back, so a changed
-password could not be detected. The role removes the default
+The dashboard keystore is not used: its values cannot be read back, so a
+changed password could not be detected. The role removes the default
 `kibanaserver` credentials the dashboard package seeds into its keystore,
 because keystore entries take precedence over `opensearch_dashboards.yml`.
+
+The manager reads its indexer credentials only from its keystore
+(`wazuh-keystore -f indexer`), which the package leaves at
+`admin`/`admin`. The role writes the `admin` user and
+`wazuh_server_indexer_admin_password` there, the account Filebeat uses as
+well, and restarts the manager. Because the keystore cannot be read back,
+the role records a SHA-512 hash of the written credentials in
+`/var/ossec/etc/indexer-keystore.sha512` (`0600`, root) and writes the
+keystore again only when the hash differs, on the first run or after a
+password change.
 
 ### Enrollment Authentication
 
@@ -305,8 +323,13 @@ manager without it.
 The manager also connects to the indexer to store the vulnerability
 state. The role sets this connection in `<indexer><hosts><host>` of
 `ossec.conf` to `https://<wazuh_server_indexer_network_host>:<wazuh_server_indexer_http_port>`,
-the address Filebeat and the dashboard use, and checks afterwards that the
-element carries it. A changed address restarts the manager.
+the address Filebeat and the dashboard use, with an IPv6 address in
+brackets. It removes the `<certificate>` and `<key>` elements the package
+points to a Filebeat client certificate the role does not deploy: the
+manager logs in with its keystore credentials and verifies the indexer
+against the CA. Afterwards the role checks the `<indexer>` section and
+fails if the host differs or a client certificate is still set. A change
+restarts the manager.
 
 That connection must not go through the proxy. libcurl matches `no_proxy`
 against the host name as written in the URL, so the role writes

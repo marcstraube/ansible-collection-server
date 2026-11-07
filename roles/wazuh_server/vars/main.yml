@@ -25,7 +25,13 @@ __wazuh_server_indexer_home_dir: '/usr/share/wazuh-indexer'
 __wazuh_server_indexer_java_home: '{{ __wazuh_server_indexer_home_dir }}/jdk'
 __wazuh_server_indexer_security_config_dir: '{{ __wazuh_server_indexer_config_dir }}/opensearch-security'
 __wazuh_server_indexer_security_tools_dir: '{{ __wazuh_server_indexer_home_dir }}/plugins/opensearch-security/tools'
-__wazuh_server_indexer_url: 'https://{{ wazuh_server_indexer_network_host }}:{{ wazuh_server_indexer_http_port }}'
+# Indexer address for URLs and host:port pairs: an IPv6 address needs
+# brackets; host names and IPv4 addresses contain no colon
+__wazuh_server_indexer_address: >-
+  {{ ('[' ~ wazuh_server_indexer_network_host ~ ']')
+     if ':' in wazuh_server_indexer_network_host
+     else wazuh_server_indexer_network_host }}
+__wazuh_server_indexer_url: 'https://{{ __wazuh_server_indexer_address }}:{{ wazuh_server_indexer_http_port }}'
 
 # Snapshot management policy that takes the scheduled snapshots; snapshot
 # names start with the policy name
@@ -103,6 +109,16 @@ __wazuh_server_manager_dir: '/var/ossec'
 __wazuh_server_manager_group: 'wazuh'
 __wazuh_server_manager_config_file: '{{ __wazuh_server_manager_dir }}/etc/ossec.conf'
 __wazuh_server_enrollment_password_file: '{{ __wazuh_server_manager_dir }}/etc/authd.pass'
+__wazuh_server_manager_keystore_bin: '{{ __wazuh_server_manager_dir }}/bin/wazuh-keystore'
+__wazuh_server_manager_keystore_hash_file: '{{ __wazuh_server_manager_dir }}/etc/indexer-keystore.sha512'
+
+# Indexer credentials of the manager: the admin user, like Filebeat
+__wazuh_server_manager_indexer_credentials:
+  username: 'admin'
+  password: '{{ wazuh_server_indexer_admin_password }}'
+__wazuh_server_manager_keystore_hash_value: >-
+  {{ (__wazuh_server_manager_indexer_credentials.username ~ ':'
+      ~ __wazuh_server_manager_indexer_credentials.password) | hash('sha512') }}
 __wazuh_server_enrollment_cert_path: 'etc/authd-node.pem'
 __wazuh_server_enrollment_key_path: 'etc/authd-node-key.pem'
 __wazuh_server_enrollment_agent_ca_path: 'etc/authd-agent-ca.pem'

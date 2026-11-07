@@ -48,6 +48,10 @@ provisioner:
         wazuh_server_api_wazuh_password: 'Wazuh-Test-Pass1'
         wazuh_server_api_wui_password: 'Wui-Test-Pass1'
         wazuh_server_dashboard_enrollment_dns: 'wazuh.example.com'
+        # Dashboard session and start page: all different from the defaults
+        wazuh_server_dashboard_session_ttl: 86400000
+        wazuh_server_dashboard_session_keepalive: false
+        wazuh_server_dashboard_default_route: '/app/endpoints-summary'
         wazuh_server_enrollment_password: 'Enroll-Test-Pass1'
         wazuh_server_enrollment_agent_ca_file: '/etc/ssl/ca/certs/ca.crt'
         # Never contacted: nothing listens there, the manager has to start
