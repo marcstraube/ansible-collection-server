@@ -12,8 +12,8 @@ opensearch_security.readonly_mode.roles: ["kibana_read_only"]
 server.ssl.enabled: true
 server.ssl.key: "{{ __wazuh_server_dashboard_certs_dir }}/{{ __wazuh_server_dashboard_key_name }}"
 server.ssl.certificate: "{{ __wazuh_server_dashboard_certs_dir }}/{{ __wazuh_server_dashboard_cert_name }}"
-uiSettings.overrides.defaultRoute: /app/wz-home
+uiSettings.overrides.defaultRoute: {{ wazuh_server_dashboard_default_route | to_json }}
 # Session expiration settings
-opensearch_security.cookie.ttl: 900000
-opensearch_security.session.ttl: 900000
-opensearch_security.session.keepalive: true
+opensearch_security.cookie.ttl: {{ wazuh_server_dashboard_session_ttl | int }}
+opensearch_security.session.ttl: {{ wazuh_server_dashboard_session_ttl | int }}
+opensearch_security.session.keepalive: {{ wazuh_server_dashboard_session_keepalive | bool | to_json }}

@@ -107,20 +107,28 @@ See [Snapshots](#snapshots) under Notes.
 
 ### Wazuh Manager, Filebeat and Dashboard
 
-| Variable                                 | Default     | Description                                  |
-| ---------------------------------------- | ----------- | -------------------------------------------- |
-| `wazuh_server_manager_service_enabled`   | `true`      | Enable and start the Wazuh manager service   |
-| `wazuh_server_filebeat_service_enabled`  | `true`      | Enable and start the Filebeat service        |
-| `wazuh_server_dashboard_service_enabled` | `true`      | Enable and start the Wazuh dashboard service |
-| `wazuh_server_dashboard_server_host`     | `'0.0.0.0'` | Dashboard bind address                       |
-| `wazuh_server_dashboard_server_port`     | `443`       | Dashboard HTTPS port                         |
-| `wazuh_server_dashboard_enrollment_dns`  | `''`        | Agent enrollment address, empty for none     |
+| Variable                                   | Default          | Description                                  |
+| ------------------------------------------ | ---------------- | -------------------------------------------- |
+| `wazuh_server_manager_service_enabled`     | `true`           | Enable and start the Wazuh manager service   |
+| `wazuh_server_filebeat_service_enabled`    | `true`           | Enable and start the Filebeat service        |
+| `wazuh_server_dashboard_service_enabled`   | `true`           | Enable and start the Wazuh dashboard service |
+| `wazuh_server_dashboard_server_host`       | `'0.0.0.0'`      | Dashboard bind address                       |
+| `wazuh_server_dashboard_server_port`       | `443`            | Dashboard HTTPS port                         |
+| `wazuh_server_dashboard_enrollment_dns`    | `''`             | Agent enrollment address, empty for none     |
+| `wazuh_server_dashboard_session_ttl`       | `900000`         | Login session and cookie lifetime in ms      |
+| `wazuh_server_dashboard_session_keepalive` | `true`           | Extend the session on every request          |
+| `wazuh_server_dashboard_default_route`     | `'/app/wz-home'` | Page the dashboard opens after the login     |
 
 The dashboard offers `wazuh_server_dashboard_enrollment_dns` in the
 "Deploy new agent" wizard and puts it into the generated install command.
 The role owns the dashboard plugin configuration (`wazuh.yml`), so set the
 address here instead of in the dashboard: the next run replaces a value set
 in the dashboard.
+
+`wazuh_server_dashboard_session_ttl` sets both the session and its cookie,
+so a session never outlives its cookie or the other way round. With
+`wazuh_server_dashboard_session_keepalive`, every request extends the
+session, so it ends only after that time without activity.
 
 ### Agent Enrollment
 

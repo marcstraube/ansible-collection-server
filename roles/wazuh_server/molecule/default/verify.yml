@@ -245,6 +245,24 @@
       delay: 10
       until: __verify_dashboard_status is not failed
 
+    - name: Verify | Read dashboard configuration
+      ansible.builtin.slurp:
+        src: '{{ __wazuh_server_dashboard_config_file }}'
+      register: __verify_dashboard_config
+      no_log: true
+
+    - name: Verify | Assert dashboard session and start page settings
+      ansible.builtin.assert:
+        that:
+          - __verify_config['opensearch_security.cookie.ttl'] == wazuh_server_dashboard_session_ttl
+          - __verify_config['opensearch_security.session.ttl'] == wazuh_server_dashboard_session_ttl
+          - __verify_config['opensearch_security.session.keepalive'] == wazuh_server_dashboard_session_keepalive
+          - __verify_config['uiSettings.overrides.defaultRoute'] == wazuh_server_dashboard_default_route
+        fail_msg: 'opensearch_dashboards.yml does not render the dashboard session and start page variables'
+        quiet: true
+      vars:
+        __verify_config: '{{ __verify_dashboard_config.content | b64decode | from_yaml }}'
+
     - name: Verify | Read dashboard plugin configuration
       ansible.builtin.slurp:
         src: '{{ __wazuh_server_dashboard_plugin_config_file }}'
