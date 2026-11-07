@@ -53,8 +53,8 @@
 # Wazuh Manager
 #
 # ossec.conf stays the package file; the role only sets the enrollment
-# options inside its <auth> section and the indexer address inside its
-# <indexer> section.
+# options inside its <auth> section and the indexer address and TLS
+# settings inside its <indexer> section.
 #
 
 - name: Configure | Deploy enrollment password
@@ -112,6 +112,19 @@
     replace: '<host>{{ __wazuh_server_indexer_url }}</host>'
   notify: Restart Wazuh manager
 
+# The package points the manager to a Filebeat client certificate and key
+# that the role does not deploy. The manager logs in with the keystore
+# credentials and verifies the indexer against the CA, so it needs no
+# client certificate.
+- name: Configure | Remove manager indexer client certificate
+  ansible.builtin.replace:
+    path: '{{ __wazuh_server_manager_config_file }}'
+    after: '<indexer>'
+    before: '</indexer>'
+    regexp: '^[ \t]*<(certificate|key)>[^<]*</(certificate|key)>\n'
+    replace: ''
+  notify: Restart Wazuh manager
+
 # replace leaves the file unchanged when a pattern finds nothing, for
 # example after a Wazuh release changed the <auth> or <indexer> section
 - name: Configure | Read manager configuration
@@ -141,20 +154,64 @@
          | regex_search('(?s)<auth>.*?</auth>') | default('', true) }}
   when: not ansible_check_mode
 
-- name: Configure | Assert manager indexer host is set
+- name: Configure | Assert manager indexer connection is set
   ansible.builtin.assert:
     that:
       - ('<host>' ~ __wazuh_server_indexer_url ~ '</host>') in __wazuh_server_indexer_section
+      - "'<certificate>' not in __wazuh_server_indexer_section"
+      - "'<key>' not in __wazuh_server_indexer_section"
     fail_msg: >-
       The <indexer> section of {{ __wazuh_server_manager_config_file }} has
-      no element host with the value {{ __wazuh_server_indexer_url }}. The
-      format of ossec.conf may have changed with this Wazuh release.
+      no element host with the value {{ __wazuh_server_indexer_url }}, or it
+      still has a certificate or key element. The format of ossec.conf may
+      have changed with this Wazuh release.
     quiet: true
   vars:
     __wazuh_server_indexer_section: >-
       {{ __wazuh_server_manager_config.content | b64decode
          | regex_search('(?s)<indexer>.*?</indexer>') | default('', true) }}
   when: not ansible_check_mode
+
+# The manager logs in to the indexer with the credentials of its keystore,
+# which the package leaves at admin/admin. The keystore cannot be
+# read back, so a hash of the credentials the role wrote tells whether they
+# are current. The keystore holds the password in plain text for root, so
+# the root-only hash file exposes nothing new.
+- name: Configure | Read manager keystore credentials hash
+  ansible.builtin.slurp:
+    src: '{{ __wazuh_server_manager_keystore_hash_file }}'
+  register: __wazuh_server_manager_keystore_hash
+  failed_when: false
+  no_log: true
+
+- name: Configure | Set manager indexer credentials
+  ansible.builtin.command:
+    argv:
+      - '{{ __wazuh_server_manager_keystore_bin }}'
+      - '-f'
+      - 'indexer'
+      - '-k'
+      - '{{ item.key }}'
+    # Read from stdin, so the password stays off the command line
+    stdin: '{{ item.value }}'
+  loop: '{{ __wazuh_server_manager_indexer_credentials | dict2items }}'
+  loop_control:
+    label: '{{ item.key }}'
+  changed_when: true
+  no_log: true
+  when: >-
+    (__wazuh_server_manager_keystore_hash.content | default('') | b64decode | trim)
+    != __wazuh_server_manager_keystore_hash_value
+  notify: Restart Wazuh manager
+
+- name: Configure | Record manager keystore credentials hash
+  ansible.builtin.copy:
+    content: "{{ __wazuh_server_manager_keystore_hash_value }}\n"
+    dest: '{{ __wazuh_server_manager_keystore_hash_file }}'
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
 
 # ossec.conf has no proxy option: the manager daemons take the proxy from
 # the environment of their service, which the drop-in sets. The environment
