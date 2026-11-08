@@ -181,6 +181,15 @@
         fail_msg: "Nginx configuration test failed"
         success_msg: "Nginx configuration syntax valid"
 
+    # The default site and test-redirect-default share port 443; different
+    # listen options on one port make nginx warn and drop the later ones.
+    - name: Verify | Assert the default site and the sites share the listen options
+      ansible.builtin.assert:
+        that:
+          - "'protocol options redefined' not in __nginx_test.stderr"
+        fail_msg: 'nginx -t warns about redefined protocol options: {{ __nginx_test.stderr }}'
+        success_msg: 'The default site and the sites on port 443 use the same listen options'
+
     #
     # Service Verification
     #
@@ -249,3 +258,165 @@
         - '.github/workflow.yml'
         - '.envrc'
         - 'allowed.txt'
+
+    #
+    # HTTP to HTTPS Redirect
+    #
+
+    - name: Verify | Request the HTTP redirect of the site on another HTTPS port
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1:8082/path?query=1'
+        headers:
+          Host: 'redirect-port.example.com'
+        follow_redirects: none
+        status_code: 301
+      register: __verify_redirect_port
+
+    - name: Verify | Request the HTTP redirect of the site on port 443
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1/path?query=1'
+        headers:
+          Host: 'redirect-default.example.com'
+        follow_redirects: none
+        status_code: 301
+      register: __verify_redirect_default
+
+    - name: Verify | Assert the redirects keep the HTTPS port
+      ansible.builtin.assert:
+        that:
+          - __verify_redirect_port.location == 'https://redirect-port.example.com:8444/path?query=1'
+          - __verify_redirect_default.location == 'https://redirect-default.example.com/path?query=1'
+        fail_msg: >-
+          Unexpected redirect targets: {{ __verify_redirect_port.location | default('none') }},
+          {{ __verify_redirect_default.location | default('none') }}
+        success_msg: 'The HTTP redirects point to the HTTPS port of each site'
+
+    #
+    # SELinux (RedHat with SELinux enabled)
+    #
+
+    - name: Verify | Read the httpd_can_network_connect boolean
+      ansible.builtin.command:
+        cmd: getsebool httpd_can_network_connect
+      register: __verify_selinux_boolean
+      changed_when: false
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    - name: Verify | Read the SELinux port labels
+      ansible.builtin.command:
+        cmd: semanage port -l
+      register: __verify_selinux_ports
+      changed_when: false
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    - name: Verify | Assert the SELinux boolean and port labels
+      ansible.builtin.assert:
+        that:
+          - __verify_selinux_boolean.stdout is search('--> on$')
+          - __verify_selinux_http_ports is contains('8082')
+          - __verify_selinux_http_ports is contains('8444')
+        fail_msg: >-
+          httpd_can_network_connect: {{ __verify_selinux_boolean.stdout }},
+          http_port_t: {{ __verify_selinux_http_ports | join(', ') }}
+        success_msg: 'httpd_can_network_connect is on, ports 8082 and 8444 are labeled http_port_t'
+      vars:
+        __verify_selinux_http_ports: >-
+          {{ __verify_selinux_ports.stdout_lines | select('match', '^http_port_t +tcp ')
+             | map('regex_replace', '^http_port_t +tcp +', '') | join(', ') | split(', ') }}
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    #
+    # Targeted package update (side_effect rolled the packages back and ran
+    # the converge playbook with nginx_packages_state: latest)
+    #
+
+    - name: Verify | Read the nginx package versions around the rollback
+      ansible.builtin.slurp:
+        src: /root/nginx-update-versions
+      register: __verify_update_versions
+
+    - name: Verify | Stat the version record
+      ansible.builtin.stat:
+        path: /root/nginx-update-versions
+      register: __verify_update_stat
+
+    - name: Verify | Gather package facts after the update
+      ansible.builtin.package_facts:
+
+    - name: Verify | Set update version facts
+      ansible.builtin.set_fact:
+        __verify_version_latest: '{{ (__verify_update_versions.content | b64decode).splitlines()[0] | trim }}'
+        __verify_version_rolled_back: '{{ (__verify_update_versions.content | b64decode).splitlines()[1] | trim }}'
+        __verify_version_now: >-
+          {{ [(ansible_facts['packages']['nginx'] | first).version,
+              (ansible_facts['packages']['nginx'] | first).release | default('')]
+             | select | join('-') }}
+
+    - name: Verify | Assert the update restored the latest build
+      ansible.builtin.assert:
+        that:
+          - __verify_version_now == __verify_version_latest
+        fail_msg: >-
+          nginx is at {{ __verify_version_now }} after the update, expected
+          {{ __verify_version_latest }} (rolled back to {{ __verify_version_rolled_back }})
+        success_msg: >-
+          Updated from {{ __verify_version_rolled_back }} to {{ __verify_version_now }}
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    - name: Verify | Read the nginx master PID
+      ansible.builtin.slurp:
+        src: '{{ __nginx_pid_file }}'
+      register: __verify_master_pid
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    # readlink reports a replaced binary as "<path> (deleted)"
+    - name: Verify | Read the binary of the running master
+      ansible.builtin.command:
+        argv:
+          - readlink
+          - '/proc/{{ __verify_master_pid.content | b64decode | trim }}/exe'
+      register: __verify_master_exe
+      changed_when: false
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    - name: Verify | Assert nginx runs the updated binary
+      ansible.builtin.assert:
+        that:
+          - __verify_master_exe.stdout is not search(' \(deleted\)$')
+        fail_msg: 'The nginx master still runs the replaced binary: {{ __verify_master_exe.stdout }}'
+        success_msg: 'nginx runs the updated binary'
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    # side_effect blocks the package restart on Debian, so the role has to
+    # restart nginx there; where the package restarts or upgrades it, the
+    # role must not restart it again.
+    - name: Verify | Read the nginx starts since the update
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - '--unit={{ __nginx_service_name }}'
+          - '--since=@{{ __verify_update_stat.stat.mtime }}'
+          - '--output=cat'
+          - '--no-pager'
+      register: __verify_update_journal
+      changed_when: false
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    - name: Verify | Assert the update restarted nginx at most once
+      ansible.builtin.assert:
+        that:
+          - __verify_update_starts | length <= 1
+        fail_msg: >-
+          nginx started {{ __verify_update_starts | length }} times after the
+          package update: {{ __verify_update_starts }}
+        success_msg: 'nginx started {{ __verify_update_starts | length }} time(s) after the package update'
+      vars:
+        __verify_update_starts: >-
+          {{ __verify_update_journal.stdout_lines | select('match', '^Started ') | list }}
+      when: __verify_version_rolled_back != __verify_version_latest

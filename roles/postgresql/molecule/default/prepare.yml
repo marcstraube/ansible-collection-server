@@ -55,6 +55,35 @@
         upgrade: true
       when: ansible_facts['os_family'] == 'Archlinux'
 
+    # The pacman ignore drop-in setup of marcstraube.common.package_management;
+    # pacman fails on an Include glob without a match, so a file is in place
+    # before the Include line
+    - name: Prepare | Create pacman ignore drop-in directory (Arch)
+      ansible.builtin.file:
+        path: /etc/pacman.d/ignore.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Create pacman ignore drop-in (Arch)
+      ansible.builtin.copy:
+        content: "# molecule\n"
+        dest: /etc/pacman.d/ignore.d/00-molecule.conf
+        owner: root
+        group: root
+        mode: '0644'
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Include pacman ignore drop-ins (Arch)
+      ansible.builtin.lineinfile:
+        path: /etc/pacman.conf
+        line: 'Include = /etc/pacman.d/ignore.d/*.conf'
+        insertafter: '^\[options\]'
+        firstmatch: true
+      when: ansible_facts['os_family'] == 'Archlinux'
+
     - name: Prepare | Update package cache (Debian)
       ansible.builtin.apt:
         update_cache: true

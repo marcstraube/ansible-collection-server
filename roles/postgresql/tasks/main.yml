@@ -13,6 +13,40 @@
   tags:
     - always
 
+# The deprecated retention in days maps onto the number of dumps; the
+# replacement is the only name the tasks and templates use.
+- name: Main | Handle the deprecated postgresql_backup_retention
+  ansible.builtin.set_fact:
+    postgresql_backup_keep: '{{ postgresql_backup_retention | default(postgresql_backup_keep) | int }}'
+  when: postgresql_backup_retention is defined
+  tags:
+    - always
+
+- name: Main | Warn about the deprecated postgresql_backup_schedule
+  ansible.builtin.debug:
+    msg: >-
+      postgresql_backup_schedule is deprecated and will be removed in the
+      next major version. While it is set, the backup runs from a cron job
+      instead of postgresql-backup.timer. Use postgresql_backup_on_calendar
+      instead.
+  when:
+    - postgresql_enabled | bool
+    - postgresql_backup_schedule is defined
+  tags:
+    - always
+
+- name: Main | Warn about the deprecated postgresql_backup_retention
+  ansible.builtin.debug:
+    msg: >-
+      postgresql_backup_retention is deprecated and will be removed in the
+      next major version. Its value now counts dumps per database instead
+      of days. Use postgresql_backup_keep instead.
+  when:
+    - postgresql_enabled | bool
+    - postgresql_backup_retention is defined
+  tags:
+    - always
+
 - name: Main | Validate package source
   ansible.builtin.assert:
     that:
@@ -20,6 +54,36 @@
     fail_msg: >-
       postgresql_repo must be 'distro' or 'pgdg'.
       Got: {{ postgresql_repo }}
+  when: postgresql_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate package update settings
+  ansible.builtin.assert:
+    that:
+      - postgresql_packages_state in ['present', 'latest']
+      - postgresql_packages_minimum is string
+    fail_msg: >-
+      postgresql_packages_state must be 'present' or 'latest' (got
+      '{{ postgresql_packages_state }}'), postgresql_packages_minimum must be
+      a version string, e.g. '17.7'
+  when: postgresql_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate backup settings
+  ansible.builtin.assert:
+    that:
+      - postgresql_backup_keep | int >= 1
+      - postgresql_backup_schedule | default('') | length == 0
+        or postgresql_backup_schedule.split() | length == 5
+      - postgresql_restore is string
+    fail_msg: >-
+      postgresql_backup_keep must be at least 1 (got
+      '{{ postgresql_backup_keep }}'), the deprecated
+      postgresql_backup_schedule a cron expression with five fields (got
+      '{{ postgresql_backup_schedule | default('') }}') and
+      postgresql_restore the file name of a dump.
   when: postgresql_enabled | bool
   tags:
     - always
@@ -119,19 +183,21 @@
     - postgresql
     - postgresql:databases
 
-- name: Main | Include backup tasks
-  ansible.builtin.include_tasks:
-    file: backup.yml
-    apply:
-      tags:
-        - postgresql
-        - postgresql:backup
-  when:
-    - postgresql_enabled | bool
-    - postgresql_backup_enabled | bool
+- name: Main | Import backup tasks
+  ansible.builtin.import_tasks: backup.yml
+  when: postgresql_enabled | bool
   tags:
     - postgresql
     - postgresql:backup
+
+- name: Main | Import restore tasks
+  ansible.builtin.import_tasks: restore.yml
+  when:
+    - postgresql_enabled | bool
+    - postgresql_restore | length > 0
+  tags:
+    - postgresql
+    - postgresql:restore
 
 - name: Main | Include firewall tasks
   ansible.builtin.include_tasks:

@@ -1,0 +1,109 @@
+---
+# A Wazuh update has to follow the upstream order (indexer, manager,
+# dashboard) with the indexer shard allocation disabled in between. The role
+# does not perform updates: a changed wazuh_server_version on a host with
+# Wazuh installed fails here with both versions. Tagged always so that every
+# stage sees the same precondition.
+# The packages are held at the installed version so that a system upgrade
+# cannot move them either. The role never releases the hold: a planned
+# update releases it by hand (see README).
+- name: Install | Gather package facts
+  ansible.builtin.package_facts:
+    manager: auto
+  tags:
+    - always
+
+# filebeat is checked against wazuh_server_filebeat_version: the hold below
+# would otherwise fail a changed version with a package manager error.
+- name: Install | Assert installed Wazuh versions match the configured versions
+  ansible.builtin.assert:
+    that:
+      - __wazuh_server_version_mismatches | length == 0
+    fail_msg: |
+      Installed Wazuh packages differ from the configured versions:
+
+      {% for package in __wazuh_server_version_mismatches %}
+      {% set installed = ansible_facts.packages[package][0].version %}
+        - {{ package }} {{ installed }}, configured {{ __wazuh_server_expected_versions[package] }}
+      {% endfor %}
+
+      The role does not update Wazuh. Follow the upstream upgrade guide or
+      restore the previous wazuh_server_version and wazuh_server_filebeat_version.
+  vars:
+    __wazuh_server_expected_versions:
+      wazuh-indexer: '{{ wazuh_server_version }}'
+      wazuh-manager: '{{ wazuh_server_version }}'
+      wazuh-dashboard: '{{ wazuh_server_version }}'
+      filebeat: '{{ wazuh_server_filebeat_version }}'
+    __wazuh_server_installed_packages: >-
+      {{ __wazuh_server_expected_versions.keys() | select('in', ansible_facts.packages) | list }}
+    __wazuh_server_installed_pairs: >-
+      {{ __wazuh_server_installed_packages
+         | zip(__wazuh_server_installed_packages
+               | map('extract', ansible_facts.packages)
+               | map('first')
+               | map(attribute='version')
+               | map('regex_replace', '-.*$', ''))
+         | map('join', '=') | list }}
+    __wazuh_server_expected_pairs: >-
+      {{ __wazuh_server_installed_packages
+         | zip(__wazuh_server_installed_packages | map('extract', __wazuh_server_expected_versions))
+         | map('join', '=') | list }}
+    __wazuh_server_version_mismatches: >-
+      {{ __wazuh_server_expected_pairs | difference(__wazuh_server_installed_pairs)
+         | map('regex_replace', '=.*$', '') | list }}
+  tags:
+    - always
+
+- name: Install | Dependency packages
+  ansible.builtin.package:
+    name: '{{ __wazuh_server_dependency_packages }}'
+    state: present
+  retries: 3
+  delay: 5
+  register: __wazuh_server_dependencies
+
+# The Wazuh repo file check (repos.yml) only exists on RedHat; everywhere
+# else the gate falls through.
+# The hold (versionlock) from an earlier run does not get in the way: the
+# assertion above guarantees that the installed indexer, manager and
+# dashboard already match the pinned version, so the install changes nothing
+# on a held package and needs no option to bypass the hold.
+- name: Install | Wazuh packages
+  ansible.builtin.package:
+    name: '{{ __wazuh_server_packages }}'
+    state: present
+  retries: 3
+  delay: 5
+  register: __wazuh_server_install
+  when: __wazuh_server_repo_stat.stat.exists | default(true)
+  notify:
+    - Reload Wazuh systemd units
+
+# Not a handler: the hold tasks below need the new packages in the facts
+- name: Install | Refresh package facts after install  # noqa: no-handler
+  ansible.builtin.package_facts:
+    manager: auto
+  when: __wazuh_server_install is changed
+
+# Only an installed package can be held. In check mode the install above
+# changes nothing, so the packages (or the versionlock plugin) may be
+# missing.
+- name: Install | Hold Wazuh packages (Debian)
+  ansible.builtin.dpkg_selections:
+    name: '{{ item }}'
+    selection: hold
+  loop: '{{ __wazuh_server_package_names | select("in", ansible_facts.packages) | list }}'
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Install | Lock Wazuh package versions (RedHat)
+  community.general.dnf_versionlock:
+    name: '{{ __wazuh_server_installed_package_names }}'
+    state: present
+  vars:
+    __wazuh_server_installed_package_names: >-
+      {{ __wazuh_server_package_names | select('in', ansible_facts.packages) | list }}
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - __wazuh_server_installed_package_names | length > 0
+    - not (ansible_check_mode and __wazuh_server_dependencies is changed)

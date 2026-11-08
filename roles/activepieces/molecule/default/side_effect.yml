@@ -1,0 +1,36 @@
+---
+# Runs the scheduled backup twice: with activepieces_backup_keep 1 the
+# second run removes the set of the first, and verify expects exactly one
+# scheduled set. The script stops Activepieces for the set and starts it
+# again, so the play waits for the health check before verify checks the
+# service.
+- name: Side Effect
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Side Effect | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    # A oneshot unit is inactive again once the script has finished, so a
+    # second start runs it again.
+    - name: Side Effect | Run the scheduled backup
+      ansible.builtin.systemd_service:
+        name: '{{ __activepieces_backup_service_name }}'
+        state: started
+      loop:
+        - first
+        - second
+      loop_control:
+        label: '{{ item }} run'
+
+    - name: Side Effect | Wait for Activepieces to be healthy after the backup
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1:{{ activepieces_port }}/api/v1/health'
+        status_code: 200
+        timeout: 10
+      register: __side_effect_healthy
+      until: __side_effect_healthy.status | default(0) == 200
+      retries: 180
+      delay: 5

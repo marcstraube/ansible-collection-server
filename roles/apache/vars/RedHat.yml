@@ -39,3 +39,11 @@ __apache_selinux_default_ports:
   - '8009'
   - '8443'
   - '9000'
+
+# Main process PID (compiled-in default below ServerRoot, /etc/httpd/run
+# links to /run/httpd)
+__apache_pid_file: '/run/httpd/httpd.pid'
+
+# Installed packages a targeted update moves along (httpd, httpd-core,
+# httpd-filesystem, httpd-tools, mod_ssl)
+__apache_update_pattern: '^(httpd(-.+)?|mod_ssl)$'

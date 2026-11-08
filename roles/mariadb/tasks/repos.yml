@@ -1,0 +1,114 @@
+---
+# MariaDB Foundation repositories, imported only for mariadb_repo 'upstream'
+# on Debian and EL. Arch Linux has no upstream repository; its official
+# repository tracks upstream.
+
+#
+# Debian
+#
+
+- name: Repos | Ensure apt prerequisites
+  ansible.builtin.package:
+    name:
+      - 'ca-certificates'
+      - 'python3-debian'
+    state: present
+  retries: 3
+  delay: 5
+  when: ansible_facts['os_family'] == 'Debian'
+
+# signed_by takes the key URL directly — the module downloads it and
+# stores it beside the .sources file, so no separate key task is needed.
+# One repository per major version: the version is part of the URI.
+- name: Repos | Add MariaDB apt repository
+  ansible.builtin.deb822_repository:
+    name: mariadb
+    types: deb
+    uris: '{{ __mariadb_upstream_apt_uri }}'
+    suites: "{{ ansible_facts['distribution_release'] }}"
+    components: main
+    signed_by: '{{ __mariadb_upstream_apt_key_url }}'
+    state: present
+  retries: 5
+  delay: 10
+  register: __mariadb_upstream_apt_repo
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Repos | Update apt cache after repo change
+  ansible.builtin.apt:
+    update_cache: true
+  retries: 3
+  delay: 5
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - __mariadb_upstream_apt_repo is changed
+
+#
+# RedHat
+#
+# The repository entry follows the layout of the mariadb.org repository
+# configuration; dnf imports the signing key from gpgkey on first use.
+# module_hotfixes lets dnf consider the repository packages on EL 9 even
+# though the AppStream carries mariadb as a module, as the repository
+# setup script of MariaDB does.
+#
+
+- name: Repos | Add MariaDB yum repository (RedHat)
+  ansible.builtin.yum_repository:
+    name: mariadb
+    description: MariaDB {{ __mariadb_version }} for EL $releasever - $basearch
+    file: mariadb
+    baseurl: '{{ __mariadb_upstream_yum_base }}/{{ __mariadb_version }}/rhel/$releasever/$basearch'
+    gpgkey: '{{ __mariadb_upstream_rpm_key_url }}'
+    gpgcheck: true
+    module_hotfixes: true
+  retries: 5
+  delay: 10
+  when: ansible_facts['os_family'] == 'RedHat'
+
+# Check that the repo file is actually on disk before touching the
+# packages. In check mode the repository task above writes nothing, so
+# without this gate the package install fails with "No package
+# MariaDB-server available".
+- name: Repos | Check MariaDB repository file presence (RedHat)
+  ansible.builtin.stat:
+    path: '{{ __mariadb_upstream_repo_file }}'
+  register: __mariadb_upstream_repo_stat
+  check_mode: false
+  when: ansible_facts['os_family'] == 'RedHat'
+
+# EL 9: the AppStream mariadb module shadows the upstream packages while a
+# stream is enabled and would pull the AppStream packages in as
+# dependencies. A disabled module shows every stream as [x].
+- name: Repos | Read the AppStream mariadb module state (EL 9)
+  ansible.builtin.command:
+    argv:
+      - dnf
+      - --quiet
+      - module
+      - list
+      - mariadb
+  environment:
+    LC_ALL: C
+  register: __mariadb_module_list
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - __mariadb_module_streams | length > 0
+
+- name: Repos | Disable the AppStream mariadb module (EL 9)
+  ansible.builtin.command:
+    argv:
+      - dnf
+      - --quiet
+      - --assumeyes
+      - module
+      - disable
+      - mariadb
+  changed_when: true
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - __mariadb_module_streams | length > 0
+    - __mariadb_module_list.stdout | default('') is not search('(?m)^mariadb\s+\S+\s+\[x\]')

@@ -19,7 +19,7 @@ The role supports Podman only: the container runs rootless as the dedicated
 `n8n` user without a daemon or a privileged group, which Docker does not
 offer in the same way.
 
-The orchestrator playbook `playbooks/servers/n8n.yml` includes all required
+The orchestrator playbook `playbooks/n8n.yml` includes all required
 roles in the correct order.
 
 ### Required Collections
@@ -59,10 +59,10 @@ See [defaults/main.yml](defaults/main.yml) for all available variables.
 | `n8n_podman_image`       | `n8nio/n8n`   | Container image (`docker.io/n8nio/n8n`)                |
 | `n8n_host`               | `'127.0.0.1'` | Listen address                                         |
 | `n8n_port`               | `5678`        | Listen port                                            |
-| `n8n_db_type`            | `'sqlite'`    | Database: `sqlite`, `postgresdb`, `mysqldb`, `mariadb` |
+| `n8n_db_type`            | `'sqlite'`    | Database: `sqlite` or `postgresdb`                     |
 | `n8n_encryption_key`     | `''`          | **REQUIRED** — credential encryption key               |
 | `n8n_runners_auth_token` | `''`          | **REQUIRED** — shared secret of n8n and task runners   |
-| `n8n_firewalld_enabled`  | `true`        | Manage firewalld rule for n8n port                     |
+| `n8n_firewalld_enabled`  | `true`        | Deprecated — firewalld rule for the n8n port           |
 
 ### Version Pinning
 
@@ -106,28 +106,36 @@ A run whose pinned version differs from the installed one is an update.
 The role then:
 
 1. stops the n8n service,
-2. writes a backup set `n8n-<installed version>-<timestamp>/` to
-   `n8n_update_backup_dir` with `data.tar.gz` (the data directory,
-   entries relative to `n8n_user_home`) and, with `n8n_db_type:
-   'postgresdb'`, `db.dump` (`pg_dump -Fc` over the local socket),
-   keeping the newest `n8n_update_backup_keep` sets,
+2. runs the backup script for a pre-update set
+   `n8n-<installed version>-<timestamp>/` in `n8n_backup_dir` (see
+   Backup), keeping the newest `n8n_backup_update_keep` pre-update sets,
 3. pulls the pinned image,
 4. starts the service and waits up to `n8n_ready_timeout` seconds for
    `/healthz/readiness`, which answers 200 once the database is connected
-   and migrated.
+   and migrated, and for `/healthz` of the task runner launcher,
+5. removes the images of the other releases from the Podman storage of
+   the `n8n` user (`n8n_update_remove_old_images`): every tag of
+   `n8n_podman_image` and `n8n_runners_podman_image` except the two the
+   services run. Images of other containers are not touched, and there is
+   no `podman image prune`.
 
-| Variable                     | Default               | Description                                   |
-| ---------------------------- | --------------------- | --------------------------------------------- |
-| `n8n_update_backup_enabled`  | `true`                | Backup before a version change or a restore   |
-| `n8n_update_backup_dir`      | `'/var/backups/n8n'`  | Directory for the backup sets                 |
-| `n8n_update_backup_keep`     | `3`                   | Backup sets to keep                           |
-| `n8n_update_restore`         | `''`                  | Backup set to restore (see below)             |
-| `n8n_ready_timeout`          | `300`                 | Seconds to wait for readiness after a start   |
+Each release keeps about 1.7 GB of images, so without the removal the
+storage grows with every update. The removal runs only after both health
+checks have passed: a failed update keeps the previous image. A restore
+needs no local copy of the older image, the role pulls it again.
+
+| Variable                       | Default               | Description                                   |
+| ------------------------------ | --------------------- | --------------------------------------------- |
+| `n8n_update_restore`           | `''`                  | Backup set to restore (see below)             |
+| `n8n_update_remove_old_images` | `true`                | Remove the images of other releases           |
+| `n8n_ready_timeout`            | `300`                 | Seconds to wait for readiness after a start   |
+| `n8n_service_start_timeout`    | `300`                 | Start timeout of both units (seconds)         |
 
 **Downgrades** are refused: n8n migrates its database on start and the
 migrations are forward-only, so an older release does not start on a
 migrated database. To go back, restore the backup set taken before the
-upgrade and pin its version in the same run:
+upgrade (or a scheduled set of that release) and pin its version in the
+same run:
 
 ```yaml
 n8n_version: '2.42.0'
@@ -136,9 +144,64 @@ n8n_update_restore: 'n8n-2.42.0-20261014T120000'
 
 The role backs up the current state first, replaces the data directory
 from the set, recreates the PostgreSQL database from `db.dump`, pulls the
-pinned image and starts n8n. The version in the set name must match
-the pin. `n8n_update_restore` is a one-shot setting: remove it after the
-run, otherwise the next run restores the set again.
+pinned image again (the update removed it) and starts n8n; once it is
+healthy, the images of the newer release are removed in turn. The version
+in the set name must match the pin. `n8n_update_restore` is a one-shot
+setting: remove it after the run, otherwise the next run restores the set
+again.
+
+### Backup
+
+The role deploys `/usr/local/bin/n8n-backup`, which writes one backup set:
+a subdirectory of `n8n_backup_dir` with `data.tar.gz` (the data directory,
+entries relative to `n8n_user_home`) and, with `n8n_db_type: 'postgresdb'`,
+`db.dump` (`pg_dump -Fc` over the local socket). The version in the set
+name is the image tag of the deployed service unit. There are two kinds of
+sets with a count-based retention each, so a scheduled set never pushes
+out the set taken before the last update, and a failing timer never
+removes the last good set:
+
+| Kind       | Set name                              | Written by                     | Kept                     |
+| ---------- | ------------------------------------- | ------------------------------ | ------------------------ |
+| scheduled  | `n8n-scheduled-<version>-<timestamp>` | `n8n-backup.timer`             | `n8n_backup_keep`        |
+| pre-update | `n8n-<version>-<timestamp>`           | the update (change or restore) | `n8n_backup_update_keep` |
+
+A scheduled set is taken with n8n stopped (`n8n_backup_stop_service`), so
+the SQLite database and the data directory are copied in a consistent
+state; the task runners stop and start with n8n. The service starts again
+when the script exits, also after a failed dump. With
+`n8n_backup_stop_service: false` the set is taken from the running
+instance: the PostgreSQL dump is consistent on its own, the archive of a
+running SQLite database is not. `n8n-backup.service` is a oneshot unit, so
+`systemctl start n8n-backup.service` takes a scheduled set at any time and
+returns once the set is written; `n8n-backup update` takes a pre-update set
+instead (the update calls it with n8n stopped).
+
+| Variable                   | Default              | Description                                         |
+| -------------------------- | -------------------- | --------------------------------------------------- |
+| `n8n_backup_enabled`       | `true`               | Scheduled sets and the pre-update set               |
+| `n8n_backup_dir`           | `'/var/backups/n8n'` | Directory for the backup sets                       |
+| `n8n_backup_keep`          | `7`                  | Scheduled sets to keep                              |
+| `n8n_backup_update_keep`   | `3`                  | Pre-update sets to keep                             |
+| `n8n_backup_stop_service`  | `true`               | Stop n8n while a scheduled set is written           |
+| `n8n_backup_timer_enabled` | `true`               | Enable and start `n8n-backup.timer`                 |
+| `n8n_backup_on_calendar`   | `'daily'`            | Schedule of the timer (systemd `OnCalendar`)        |
+
+`n8n_backup_enabled: false` stops the timer and skips the pre-update set;
+the script, the units and the existing sets stay. The role never removes a
+set other than through the retention of its kind.
+
+> **Deprecation:** `n8n_update_backup_enabled`, `n8n_update_backup_dir` and
+> `n8n_update_backup_keep` are the former names of `n8n_backup_enabled`,
+> `n8n_backup_dir` and `n8n_backup_update_keep` and will be removed in the
+> next major version. Until then a set former name still takes effect as
+> the value of its replacement, and every run prints a deprecation warning
+> while it is set.
+
+A host backup takes the sets instead of the running data directory: it
+runs `systemctl start n8n-backup.service` as its pre-sync step and copies
+`n8n_backup_dir`. The sets are only as useful as `n8n_encryption_key`,
+which stays in the Ansible vault.
 
 ### Task Runners
 
@@ -218,17 +281,124 @@ them explicitly.
 
 ### Database Configuration
 
+n8n stores its own data in SQLite or PostgreSQL. n8n 2.0 removed MySQL and
+MariaDB, so the role refuses any other `n8n_db_type`; migrate such a setup
+to PostgreSQL or SQLite with n8n before upgrading.
+
 When using `n8n_db_type: postgresdb`, the `marcstraube.server.postgresql` role
 must run before this role. The n8n role creates its own database and user via
 `database.yml` (controlled by `n8n_db_create: true`). Required PostgreSQL
 configuration (pg_hba scram-sha-256, service start) is handled by the
 postgresql role.
 
+| Variable         | Default | Description                           |
+| ---------------- | ------- | ------------------------------------- |
+| `n8n_db_service` | `''`    | Local PostgreSQL unit (empty: detect) |
+
+With a server on the host itself (`n8n_db_host` is `localhost`, `127.0.0.1`
+or `::1`) the unit requires the PostgreSQL unit of the host: the role detects
+`postgresql.service` or, with the PGDG packages on Rocky Linux,
+`postgresql-<version>.service`. With several versions installed, set
+`n8n_db_service` to the unit n8n depends on.
+
 ### TLS Certificates
 
 TLS certificates are managed by the `marcstraube.common.pki` role. Configure
 `pki_server_certs` in the inventory to generate certificates for n8n. The
 orchestrator playbook includes the pki role automatically.
+
+### URL Path Prefix
+
+n8n can share a virtual host with another application that owns `/`: the
+editor is then served under a path prefix such as `/n8n/`. n8n inserts
+`n8n_path` (`N8N_PATH`) verbatim in front of every URL the editor
+requests, so the value starts and ends with a slash; the role refuses other
+values. The backend routes (`/rest`, `/webhook`, `/healthz`, …) stay at the
+root of `n8n_host:n8n_port` whatever the prefix is, so the reverse proxy
+strips the prefix before it passes a request on. The readiness check of the
+role is not affected.
+
+| Variable              | Default | Description                                      |
+| --------------------- | ------- | ------------------------------------------------ |
+| `n8n_path`            | `'/'`   | URL path prefix of the editor (`N8N_PATH`)       |
+| `n8n_editor_base_url` | `''`    | Public URL of the editor, with the prefix        |
+| `n8n_webhook_url`     | `''`    | Public base URL of the webhooks, with the prefix |
+
+> **Deprecation:** `n8n_endpoints_rest` is the former name of `n8n_path` and
+> will be removed in the next major version. Until then a set
+> `n8n_endpoints_rest` still takes effect as the URL path prefix, and every
+> run prints a deprecation warning while it is set.
+
+Host variables for an instance at `https://www.example.com/n8n/`:
+
+```yaml
+n8n_path: '/n8n/'
+n8n_editor_base_url: 'https://www.example.com/n8n/'
+n8n_webhook_url: 'https://www.example.com/n8n/'
+```
+
+n8n appends `webhook/<path>` to `n8n_webhook_url` for the URLs it shows in
+the editor. `n8n_editor_base_url` is the URL n8n puts into invitation emails
+and OAuth callback URLs; without it n8n falls back to `n8n_webhook_url`.
+
+The matching nginx `location` block, with the trailing slash of `proxy_pass`
+replacing the matched `/n8n/` by `/`:
+
+```nginx
+location /n8n/ {
+    proxy_pass http://127.0.0.1:5678/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Port $server_port;
+
+    # The editor keeps a WebSocket open for push updates (executions,
+    # collaboration); with N8N_PUSH_BACKEND=sse the updates arrive as
+    # server-sent events, which proxy buffering would hold back.
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 3600s;
+    proxy_buffering off;
+}
+```
+
+With `marcstraube.server.nginx` the directives go into the `locations` list
+of the site that owns the host name (`path: '/n8n/'`); that role defines the
+`$connection_upgrade` map, so `Connection $connection_upgrade` works there
+as well. n8n documents a prefix behind a reverse proxy with the caveat that
+parts of the editor may navigate wrongly; a dedicated host name
+(`n8n.example.com`) remains the simpler setup.
+
+### Reverse Proxy
+
+n8n listens on `n8n_host:n8n_port` and expects a reverse proxy in front of
+it that terminates TLS and forwards the client address in `X-Forwarded-For`.
+`n8n_proxy_hops` tells n8n how many proxies the header passed through, so
+it reads the client address from the right position for its rate limits and
+audit log; `0` makes n8n distrust the header altogether.
+
+| Variable                   | Default | Description                                            |
+| -------------------------- | ------- | ------------------------------------------------------ |
+| `n8n_behind_reverse_proxy` | `true`  | Render the reverse proxy settings (`N8N_PROXY_HOPS`)   |
+| `n8n_proxy_hops`           | `1`     | Number of reverse proxies in front of n8n              |
+
+> **Deprecation:** `n8n_trusted_proxy_ips` has no effect and will be removed
+> in the next major version. n8n has no list of trusted proxy addresses; it
+> counts the proxies in front of it (`n8n_proxy_hops`). Every run prints a
+> deprecation warning while the variable is set to a non-empty value.
+
+### Metrics
+
+`n8n_metrics_enabled: true` serves Prometheus metrics on `/metrics`
+(`N8N_METRICS`). The endpoint has no authentication of its own, so the
+reverse proxy restricts access to it.
+
+| Variable              | Default | Description                              |
+| --------------------- | ------- | ---------------------------------------- |
+| `n8n_metrics_enabled` | `false` | Serve Prometheus metrics on `/metrics`   |
 
 ### OpenTelemetry (n8n >= 2.15)
 
@@ -247,14 +417,15 @@ default of 365 days.
 
 ## Tags
 
-| Tag              | Description                        |
-|------------------|------------------------------------|
-| `n8n`            | All n8n tasks                      |
-| `n8n:install`    | User, directories and image pulls  |
-| `n8n:database`   | PostgreSQL user and database setup |
-| `n8n:configure`  | Configuration deployment           |
-| `n8n:service`    | Systemd service management         |
-| `n8n:firewall`   | Firewalld rule management          |
+| Tag              | Description                                        |
+|------------------|----------------------------------------------------|
+| `n8n`            | All n8n tasks                                      |
+| `n8n:backup`     | Backup script, service and timer                   |
+| `n8n:install`    | User, directories and image pulls                  |
+| `n8n:database`   | PostgreSQL user and database setup                 |
+| `n8n:configure`  | Configuration deployment                           |
+| `n8n:service`    | Systemd services, health checks and image cleanup  |
+| `n8n:firewall`   | Firewalld rule management (deprecated)             |
 
 ## Example Playbook
 
@@ -289,7 +460,7 @@ default of 365 days.
 # Run full test (one platform at a time)
 molecule test -p n8n-debian-trixie
 
-# Update, downgrade guard and restore
+# Update, image cleanup, downgrade guard and restore
 molecule test -s update
 ```
 
@@ -299,6 +470,20 @@ instance maps, and `ignore_chown_errors` in the podman storage options
 because that range cannot map the UID 65532 owning `/home/nonroot` in the
 distroless runner image.
 
+The Debian platform of the default scenario serves the editor under the URL
+path prefix `/n8n/` and the EL 9 platform under `/legacy/` through the
+deprecated `n8n_endpoints_rest` (host variables in `molecule.yml`); verify
+checks the base path of the editor on every platform and readiness at the
+root.
+
+Both scenarios run `n8n-backup.service` twice with `n8n_backup_keep: 1`
+in their side effect and verify that exactly one scheduled set with the
+archive of the data directory remains. The update scenario verifies that
+the pre-update set of the update survives the scheduled retention, sets
+the deprecated `n8n_update_backup_keep` to verify that it still takes
+effect as the pre-update retention of the restore, and restores the
+pre-update set.
+
 ## Notes
 
 - The environment files (`/etc/n8n/n8n.env`, `/etc/n8n/n8n-runner.env`)
@@ -306,15 +491,41 @@ distroless runner image.
 - The container runs rootless as the dedicated `n8n` system user; the
   service unit creates `/run/n8n` as the Podman runtime directory
 
-### Backup
+### Firewall
 
-This role does not manage backups. The following data must be included in your
-backup solution:
+n8n listens on `127.0.0.1` (`n8n_host`) and needs no firewall rule of its
+own. The reverse proxy in front of it serves HTTPS (and HTTP for the
+redirect), which the `marcstraube.common.firewalld` inventory opens:
+
+```yaml
+firewalld_services:
+  - ssh
+  - http
+  - https
+```
+
+Never open `n8n_port`: the reverse proxy is the only client.
+
+To migrate a host, add `http` and `https` to `firewalld_services` and run
+the `marcstraube.common.firewalld` role first, then set
+`n8n_firewalld_enabled: false`: the next run removes the `n8n_port` rule
+the role created.
+
+> **Deprecation:** `n8n_firewalld_enabled`, `n8n_firewalld_zone`, the
+> firewall tasks and the `n8n:firewall` tag will be removed in the next
+> major version. Until then `n8n_firewalld_enabled` keeps its default
+> `true` and the role opens `n8n_port` in `n8n_firewalld_zone`, printing a
+> deprecation warning on every run; `false` removes that rule again.
+
+### Host Backup
+
+The role writes its backup sets to `n8n_backup_dir` (see Backup); a host
+backup copies that directory after `systemctl start n8n-backup.service`
+rather than the running data directory:
 
 | Data                          | Location             | Notes                                            |
 |-------------------------------|----------------------|--------------------------------------------------|
-| Workflow data and credentials | `/var/lib/n8n/.n8n`  | Encrypted with `n8n_encryption_key`              |
-| PostgreSQL database           | `pg_dump -U n8n n8n` | Only if `n8n_db_type: postgresdb`                |
+| Backup sets                   | `/var/backups/n8n`   | Data directory archive and PostgreSQL dump       |
 | Encryption key                | Ansible vault        | **Critical** — without it, credentials are lost  |
 
 The environment files in `/etc/n8n` are managed by Ansible and do not need

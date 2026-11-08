@@ -1,3 +1,39 @@
 ---
 __postgresql_user: postgres
 __postgresql_group: postgres
+
+# Socket directory the clients connect through (the role tasks, the backup
+# script and the restore): the first entry of the comma-separated
+# postgresql_unix_socket_directories, together with postgresql_port
+__postgresql_socket_dir: "{{ postgresql_unix_socket_directories.split(',') | first | trim }}"
+
+# Backup script and the units that run it
+__postgresql_backup_script: '/usr/local/bin/postgresql-backup'
+__postgresql_backup_service_name: 'postgresql-backup.service'
+__postgresql_backup_timer_name: 'postgresql-backup.timer'
+
+# The PostgreSQL service as a full unit name, for the ordering of the
+# backup service (the OS vars name it with or without the suffix)
+__postgresql_service_unit: >-
+  {{ __postgresql_service_name if __postgresql_service_name.endswith('.service')
+     else __postgresql_service_name ~ '.service' }}
+
+# The deprecated postgresql_backup_schedule runs the backup from a cron job
+# of root instead of the timer. Earlier role versions created the job with
+# the same name in the crontab of the postgres user.
+__postgresql_backup_cron_name: 'PostgreSQL backup'
+__postgresql_backup_cron_enabled: >-
+  {{ postgresql_backup_enabled | bool
+     and postgresql_backup_schedule | default('') | length > 0 }}
+__postgresql_backup_timer_active: >-
+  {{ postgresql_backup_enabled | bool
+     and postgresql_backup_timer_enabled | bool
+     and not __postgresql_backup_cron_enabled | bool }}
+
+# File name of a dump a restore accepts; the group is the database
+__postgresql_restore_pattern: '^([^/]+)_[0-9]{8}_[0-9]{6}\.sql\.gz$'
+
+# First line of the comment header pg_dumpall writes. Earlier role versions
+# named the globals dumps globals_<YYYYmmdd_HHMMSS>.sql.gz, the name of a
+# dump of a database called globals; only the header tells them apart.
+__postgresql_cluster_dump_header: '-- PostgreSQL database cluster dump'

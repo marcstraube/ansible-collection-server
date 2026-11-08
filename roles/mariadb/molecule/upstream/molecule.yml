@@ -1,0 +1,90 @@
+---
+# Upstream repository scenario: installs from deb.mariadb.org and
+# rpm.mariadb.org with mariadb_repo 'upstream'. On EL this exercises the
+# MariaDB-* package names and, on EL 9, the disabled AppStream module.
+# Arch Linux has no upstream repository and ignores the setting; the
+# scenario installs the mariadb-lts variant there instead.
+driver:
+  name: podman
+platforms:
+  - name: mariadb-upstream-archlinux
+    image: docker.io/marcstraube/archlinux-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: mariadb-upstream-debian-trixie
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: mariadb-upstream-rocky-9
+    image: docker.io/geerlingguy/docker-rockylinux9-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: mariadb-upstream-rocky-10
+    image: docker.io/geerlingguy/docker-rockylinux10-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: prepare.yml
+    converge: converge.yml
+    side_effect: side_effect.yml
+    verify: verify.yml
+  inventory:
+    group_vars:
+      all:
+        # Shared by converge, side_effect and verify: the OS vars derive
+        # package names and paths from them.
+        mariadb_repo: 'upstream'
+        mariadb_version: '11.8'
+        mariadb_arch_package: 'mariadb-lts'
+        # The scheduled backup in side_effect keeps one dump per database
+        mariadb_backup_keep: 1
+    host_vars:
+      mariadb-upstream-archlinux:
+        ansible_python_interpreter: /usr/bin/python
+      mariadb-upstream-debian-trixie:
+        ansible_python_interpreter: /usr/bin/python3
+      mariadb-upstream-rocky-9:
+        ansible_python_interpreter: /usr/bin/python3
+      mariadb-upstream-rocky-10:
+        ansible_python_interpreter: /usr/bin/python3
+  config_options:
+    defaults:
+      allow_broken_conditionals: true
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - side_effect
+    - verify
+    - destroy

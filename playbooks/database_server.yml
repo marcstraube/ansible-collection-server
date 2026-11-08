@@ -2,14 +2,16 @@
 # =============================================================================
 # Database Server Playbook
 # =============================================================================
-# Database server stack: pki-issued certificates and PostgreSQL. The stack
-# and its order live in tasks/database_server.yml; this play adds the Arch
-# Linux system update in front of it.
+# Database server stack: pki-issued certificates, PostgreSQL and MariaDB.
+# The stack and its order live in tasks/database_server.yml; this play adds
+# the Arch Linux system update in front of it.
 #
 # Usage:
 #   ansible-playbook marcstraube.server.database_server -i inventory/
 #   ansible-playbook marcstraube.server.database_server -i inventory/ \
 #     --tags postgresql
+#   ansible-playbook marcstraube.server.database_server -i inventory/ \
+#     --tags mariadb
 #
 # Configure roles via inventory variables (group_vars/host_vars).
 # See each role's defaults/main.yml for available variables.

@@ -1,4 +1,50 @@
 ---
+# The unit name depends on the packages: postgresql.service from the
+# distribution, postgresql-<version>.service from PGDG on Rocky Linux.
+- name: Service | List the PostgreSQL units
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - list-unit-files
+      - --type=service
+      - --no-legend
+      - --plain
+      - 'postgresql*.service'
+  register: __n8n_db_unit_files
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - __n8n_db_local | bool
+    - n8n_db_service | length == 0
+
+- name: Service | Set PostgreSQL unit fact
+  ansible.builtin.set_fact:
+    __n8n_db_service: >-
+      {{ n8n_db_service if n8n_db_service | length > 0
+         else (__n8n_db_units | first if __n8n_db_units | length == 1 else '') }}
+  vars:
+    __n8n_db_units: >-
+      {{ __n8n_db_unit_files.stdout_lines | default([])
+         | map('split') | map('first')
+         | select('match', __n8n_db_unit_pattern) | list }}
+  when: __n8n_db_local | bool
+
+# In check mode on a new host the postgresql role has not installed the
+# server yet, so a missing unit is only an error in a real run.
+- name: Service | Validate the PostgreSQL unit
+  ansible.builtin.assert:
+    that:
+      - __n8n_db_service | length > 0
+    fail_msg: |
+      n8n_db_host points to this host, but no single PostgreSQL unit was
+      found ({{ __n8n_db_unit_files.stdout_lines | default([]) | join(', ') or 'none' }}).
+      Run the marcstraube.server.postgresql role before this role, or set
+      n8n_db_service to the unit n8n depends on.
+  when:
+    - __n8n_db_local | bool
+    - not ansible_check_mode
+
 - name: Service | Deploy systemd service file
   ansible.builtin.template:
     src: n8n.service.j2
@@ -43,13 +89,14 @@
 # /healthz/readiness answers 200 only once the database is connected and
 # migrated, so a version change with long migrations is covered as well.
 # n8n itself always listens on plain HTTP; n8n_protocol only shapes the
-# URLs it generates behind a TLS-terminating proxy. The waits verify the
-# deployment, which a check run does not perform.
+# URLs it generates behind a TLS-terminating proxy. The same goes for the
+# URL path prefix (n8n_path): n8n keeps its backend routes at the root
+# and the reverse proxy strips the prefix, so the readiness URL
+# never carries it. The waits verify the deployment, which a check run does
+# not perform.
 - name: Service | Wait for n8n to be ready
   ansible.builtin.uri:
-    url: >-
-      http://{{ n8n_host if n8n_host != '0.0.0.0' else '127.0.0.1' }}:{{ n8n_port }}{{
-        n8n_endpoints_rest | regex_replace('/$', '') }}/healthz/readiness
+    url: "http://{{ n8n_host if n8n_host != '0.0.0.0' else '127.0.0.1' }}:{{ n8n_port }}/healthz/readiness"
     status_code: 200
     timeout: 10
   register: __n8n_ready
@@ -70,5 +117,54 @@
   retries: 12
   delay: 5
   when:
+    - n8n_service_enabled | bool
+    - not ansible_check_mode
+
+#
+# Images of the replaced release
+#
+# Every release leaves its n8n and runners images in the podman storage
+# of the n8n user. After a version change, once both health checks have
+# passed (a failed update keeps the previous image), every tag of the two
+# repositories except the ones the services run is removed. Other
+# repositories are not touched, so the images of other containers stay.
+# The version change fact comes from update.yml; a run limited to the
+# service tag has not set it and removes nothing.
+
+- name: Service | List the images of the n8n user
+  containers.podman.podman_image_info:
+  register: __n8n_images
+  become: true
+  become_user: '{{ n8n_user }}'
+  environment:
+    XDG_RUNTIME_DIR: '{{ __n8n_runtime_dir }}'
+  when:
+    - n8n_update_remove_old_images | bool
+    - __n8n_version_changed | default(false) | bool
+    - n8n_service_enabled | bool
+    - not ansible_check_mode
+
+# Removing a tag untags the image and deletes it with its last tag.
+- name: Service | Remove the images of other n8n releases
+  containers.podman.podman_image:
+    name: '{{ item }}'
+    state: absent
+  loop: >-
+    {{ __n8n_images.images | default([])
+       | map(attribute='RepoTags') | map('default', [], true) | flatten | unique
+       | select('match', '^(' ~ (n8n_podman_image | regex_escape)
+                         ~ '|' ~ (n8n_runners_podman_image | regex_escape) ~ '):')
+       | reject('in', __n8n_current_images) | list }}
+  vars:
+    __n8n_current_images:
+      - '{{ n8n_podman_image }}:{{ n8n_version }}'
+      - '{{ n8n_runners_podman_image }}:{{ n8n_version }}{{ n8n_runners_podman_image_tag_suffix }}'
+  become: true
+  become_user: '{{ n8n_user }}'
+  environment:
+    XDG_RUNTIME_DIR: '{{ __n8n_runtime_dir }}'
+  when:
+    - n8n_update_remove_old_images | bool
+    - __n8n_version_changed | default(false) | bool
     - n8n_service_enabled | bool
     - not ansible_check_mode

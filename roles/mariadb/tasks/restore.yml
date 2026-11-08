@@ -1,0 +1,53 @@
+---
+# Restores the dump named by mariadb_restore into its database. main.yml
+# has validated the name and that the database is managed through
+# mariadb_databases. The server keeps running: the database is dropped and
+# recreated with the encoding and collation of its mariadb_databases entry,
+# then the dump is loaded. Users and grants live outside the database and
+# stay untouched.
+
+- name: Restore | Stat the dump to restore
+  ansible.builtin.stat:
+    path: '{{ __mariadb_restore_file }}'
+  register: __mariadb_restore_stat
+
+- name: Restore | Assert the dump exists
+  ansible.builtin.assert:
+    that:
+      - __mariadb_restore_stat.stat.exists
+      - __mariadb_restore_stat.stat.isreg
+    fail_msg: >-
+      {{ __mariadb_restore_file }} does not exist. mariadb_restore names a
+      dump in mariadb_backup_dir ({{ mariadb_backup_dir }}).
+    quiet: true
+
+# The named dump is passed as the dump to keep, so the rotation after the
+# fresh dump never removes it.
+- name: Restore | Take a fresh dump of the database
+  ansible.builtin.command:
+    argv:
+      - '{{ __mariadb_backup_script }}'
+      - '{{ __mariadb_restore_database }}'
+      - '{{ mariadb_restore }}'
+  changed_when: true
+
+- name: Restore | Drop the database
+  ansible.mariadb.mariadb_db:
+    name: '{{ __mariadb_restore_database }}'
+    login_unix_socket: '{{ __mariadb_socket }}'
+    state: absent
+
+- name: Restore | Recreate the database
+  ansible.mariadb.mariadb_db:
+    name: '{{ __mariadb_restore_database }}'
+    encoding: '{{ __mariadb_restore_entry.encoding | default(mariadb_character_set_server) }}'
+    collation: '{{ __mariadb_restore_entry.collation | default(mariadb_collation_server) }}'
+    login_unix_socket: '{{ __mariadb_socket }}'
+    state: present
+
+- name: Restore | Load the dump
+  ansible.mariadb.mariadb_db:
+    name: '{{ __mariadb_restore_database }}'
+    target: '{{ __mariadb_restore_file }}'
+    login_unix_socket: '{{ __mariadb_socket }}'
+    state: import

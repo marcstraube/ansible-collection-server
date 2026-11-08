@@ -1,0 +1,7 @@
+---
+# Targeted update, minimum and major version checks: same steps as the
+# default scenario, against the upstream packages. On Debian the rollback
+# installs the Debian build, which the update replaces with the upstream
+# build again.
+- name: Import default side effect
+  ansible.builtin.import_playbook: ../default/side_effect.yml

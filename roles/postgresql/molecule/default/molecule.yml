@@ -47,6 +47,7 @@ provisioner:
   playbooks:
     prepare: prepare.yml
     converge: converge.yml
+    side_effect: side_effect.yml
     verify: verify.yml
   inventory:
     group_vars:
@@ -54,13 +55,26 @@ provisioner:
         # Shared by converge and verify: the OS vars derive package names,
         # service name and paths from it.
         postgresql_repo: 'distro'
+        # Shared by converge, side_effect and verify: side_effect runs the
+        # backup service once next to two older dumps per name, verify
+        # expects the rotation to leave the new dump only and restores it.
+        postgresql_backup_enabled: true
+        postgresql_backup_keep: 1
     host_vars:
       postgresql-archlinux:
         ansible_python_interpreter: /usr/bin/python
       postgresql-debian-trixie:
         ansible_python_interpreter: /usr/bin/python3
+        # Non-default port: converge, idempotence, the backup run of
+        # side_effect and the restore of verify connect on it; the other
+        # platforms keep the default.
+        postgresql_port: 5433
       postgresql-rocky-9:
         ansible_python_interpreter: /usr/bin/python3
+        # The deprecated retention has to take effect until its removal and
+        # maps onto the count: verify expects the rotation of keep 1.
+        postgresql_backup_keep: 3
+        postgresql_backup_retention: 1
       postgresql-rocky-10:
         ansible_python_interpreter: /usr/bin/python3
   config_options:
@@ -75,5 +89,6 @@ scenario:
     - prepare
     - converge
     - idempotence
+    - side_effect
     - verify
     - destroy

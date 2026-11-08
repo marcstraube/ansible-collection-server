@@ -47,6 +47,28 @@
         authentik:
           enabled: true
           url: 'https://authentik.example.com'
+      # HTTPS on a port outside http_port_t: the redirect keeps the port
+      - name: 'test-redirect-port'
+        server_names:
+          - 'redirect-port.example.com'
+        root: '/var/www/html'
+        listen: 8082
+        listen_ssl: 8444
+        http_redirect: true
+        ssl:
+          enabled: true
+          certificate: '/etc/nginx/ssl/test.crt'
+          certificate_key: '/etc/nginx/ssl/test.key'
+      # HTTPS on 443: the redirect URL carries no port
+      - name: 'test-redirect-default'
+        server_names:
+          - 'redirect-default.example.com'
+        root: '/var/www/html'
+        http_redirect: true
+        ssl:
+          enabled: true
+          certificate: '/etc/nginx/ssl/test.crt'
+          certificate_key: '/etc/nginx/ssl/test.key'
     nginx_stub_status_enabled: true
     nginx_stub_status_path: '/nginx_status'
 

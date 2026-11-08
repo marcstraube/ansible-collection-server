@@ -41,6 +41,7 @@ provisioner:
   playbooks:
     prepare: prepare.yml
     converge: converge.yml
+    side_effect: side_effect.yml
     verify: verify.yml
   inventory:
     group_vars:
@@ -49,6 +50,10 @@ provisioner:
         # service name and paths from it.
         postgresql_repo: 'pgdg'
         postgresql_version: '17'
+        # Shared by converge, side_effect and verify: the backup and restore
+        # checks of the default scenario run against the PGDG paths.
+        postgresql_backup_enabled: true
+        postgresql_backup_keep: 1
     host_vars:
       postgresql-pgdg-debian-trixie:
         ansible_python_interpreter: /usr/bin/python3
@@ -68,5 +73,6 @@ scenario:
     - prepare
     - converge
     - idempotence
+    - side_effect
     - verify
     - destroy

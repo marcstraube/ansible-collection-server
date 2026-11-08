@@ -1,0 +1,5 @@
+---
+# Targeted update and minimum check: same steps as the default scenario,
+# against the PGDG packages, service name and paths.
+- name: Import default side effect
+  ansible.builtin.import_playbook: ../default/side_effect.yml

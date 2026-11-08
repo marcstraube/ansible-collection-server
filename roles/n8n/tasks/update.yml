@@ -1,9 +1,10 @@
 ---
-# Runs before the install tasks: resolves the installed and the target
-# version, refuses downgrades, and on a version change stops the service
-# and backs up the data. A backup set named in n8n_update_restore is
-# restored here as well. The install tasks then pull the target image, and
-# service.yml starts n8n and waits for readiness.
+# Runs after the backup tasks and before the install tasks: resolves the
+# installed and the target version, refuses downgrades, and on a version
+# change stops the service and takes a pre-update backup set with the
+# backup script. A backup set named in n8n_update_restore is restored here
+# as well. The install tasks then pull the target image, and service.yml
+# starts n8n and waits for readiness.
 
 - name: Update | Set target version fact
   ansible.builtin.set_fact:
@@ -48,7 +49,7 @@
 
 - name: Update | List backup sets
   ansible.builtin.find:
-    paths: '{{ n8n_update_backup_dir }}'
+    paths: '{{ n8n_backup_dir }}'
     file_type: directory
     patterns: 'n8n-*'
   register: __n8n_backup_sets
@@ -65,13 +66,15 @@
 
       Restore the backup set taken before the upgrade by setting
       n8n_update_restore to its name together with the lower version.
-      Backup sets in {{ n8n_update_backup_dir }}:
+      Backup sets in {{ n8n_backup_dir }}:
       {% for set in __n8n_backup_sets.files | default([]) | map(attribute='path') | map('basename') | sort %}
         - {{ set }}
       {% else %}
         (none)
       {% endfor %}
 
+# Both kinds of sets restore: the pre-update set n8n-<version>-<timestamp>
+# and the scheduled set n8n-scheduled-<version>-<timestamp>.
 - name: Update | Validate the backup set to restore
   ansible.builtin.assert:
     that:
@@ -79,12 +82,12 @@
       - n8n_update_restore | regex_replace(__n8n_set_pattern, '\\1') == __n8n_target_version
     fail_msg: |
       n8n_update_restore '{{ n8n_update_restore }}' is not a backup set in
-      {{ n8n_update_backup_dir }}, or its version does not match the
+      {{ n8n_backup_dir }}, or its version does not match the
       requested n8n version {{ __n8n_target_version }}. A set restores the
-      data of the version in its name (n8n-<version>-<timestamp>); pin that
-      version alongside.
+      data of the version in its name (n8n-<version>-<timestamp> or
+      n8n-scheduled-<version>-<timestamp>); pin that version alongside.
   vars:
-    __n8n_set_pattern: '^n8n-(.+)-[0-9]{8}T[0-9]{6}$'
+    __n8n_set_pattern: '^n8n-(?:scheduled-)?(.+)-[0-9]{8}T[0-9]{6}$'
   when: n8n_update_restore | length > 0
 
 #
@@ -99,63 +102,19 @@
     - __n8n_unit_stat.stat.exists
     - __n8n_version_changed | bool or n8n_update_restore | length > 0
 
-- name: Update | Set backup set name
-  ansible.builtin.set_fact:
-    __n8n_backup_set: >-
-      {{ n8n_update_backup_dir }}/n8n-{{ __n8n_installed_version
-         }}-{{ ansible_facts['date_time']['iso8601_basic_short'] }}
+# The script writes n8n-<installed version>-<timestamp> with the service
+# stopped above, keeps the newest n8n_backup_update_keep pre-update sets
+# and never removes the set named for a restore.
+- name: Update | Take the pre-update backup set
+  ansible.builtin.command:
+    argv: >-
+      {{ [__n8n_backup_script, 'update']
+         + ([n8n_update_restore] if n8n_update_restore | length > 0 else []) }}
+  changed_when: true
   when:
-    - n8n_update_backup_enabled | bool
+    - n8n_backup_enabled | bool
     - __n8n_installed_version | length > 0
     - __n8n_version_changed | bool or n8n_update_restore | length > 0
-
-- name: Update | Create backup set directory
-  ansible.builtin.file:
-    path: '{{ item }}'
-    state: directory
-    owner: root
-    group: root
-    mode: '0700'
-  loop:
-    - '{{ n8n_update_backup_dir }}'
-    - '{{ __n8n_backup_set }}'
-  when: __n8n_backup_set is defined
-
-# Entries are relative to n8n_user_home (.n8n/...), ownership is kept.
-- name: Update | Back up the data directory
-  community.general.archive:
-    path: '{{ n8n_data_dir }}'
-    dest: '{{ __n8n_backup_set }}/data.tar.gz'
-    format: gz
-    owner: root
-    group: root
-    mode: '0600'
-  when: __n8n_backup_set is defined
-
-# pg_dump runs as the postgres user over the local socket (peer auth, as
-# in database.yml); the redirect keeps the dump root-owned in the set.
-- name: Update | Back up the PostgreSQL database
-  ansible.builtin.shell:
-    cmd: 'runuser -u postgres -- pg_dump -Fc {{ n8n_db_name }} > {{ __n8n_backup_set }}/db.dump'
-    creates: '{{ __n8n_backup_set }}/db.dump'
-  when:
-    - __n8n_backup_set is defined
-    - n8n_db_type == 'postgresdb'
-
-# Oldest first; the set just written counts toward the retention, and the
-# set named for a restore is never removed.
-- name: Update | Remove backup sets beyond the retention
-  ansible.builtin.file:
-    path: '{{ item }}'
-    state: absent
-  loop: >-
-    {{ __n8n_old_sets[: ([0, __n8n_old_sets | length + 1 - (n8n_update_backup_keep | int)] | max)] }}
-  vars:
-    __n8n_old_sets: >-
-      {{ __n8n_backup_sets.files | default([]) | sort(attribute='mtime')
-         | map(attribute='path') | reject('search', '/' ~ n8n_update_restore ~ '$')
-         | list }}
-  when: __n8n_backup_set is defined
 
 #
 # Restore
@@ -169,7 +128,7 @@
 
 - name: Update | Restore the data directory
   ansible.builtin.unarchive:
-    src: '{{ n8n_update_backup_dir }}/{{ n8n_update_restore }}/data.tar.gz'
+    src: '{{ n8n_backup_dir }}/{{ n8n_update_restore }}/data.tar.gz'
     dest: '{{ n8n_user_home }}'
     remote_src: true
     owner: '{{ n8n_user }}'
@@ -208,7 +167,7 @@
   ansible.builtin.shell:
     cmd: >-
       runuser -u postgres -- pg_restore -d {{ n8n_db_name }}
-      < {{ n8n_update_backup_dir }}/{{ n8n_update_restore }}/db.dump
+      < {{ n8n_backup_dir }}/{{ n8n_update_restore }}/db.dump
   changed_when: true
   when:
     - n8n_update_restore | length > 0

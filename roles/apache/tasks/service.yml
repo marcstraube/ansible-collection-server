@@ -1,4 +1,51 @@
 ---
+# A new open file limit only reaches a freshly started main process, so a
+# change restarts Apache instead of reloading it.
+- name: Service | Create systemd drop-in directory
+  ansible.builtin.file:
+    path: '/etc/systemd/system/{{ __apache_service_name }}.service.d'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: apache_limit_nofile | string | length > 0
+
+- name: Service | Deploy open file limit drop-in
+  ansible.builtin.template:
+    src: limits.conf.j2
+    dest: '/etc/systemd/system/{{ __apache_service_name }}.service.d/limits.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  when: apache_limit_nofile | string | length > 0
+  notify:
+    - Reload Apache systemd units
+    - Restart Apache
+
+- name: Service | Remove open file limit drop-in
+  ansible.builtin.file:
+    path: '/etc/systemd/system/{{ __apache_service_name }}.service.d/limits.conf'
+    state: absent
+  when: apache_limit_nofile | string | length == 0
+  notify:
+    - Reload Apache systemd units
+    - Restart Apache
+
+# Debian starts Apache through apachectl, which applies its own
+# 'ulimit -n' from APACHE_ULIMIT_MAX_FILES (8192 when unset) and so overrides
+# the systemd limit. Without a limit the distro's commented default returns.
+- name: Service | Set the apachectl open file limit (Debian)
+  ansible.builtin.lineinfile:
+    path: /etc/apache2/envvars
+    regexp: '^#?\s*APACHE_ULIMIT_MAX_FILES='
+    line: >-
+      {{ (apache_limit_nofile | string | length > 0)
+         | ternary("APACHE_ULIMIT_MAX_FILES='ulimit -n " ~ apache_limit_nofile ~ "'",
+                   "#APACHE_ULIMIT_MAX_FILES='ulimit -n 65536'") }}
+  when: ansible_facts['os_family'] == 'Debian'
+  notify:
+    - Restart Apache
+
 - name: Service | Manage Apache service
   ansible.builtin.systemd_service:
     name: '{{ __apache_service_name }}'

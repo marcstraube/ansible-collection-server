@@ -37,16 +37,41 @@ postgresql_version: '17'
 postgresql_repo: 'distro'
 
 #
+# Package Updates
+#
+
+# State of the PostgreSQL packages:
+#   'present' installs missing packages and never updates (default).
+#   'latest'  updates the installed PostgreSQL packages in one transaction
+#             and restarts the PostgreSQL service.
+# Pass 'latest' for a targeted update instead of setting it in inventory:
+#   --tags postgresql -e postgresql_packages_state=latest
+# Arch Linux: a pacman IgnorePkg drop-in keeps the system upgrade away from
+# PostgreSQL, so a new major version cannot replace the server of an
+# existing cluster. 'latest' installs the version of the package databases
+# of the last system upgrade and fails when it is a new major version; run
+# it together with the system upgrade:
+#   --tags system-update,postgresql -e postgresql_packages_state=latest
+postgresql_packages_state: 'present'
+
+# Lowest acceptable server version, checked after the package task. Meant to
+# be passed with the update command to confirm that the repository already
+# carries a fix; the run fails when the installed version is older:
+#   -e postgresql_packages_minimum=17.7
+postgresql_packages_minimum: ''
+
+#
 # Network
 #
 
 # Listen addresses (* = all, localhost = local only)
 postgresql_listen_addresses: 'localhost'
 
-# Port
+# Port. The role tasks, the backup script and the restore connect on it.
 postgresql_port: 5432
 
-# Unix socket directory
+# Unix socket directories (comma-separated). The role tasks, the backup
+# script and the restore connect through the first one.
 postgresql_unix_socket_directories: '/var/run/postgresql'
 
 # Maximum connections
@@ -289,21 +314,51 @@ postgresql_extensions: []
 #
 # Backup
 #
+# The script /usr/local/bin/postgresql-backup writes one compressed
+# plain-format dump per database (<database>_<YYYYmmdd_HHMMSS>.sql.gz,
+# pg_dump) and one of the roles and tablespaces
+# (globals_<YYYYmmdd_HHMMSS>.dumpall.sql.gz, pg_dumpall --globals-only,
+# a name no database dump can take); postgresql-backup.timer runs it on a
+# schedule. The retention is count-based per database and for the globals,
+# so a failing timer never removes the last good dump.
 
-# Enable automated backup via cron
+# Back up the databases on the schedule of the timer
 postgresql_backup_enabled: false
 
-# Backup directory
+# Directory for the dumps
 postgresql_backup_dir: '/var/backups/postgresql'
 
-# Backup schedule (cron format)
-postgresql_backup_schedule: '0 3 * * *'
+# Dumps to keep per database and of the globals
+postgresql_backup_keep: 7
 
-# Backup retention days
-postgresql_backup_retention: 7
-
-# Databases to backup (empty = all)
+# Databases to back up (empty = all except the templates and postgres)
 postgresql_backup_databases: []
+
+# Enable and start the postgresql-backup timer
+postgresql_backup_timer_enabled: true
+
+# Schedule of the timer (systemd OnCalendar). 03:00 is the time of the
+# former cron default '0 3 * * *'.
+postgresql_backup_on_calendar: '*-*-* 03:00:00'
+
+# DEPRECATED: Use postgresql_backup_on_calendar instead (removed in the next major version).
+# While set, the role runs the backup from a cron job of root in this cron
+# format instead of the timer; unset, it removes that cron job.
+# postgresql_backup_schedule: '0 3 * * *'
+
+# DEPRECATED: Use postgresql_backup_keep instead (removed in the next major version)
+# postgresql_backup_retention: {{ postgresql_backup_keep }}
+
+# Restore
+
+# Dump in postgresql_backup_dir to restore, e.g.
+# 'myapp_20261104_030000.sql.gz'. Passed with -e for one run, never set in
+# the inventory. The database in the name must be managed through
+# postgresql_databases. The role dumps the current state of the database
+# first, then drops it (terminating its connections), recreates it with
+# the settings of its postgresql_databases entry and loads the dump with
+# psql in one transaction.
+postgresql_restore: ''
 
 #
 # Firewall

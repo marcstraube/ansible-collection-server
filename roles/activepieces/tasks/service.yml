@@ -1,0 +1,151 @@
+---
+# The unit name depends on the packages: postgresql.service from the
+# distribution, postgresql-<version>.service from PGDG on Rocky Linux.
+- name: Service | List the PostgreSQL units
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - list-unit-files
+      - --type=service
+      - --no-legend
+      - --plain
+      - 'postgresql*.service'
+  register: __activepieces_db_unit_files
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - __activepieces_db_local | bool
+    - activepieces_db_service | length == 0
+
+- name: Service | Set PostgreSQL unit fact
+  ansible.builtin.set_fact:
+    __activepieces_db_service: >-
+      {{ activepieces_db_service if activepieces_db_service | length > 0
+         else (__activepieces_db_units | first if __activepieces_db_units | length == 1 else '') }}
+  vars:
+    __activepieces_db_units: >-
+      {{ __activepieces_db_unit_files.stdout_lines | default([])
+         | map('split') | map('first')
+         | select('match', __activepieces_db_unit_pattern) | list }}
+  when: __activepieces_db_local | bool
+
+# In check mode on a new host the postgresql role has not installed the
+# server yet, so a missing unit is only an error in a real run.
+- name: Service | Validate the PostgreSQL unit
+  ansible.builtin.assert:
+    that:
+      - __activepieces_db_service | length > 0
+    fail_msg: |
+      activepieces_db_host points to this host, but no single PostgreSQL
+      unit was found ({{ __activepieces_db_unit_files.stdout_lines | default([]) | join(', ') or 'none' }}).
+      Run the marcstraube.server.postgresql role before this role, or set
+      activepieces_db_service to the unit Activepieces depends on.
+  when:
+    - __activepieces_db_local | bool
+    - not ansible_check_mode
+
+- name: Service | Deploy systemd service file
+  ansible.builtin.template:
+    src: activepieces.service.j2
+    dest: '/etc/systemd/system/{{ __activepieces_service_name }}'
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - Reload Activepieces systemd units
+    - Restart Activepieces
+
+- name: Service | Flush handlers to apply pending restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Service | Manage Activepieces service
+  ansible.builtin.systemd_service:
+    name: '{{ __activepieces_service_name }}'
+    enabled: "{{ activepieces_service_enabled | bool }}"
+    state: "{{ activepieces_service_enabled | bool | ternary('started', 'stopped') }}"
+    daemon_reload: true
+
+# /api/v1/health answers 200 once the database is connected and migrated,
+# so a version change with long migrations is covered as well. The
+# container publishes plain HTTP on 127.0.0.1; TLS ends at the reverse
+# proxy. The wait verifies the deployment, which a check run does not
+# perform. When Activepieces does not become healthy, the end of the unit
+# journal is shown before the run fails.
+- name: Service | Wait for Activepieces to be healthy
+  when:
+    - activepieces_service_enabled | bool
+    - not ansible_check_mode
+  block:
+    - name: Service | Wait for the health endpoint
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1:{{ activepieces_port }}/api/v1/health'
+        status_code: 200
+        timeout: 10
+      register: __activepieces_healthy
+      until: __activepieces_healthy.status | default(0) == 200
+      retries: '{{ ((activepieces_ready_timeout | int) / 5) | round(0, "ceil") | int }}'
+      delay: 5
+  rescue:
+    - name: Service | Read the end of the Activepieces journal
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - --unit={{ __activepieces_service_name }}
+          - --lines=100
+          - --no-pager
+      register: __activepieces_journal
+      changed_when: false
+      failed_when: false
+
+    - name: Service | Fail with the end of the Activepieces journal
+      ansible.builtin.fail:
+        msg: |
+          Activepieces did not report healthy on
+          http://127.0.0.1:{{ activepieces_port }}/api/v1/health within
+          {{ activepieces_ready_timeout }} seconds. End of the journal:
+          {{ __activepieces_journal.stdout | default('') }}
+
+#
+# Images of the replaced release
+#
+# Every release leaves its image in the podman storage of the activepieces
+# user. After a version change, once the health check has passed (a failed
+# update keeps the previous image), every tag of activepieces_podman_image
+# except the one the service runs is removed. Other repositories are not
+# touched, so the images of other containers stay. The version change fact
+# comes from update.yml; a run limited to the service tag has not set it
+# and removes nothing.
+
+- name: Service | List the images of the Activepieces user
+  containers.podman.podman_image_info:
+  register: __activepieces_images
+  become: true
+  become_user: '{{ activepieces_user }}'
+  environment:
+    XDG_RUNTIME_DIR: '{{ __activepieces_runtime_dir }}'
+  when:
+    - activepieces_update_remove_old_images | bool
+    - __activepieces_version_changed | default(false) | bool
+    - activepieces_service_enabled | bool
+    - not ansible_check_mode
+
+# Removing a tag untags the image and deletes it with its last tag.
+- name: Service | Remove the images of other Activepieces releases
+  containers.podman.podman_image:
+    name: '{{ item }}'
+    state: absent
+  loop: >-
+    {{ __activepieces_images.images | default([])
+       | map(attribute='RepoTags') | map('default', [], true) | flatten | unique
+       | select('match', '^' ~ (activepieces_podman_image | regex_escape) ~ ':')
+       | reject('equalto', activepieces_podman_image ~ ':' ~ activepieces_version) | list }}
+  become: true
+  become_user: '{{ activepieces_user }}'
+  environment:
+    XDG_RUNTIME_DIR: '{{ __activepieces_runtime_dir }}'
+  when:
+    - activepieces_update_remove_old_images | bool
+    - __activepieces_version_changed | default(false) | bool
+    - activepieces_service_enabled | bool
+    - not ansible_check_mode

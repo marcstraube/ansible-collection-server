@@ -1,6 +1,6 @@
 {{ ansible_managed | comment }}
 
-<VirtualHost *:{{ item.listen_port | default(80) }}>
+<VirtualHost {{ item.listen_address | default('*') }}:{{ item.listen_port | default(80) }}>
     ServerName {{ item.server_name }}
 {% if item.server_alias is defined %}
 {% for alias in item.server_alias %}

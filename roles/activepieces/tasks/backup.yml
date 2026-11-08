@@ -1,0 +1,54 @@
+---
+# Deploys the backup script with the oneshot service and the timer that
+# run it. Imported before the update tasks, which run the script for the
+# set they take before a version change or a restore. The unit files are
+# always deployed; the toggles only decide whether the timer runs.
+
+- name: Backup | Create backup directory
+  ansible.builtin.file:
+    path: '{{ activepieces_backup_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Backup | Deploy backup script
+  ansible.builtin.template:
+    src: activepieces-backup.sh.j2
+    dest: '{{ __activepieces_backup_script }}'
+    owner: root
+    group: root
+    mode: '0750'
+
+- name: Backup | Deploy backup service file
+  ansible.builtin.template:
+    src: activepieces-backup.service.j2
+    dest: '/etc/systemd/system/{{ __activepieces_backup_service_name }}'
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload Activepieces systemd units
+
+- name: Backup | Deploy backup timer file
+  ansible.builtin.template:
+    src: activepieces-backup.timer.j2
+    dest: '/etc/systemd/system/{{ __activepieces_backup_timer_name }}'
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - Reload Activepieces systemd units
+    - Restart Activepieces backup timer
+
+# A check run has not deployed the unit yet, so report the failure and
+# continue.
+- name: Backup | Manage backup timer
+  ansible.builtin.systemd_service:
+    name: '{{ __activepieces_backup_timer_name }}'
+    enabled: '{{ __activepieces_backup_timer_active }}'
+    state: "{{ __activepieces_backup_timer_active | ternary('started', 'stopped') }}"
+    daemon_reload: true
+  vars:
+    __activepieces_backup_timer_active: >-
+      {{ activepieces_backup_enabled | bool and activepieces_backup_timer_enabled | bool }}
+  ignore_errors: '{{ ansible_check_mode }}'

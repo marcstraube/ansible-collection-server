@@ -1,0 +1,31 @@
+---
+# =============================================================================
+# Activepieces Workflow Automation Playbook
+# =============================================================================
+# Activepieces stack: podman, optional postgresql, pki-issued certificates,
+# activepieces and nginx as TLS frontend. The stack and its order live in
+# tasks/activepieces.yml; this play adds the Arch Linux system update in
+# front of it.
+#
+# Usage:
+#   ansible-playbook marcstraube.server.activepieces -i inventory/
+#   ansible-playbook marcstraube.server.activepieces -i inventory/ --tags activepieces
+#
+# Configure roles via inventory variables (group_vars/host_vars).
+# See each role's defaults/main.yml for available variables.
+# =============================================================================
+
+- name: Activepieces Workflow Automation
+  hosts: activepieces_servers
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Activepieces | Import system update tasks
+      ansible.builtin.import_tasks:
+        file: tasks/system_update.yml
+
+  tasks:
+    - name: Activepieces | Import activepieces tasks
+      ansible.builtin.import_tasks:
+        file: tasks/activepieces.yml

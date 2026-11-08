@@ -1,0 +1,303 @@
+---
+# The deprecated name of the backup retention still takes effect; the
+# replacement is the only name the tasks and templates use.
+- name: Main | Handle the deprecated mariadb_backup_retention
+  ansible.builtin.set_fact:
+    mariadb_backup_keep: '{{ mariadb_backup_retention | default(mariadb_backup_keep) | int }}'
+  when: mariadb_backup_retention is defined
+  tags:
+    - always
+
+- name: Main | Warn about the deprecated mariadb_backup_retention
+  ansible.builtin.debug:
+    msg: >-
+      mariadb_backup_retention is deprecated and will be removed in the next
+      major version. Use mariadb_backup_keep instead.
+  when:
+    - mariadb_enabled | bool
+    - mariadb_backup_retention is defined
+  tags:
+    - always
+
+# The cron job stays while the deprecated schedule is set (backup.yml)
+- name: Main | Warn about the deprecated mariadb_backup_schedule
+  ansible.builtin.debug:
+    msg: >-
+      mariadb_backup_schedule is deprecated and will be removed in the next
+      major version. While it is set, the backup runs from cron and
+      mariadb-backup.timer stays stopped. Remove it and use
+      mariadb_backup_on_calendar instead (systemd OnCalendar, default
+      'daily'); the role then removes its cron job and starts the timer.
+  when:
+    - mariadb_enabled | bool
+    - mariadb_backup_schedule is defined
+  tags:
+    - always
+
+- name: Main | Load OS-specific variables
+  ansible.builtin.include_vars: '{{ item }}'
+  with_first_found:
+    - files:
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}.yml'
+      paths:
+        - 'vars'
+  tags:
+    - always
+
+- name: Main | Validate package source
+  ansible.builtin.assert:
+    that:
+      - mariadb_repo in ['distro', 'upstream']
+      - mariadb_arch_package in ['mariadb', 'mariadb-lts']
+    fail_msg: >-
+      mariadb_repo must be 'distro' or 'upstream' (got '{{ mariadb_repo }}'),
+      mariadb_arch_package must be 'mariadb' or 'mariadb-lts' (got
+      '{{ mariadb_arch_package }}')
+  when: mariadb_enabled | bool
+  tags:
+    - always
+
+# Arch Linux ignores the version: the official repository carries one
+# rolling version per package variant. The distribution carries a fixed set
+# of versions; the MariaDB Foundation repository carries every release from
+# a platform minimum on, and a version it does not carry fails in the
+# package task.
+- name: Main | Validate the version for the distribution packages
+  ansible.builtin.assert:
+    that:
+      - __mariadb_version in __mariadb_distro_versions
+    fail_msg: >-
+      MariaDB {{ __mariadb_version }} is not available with mariadb_repo
+      'distro' on {{ ansible_facts['distribution'] }}
+      {{ ansible_facts['distribution_major_version'] }}. Available:
+      {{ __mariadb_distro_versions | join(', ') }}; other versions come
+      from mariadb_repo 'upstream'.
+  when:
+    - mariadb_enabled | bool
+    - ansible_facts['os_family'] != 'Archlinux'
+    - not __mariadb_upstream | bool
+  tags:
+    - always
+
+- name: Main | Validate the version for the upstream repository
+  ansible.builtin.assert:
+    that:
+      - __mariadb_version is match('^[0-9]+\.[0-9]+$')
+      - __mariadb_version is version(__mariadb_upstream_minimum_version, '>=')
+    fail_msg: >-
+      MariaDB {{ __mariadb_version }} is not available with mariadb_repo
+      'upstream' on {{ ansible_facts['distribution'] }}
+      {{ ansible_facts['distribution_major_version'] }}: the repository
+      carries {{ __mariadb_upstream_minimum_version }} or later, and
+      mariadb_version has to be a major version (X.Y).
+  when:
+    - mariadb_enabled | bool
+    - ansible_facts['os_family'] != 'Archlinux'
+    - __mariadb_upstream | bool
+  tags:
+    - always
+
+- name: Main | Validate package update settings
+  ansible.builtin.assert:
+    that:
+      - mariadb_packages_state in ['present', 'latest']
+      - mariadb_packages_minimum is string or mariadb_packages_minimum is mapping
+    fail_msg: >-
+      mariadb_packages_state must be 'present' or 'latest' (got
+      '{{ mariadb_packages_state }}'), mariadb_packages_minimum must be a
+      version string, e.g. '11.8.6', or a mapping per platform
+  when: mariadb_enabled | bool
+  tags:
+    - always
+
+# A mapping selects the minimum by '<os_family>-<major>', then
+# '<os_family>'. A host without a matching key fails here, before any
+# change, so a platform left out of the mapping cannot pass unchecked.
+- name: Main | Select the minimum version for this platform
+  ansible.builtin.set_fact:
+    __mariadb_minimum: >-
+      {{ (mariadb_packages_minimum[__mariadb_minimum_key] if __mariadb_minimum_key | length > 0 else '')
+         if mariadb_packages_minimum is mapping
+         else mariadb_packages_minimum }}
+    __mariadb_minimum_key_found: '{{ mariadb_packages_minimum is not mapping or __mariadb_minimum_key | length > 0 }}'
+  vars:
+    __mariadb_minimum_key: >-
+      {{ ([ansible_facts['os_family'] ~ '-' ~ ansible_facts['distribution_major_version'],
+           ansible_facts['os_family']]
+          | select('in', mariadb_packages_minimum) | list + [''])
+         | first
+         if mariadb_packages_minimum is mapping
+         else '' }}
+  when: mariadb_enabled | bool
+  tags:
+    - always
+
+# The value reaches dpkg, rpm and vercmp as an argument; only characters of
+# a package version are accepted.
+- name: Main | Validate the minimum version for this platform
+  ansible.builtin.assert:
+    that:
+      - __mariadb_minimum_key_found | bool
+      - __mariadb_minimum | string is match('^[0-9A-Za-z.+~:_-]*$')
+    fail_msg: >-
+      {{ ('mariadb_packages_minimum has no key for this host (expected '
+          ~ ansible_facts['os_family'] ~ '-' ~ ansible_facts['distribution_major_version']
+          ~ ' or ' ~ ansible_facts['os_family'] ~ ')')
+         if not (__mariadb_minimum_key_found | bool)
+         else ('mariadb_packages_minimum ' ~ __mariadb_minimum ~ ' is not a package version') }}
+    quiet: true
+  when: mariadb_enabled | bool
+  tags:
+    - always
+
+# Guard against an unintended major-version upgrade: a changed
+# mariadb_version or mariadb_repo on an installed host would replace the
+# server binaries while the data directory keeps its version. The installed
+# server package (any source, any EL package set) is compared with the
+# requested one before any change. Tagged always so that every stage sees
+# the same precondition. Arch Linux ignores the version (rolling release).
+- name: Main | Gather package facts for the major version guard
+  ansible.builtin.package_facts:
+  when:
+    - mariadb_enabled | bool
+    - ansible_facts['os_family'] != 'Archlinux'
+  tags:
+    - always
+
+- name: Main | Record the installed server package
+  ansible.builtin.set_fact:
+    __mariadb_installed_server_package: >-
+      {{ (ansible_facts['packages'] | list
+          | select('match', __mariadb_installed_server_pattern) | list + ['']) | first }}
+  when:
+    - mariadb_enabled | bool
+    - ansible_facts['os_family'] != 'Archlinux'
+  tags:
+    - always
+
+- name: Main | Record the installed server major version
+  ansible.builtin.set_fact:
+    __mariadb_installed_server_major: >-
+      {{ ((ansible_facts['packages'][__mariadb_installed_server_package]
+           | default([{'version': ''}]) | first)['version']
+          | regex_replace('^[0-9]+:', '')
+          | regex_search('^([0-9]+\.[0-9]+)', '\1') | default([''], true)) | first }}
+  when:
+    - mariadb_enabled | bool
+    - ansible_facts['os_family'] != 'Archlinux'
+  tags:
+    - always
+
+- name: Main | Assert the installed server matches the requested version
+  ansible.builtin.assert:
+    that:
+      - __mariadb_installed_server_package | length == 0
+        or (__mariadb_installed_server_package == __mariadb_server_package
+            and __mariadb_installed_server_major == __mariadb_version)
+    fail_msg: |
+      {{ __mariadb_installed_server_package }} {{ __mariadb_installed_server_major }} is
+      installed, the inventory requests MariaDB {{ __mariadb_version }} from
+      mariadb_repo '{{ mariadb_repo }}' ({{ __mariadb_server_package }}).
+      The role does not perform major version upgrades or switch the package
+      source on an installed host. Either restore the previous values, or
+      upgrade by hand: stop the server, install the requested packages, run
+      mariadb-upgrade, then rerun the role.
+  when:
+    - mariadb_enabled | bool
+    - ansible_facts['os_family'] != 'Archlinux'
+  tags:
+    - always
+
+# Checked before any change: a restore of a database the role does not
+# manage, or with the server stopped, must not touch the host.
+- name: Main | Validate the restore request
+  ansible.builtin.assert:
+    that:
+      - mariadb_service_enabled | bool
+      - mariadb_restore is match(__mariadb_backup_dump_regex)
+      - __mariadb_restore_database in (mariadb_databases | map(attribute='name') | list)
+    fail_msg: >-
+      mariadb_restore must name a dump in mariadb_backup_dir,
+      <database>_<YYYYmmdd_HHMMSS>.sql.gz (got '{{ mariadb_restore }}'), of
+      a database managed through mariadb_databases
+      ({{ mariadb_databases | map(attribute='name') | join(', ') }}), and
+      the restore needs mariadb_service_enabled.
+  when:
+    - mariadb_enabled | bool
+    - mariadb_restore | length > 0
+  tags:
+    - always
+
+- name: Main | Import repository tasks
+  ansible.builtin.import_tasks: repos.yml
+  when:
+    - mariadb_enabled | bool
+    - __mariadb_upstream | bool
+    - ansible_facts['os_family'] != 'Archlinux'
+  tags:
+    - mariadb
+    - mariadb:install
+
+- name: Main | Import install tasks
+  ansible.builtin.import_tasks: install.yml
+  when: mariadb_enabled | bool
+  tags:
+    - mariadb
+    - mariadb:install
+
+- name: Main | Import configure tasks
+  ansible.builtin.import_tasks: configure.yml
+  when: mariadb_enabled | bool
+  tags:
+    - mariadb
+    - mariadb:configure
+
+- name: Main | Import service tasks
+  ansible.builtin.import_tasks: service.yml
+  when: mariadb_enabled | bool
+  tags:
+    - mariadb
+    - mariadb:service
+
+- name: Main | Import users tasks
+  ansible.builtin.import_tasks: users.yml
+  when:
+    - mariadb_enabled | bool
+    - mariadb_service_enabled | bool
+  tags:
+    - mariadb
+    - mariadb:users
+
+- name: Main | Import databases tasks
+  ansible.builtin.import_tasks: databases.yml
+  when:
+    - mariadb_enabled | bool
+    - mariadb_service_enabled | bool
+  tags:
+    - mariadb
+    - mariadb:databases
+
+- name: Main | Import backup tasks
+  ansible.builtin.import_tasks: backup.yml
+  when: mariadb_enabled | bool
+  tags:
+    - mariadb
+    - mariadb:backup
+
+- name: Main | Include restore tasks
+  ansible.builtin.include_tasks:
+    file: restore.yml
+    apply:
+      tags:
+        - mariadb
+        - mariadb:restore
+  when:
+    - mariadb_enabled | bool
+    - mariadb_restore | length > 0
+  tags:
+    - mariadb
+    - mariadb:restore

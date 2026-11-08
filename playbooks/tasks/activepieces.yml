@@ -1,0 +1,79 @@
+---
+# =============================================================================
+# Activepieces Workflow Automation Tasks
+# =============================================================================
+# Task file for Activepieces deployment — single source of truth.
+# Import it from a play with `ansible.builtin.import_tasks`.
+#
+# Stack: podman, optional postgresql, pki, activepieces, nginx.
+#
+# Activepieces listens on localhost over plain HTTP; nginx terminates TLS in
+# front of it on a host name of its own. The nginx site comes from the
+# inventory (nginx_sites), the certificate from marcstraube.common.pki
+# (pki_server_certs): an internal CA or a certificate issued elsewhere and
+# deployed through pki. There is no ACME step, so this file targets internal
+# hosts. A public host that needs Let's Encrypt certificates has to add the
+# certbot role between nginx and the site rollout, as web_server.yml does for
+# the web stack.
+#
+# pki runs again in this play, but finds the certificates an earlier play (the
+# base play) already deployed and changes nothing, so nginx would never hear of
+# them: notifications do not cross plays. pki records the change as
+# pki_cert_material_changed; the forward task at the end notifies
+# 'Reload cert services' again within this play.
+#
+# Roles are imported statically (import_role) so their internal sub-tags are
+# exposed to --tags / --list-tags. Run `ansible-playbook … --list-tags` to see
+# the full set. Dynamic include_role would hide sub-tags behind the include.
+# =============================================================================
+
+- name: Activepieces | Import podman role
+  ansible.builtin.import_role:
+    name: marcstraube.common.podman
+  tags:
+    - activepieces
+    - podman
+  when: activepieces_enabled | bool
+
+- name: Activepieces | Import postgresql role
+  ansible.builtin.import_role:
+    name: marcstraube.server.postgresql
+  tags:
+    - activepieces
+    - postgresql
+  when:
+    - activepieces_enabled | bool
+    - activepieces_db_type | default('PGLITE') == 'POSTGRES'
+
+- name: Activepieces | Import pki role
+  ansible.builtin.import_role:
+    name: marcstraube.common.pki
+  tags:
+    - activepieces
+    - pki
+  when: activepieces_enabled | bool
+
+- name: Activepieces | Import activepieces role
+  ansible.builtin.import_role:
+    name: marcstraube.server.activepieces
+  tags:
+    - activepieces
+  when: activepieces_enabled | bool
+
+- name: Activepieces | Import nginx role
+  ansible.builtin.import_role:
+    name: marcstraube.server.nginx
+  tags:
+    - activepieces
+    - nginx
+  when: activepieces_enabled | bool
+
+- name: Activepieces | Forward certificate changes from an earlier play
+  ansible.builtin.debug:
+    msg: 'Certificate material changed earlier in this run'
+  changed_when: true
+  when: pki_cert_material_changed | default(false) | bool
+  notify: Reload cert services
+  tags:
+    - activepieces
+    - pki
