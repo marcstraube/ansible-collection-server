@@ -14,6 +14,23 @@
       ansible.builtin.include_vars:
         file: '../../vars/main.yml'
 
+    # The scenario binds the indexer to IPv4; the URL rendering for an
+    # IPv6 address is checked on the variables alone
+    - name: Verify | Assert the indexer URL brackets an IPv6 address
+      ansible.builtin.assert:
+        that:
+          - __wazuh_server_indexer_url == 'https://[fd00::10]:9200'
+          - __wazuh_server_indexer_address == '[fd00::10]'
+        fail_msg: 'Got {{ __wazuh_server_indexer_url }} for the IPv6 address fd00::10'
+      vars:
+        wazuh_server_indexer_network_host: 'fd00::10'
+
+    - name: Verify | Assert the indexer URL keeps an IPv4 address
+      ansible.builtin.assert:
+        that:
+          - __wazuh_server_indexer_url == 'https://127.0.0.1:9200'
+        fail_msg: 'Got {{ __wazuh_server_indexer_url }} for 127.0.0.1'
+
     - name: Verify | Gather package facts
       ansible.builtin.package_facts:
         manager: auto
@@ -228,6 +245,24 @@
       delay: 10
       until: __verify_dashboard_status is not failed
 
+    - name: Verify | Read dashboard configuration
+      ansible.builtin.slurp:
+        src: '{{ __wazuh_server_dashboard_config_file }}'
+      register: __verify_dashboard_config
+      no_log: true
+
+    - name: Verify | Assert dashboard session and start page settings
+      ansible.builtin.assert:
+        that:
+          - __verify_config['opensearch_security.cookie.ttl'] == wazuh_server_dashboard_session_ttl
+          - __verify_config['opensearch_security.session.ttl'] == wazuh_server_dashboard_session_ttl
+          - __verify_config['opensearch_security.session.keepalive'] == wazuh_server_dashboard_session_keepalive
+          - __verify_config['uiSettings.overrides.defaultRoute'] == wazuh_server_dashboard_default_route
+        fail_msg: 'opensearch_dashboards.yml does not render the dashboard session and start page variables'
+        quiet: true
+      vars:
+        __verify_config: '{{ __verify_dashboard_config.content | b64decode | from_yaml }}'
+
     - name: Verify | Read dashboard plugin configuration
       ansible.builtin.slurp:
         src: '{{ __wazuh_server_dashboard_plugin_config_file }}'
@@ -315,11 +350,65 @@
       ansible.builtin.assert:
         that:
           - "'<host>https://127.0.0.1:9200</host>' in __verify_manager_indexer_section"
-        fail_msg: 'The <indexer> section of ossec.conf does not point to https://127.0.0.1:9200'
+          - "'<certificate>' not in __verify_manager_indexer_section"
+          - "'<key>' not in __verify_manager_indexer_section"
+        fail_msg: >-
+          The <indexer> section of ossec.conf does not point to
+          https://127.0.0.1:9200 or still has a client certificate or key
       vars:
         __verify_manager_indexer_section: >-
           {{ __verify_manager_config.content | b64decode
              | regex_search('(?s)<indexer>.*?</indexer>') | default('', true) }}
+
+    - name: Verify | Stat the manager keystore credentials hash
+      ansible.builtin.stat:
+        path: '{{ __wazuh_server_manager_keystore_hash_file }}'
+      register: __verify_keystore_hash
+
+    - name: Verify | Assert the manager keystore credentials hash is root-only
+      ansible.builtin.assert:
+        that:
+          - __verify_keystore_hash.stat.exists
+          - __verify_keystore_hash.stat.pw_name == 'root'
+          - __verify_keystore_hash.stat.mode == '0600'
+        fail_msg: '{{ __wazuh_server_manager_keystore_hash_file }} is missing or not root-only'
+
+    # The manager writes its indexer connections to ossec.log after each
+    # start; only the lines since the last start of wazuh-modulesd count.
+    # While the indexer is still starting, the connector logs failed
+    # attempts and retries; every index has to connect in the end.
+    - name: Verify | Wait for the manager to connect to the indexer
+      ansible.builtin.slurp:
+        src: '{{ __wazuh_server_manager_dir }}/logs/ossec.log'
+      register: __verify_ossec_log
+      until:
+        - __verify_connector_connected | length > 0
+        - __verify_connector_failed | difference(__verify_connector_connected) | length == 0
+      retries: 30
+      delay: 10
+      vars:
+        __verify_connector_log: >-
+          {{ (__verify_ossec_log.content | default('') | b64decode)
+             .split('wazuh-modulesd:router: INFO: Loaded router module.') | last }}
+        __verify_connector_connected: >-
+          {{ __verify_connector_log
+             | regex_findall('IndexerConnector initialized successfully for index: ([^ ]+?)[.]?$', multiline=True)
+             | unique | list }}
+        __verify_connector_failed: >-
+          {{ __verify_connector_log
+             | regex_findall("IndexerConnector initialization failed for index '([^']+)'")
+             | unique | list }}
+
+    - name: Verify | Assert the manager indexer connection has no errors
+      ansible.builtin.assert:
+        that:
+          - __verify_connector_errors | length == 0
+        fail_msg: '{{ __verify_connector_errors }}'
+      vars:
+        __verify_connector_errors: >-
+          {{ ((__verify_ossec_log.content | b64decode)
+              .split('wazuh-modulesd:router: INFO: Loaded router module.') | last)
+             .splitlines() | select('search', 'indexer-connector: (ERROR|CRITICAL)') | list }}
 
     # The scenario sets a proxy: the drop-in is in place and the manager
     # daemons inherit the environment of the service

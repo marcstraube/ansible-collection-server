@@ -16,7 +16,7 @@ setup.ilm.enabled: false
 # Send events directly to Wazuh indexer
 output.elasticsearch:
   hosts:
-    - '{{ wazuh_server_indexer_network_host }}:{{ wazuh_server_indexer_http_port }}'
+    - '{{ __wazuh_server_indexer_address }}:{{ wazuh_server_indexer_http_port }}'
   protocol: https
   username: 'admin'
   password: {{ wazuh_server_indexer_admin_password | to_json }}

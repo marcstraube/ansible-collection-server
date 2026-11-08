@@ -173,6 +173,16 @@ wazuh_server_dashboard_service_enabled: true
 wazuh_server_dashboard_server_host: '0.0.0.0'
 wazuh_server_dashboard_server_port: 443
 
+# Lifetime of a dashboard login session and its cookie in milliseconds
+wazuh_server_dashboard_session_ttl: 900000
+
+# Extend the session on every request, so it only ends after
+# wazuh_server_dashboard_session_ttl without activity
+wazuh_server_dashboard_session_keepalive: true
+
+# Page the dashboard opens after the login
+wazuh_server_dashboard_default_route: '/app/wz-home'
+
 # Server address the dashboard offers for agent enrollment in the
 # "Deploy new agent" wizard; empty leaves the setting out
 wazuh_server_dashboard_enrollment_dns: ''
