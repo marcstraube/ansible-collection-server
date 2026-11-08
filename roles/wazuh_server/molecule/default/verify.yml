@@ -374,18 +374,30 @@
         fail_msg: '{{ __wazuh_server_manager_keystore_hash_file }} is missing or not root-only'
 
     # The manager writes its indexer connections to ossec.log after each
-    # start; only the lines since the last start of wazuh-modulesd count
+    # start; only the lines since the last start of wazuh-modulesd count.
+    # While the indexer is still starting, the connector logs failed
+    # attempts and retries; every index has to connect in the end.
     - name: Verify | Wait for the manager to connect to the indexer
       ansible.builtin.slurp:
         src: '{{ __wazuh_server_manager_dir }}/logs/ossec.log'
       register: __verify_ossec_log
-      until: >-
-        'IndexerConnector initialized successfully'
-        in (__verify_ossec_log.content | b64decode).split(__verify_modulesd_start) | last
+      until:
+        - __verify_connector_connected | length > 0
+        - __verify_connector_failed | difference(__verify_connector_connected) | length == 0
       retries: 30
       delay: 10
       vars:
-        __verify_modulesd_start: 'wazuh-modulesd:router: INFO: Loaded router module.'
+        __verify_connector_log: >-
+          {{ (__verify_ossec_log.content | default('') | b64decode)
+             .split('wazuh-modulesd:router: INFO: Loaded router module.') | last }}
+        __verify_connector_connected: >-
+          {{ __verify_connector_log
+             | regex_findall('IndexerConnector initialized successfully for index: ([^ ]+?)[.]?$', multiline=True)
+             | unique | list }}
+        __verify_connector_failed: >-
+          {{ __verify_connector_log
+             | regex_findall("IndexerConnector initialization failed for index '([^']+)'")
+             | unique | list }}
 
     - name: Verify | Assert the manager indexer connection has no errors
       ansible.builtin.assert:
@@ -396,8 +408,7 @@
         __verify_connector_errors: >-
           {{ ((__verify_ossec_log.content | b64decode)
               .split('wazuh-modulesd:router: INFO: Loaded router module.') | last)
-             .splitlines() | select('search', 'indexer-connector')
-             | select('search', '(WARNING|ERROR|CRITICAL)') | list }}
+             .splitlines() | select('search', 'indexer-connector: (ERROR|CRITICAL)') | list }}
 
     # The scenario sets a proxy: the drop-in is in place and the manager
     # daemons inherit the environment of the service
