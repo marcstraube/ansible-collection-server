@@ -1,6 +1,4 @@
 ---
-# A new open file limit only reaches a freshly started main process, so a
-# change restarts Apache instead of reloading it.
 - name: Service | Create systemd drop-in directory
   ansible.builtin.file:
     path: '/etc/systemd/system/{{ __apache_service_name }}.service.d'
@@ -8,8 +6,23 @@
     owner: root
     group: root
     mode: '0755'
-  when: apache_limit_nofile | string | length > 0
 
+# The distro units start Apache after network.target, which does not wait
+# for addresses: a Listen on a specific address fails at boot when the
+# address is not configured yet. The ordering only matters at boot, so a
+# change needs no restart.
+- name: Service | Deploy network-online drop-in
+  ansible.builtin.template:
+    src: network-online.conf.j2
+    dest: '/etc/systemd/system/{{ __apache_service_name }}.service.d/network-online.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - Reload Apache systemd units
+
+# A new open file limit only reaches a freshly started main process, so a
+# change restarts Apache instead of reloading it.
 - name: Service | Deploy open file limit drop-in
   ansible.builtin.template:
     src: limits.conf.j2

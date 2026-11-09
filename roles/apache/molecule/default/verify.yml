@@ -577,6 +577,32 @@
         __apache_limit_test: "{{ __apache_handler_test.content | b64decode | from_json }}"
 
     #
+    # Service Startup
+    #
+
+    - name: Verify | Read the ordering of the Apache unit
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - -p
+          - After
+          - -p
+          - Wants
+          - "{{ 'apache2' if ansible_facts['os_family'] == 'Debian' else 'httpd' }}"
+      register: __apache_unit_order
+      changed_when: false
+
+    - name: Verify | Assert Apache starts after network-online.target
+      ansible.builtin.assert:
+        that:
+          - __apache_unit_order.stdout is search('(?m)^After=.*\\bnetwork-online\\.target\\b')
+          - __apache_unit_order.stdout is search('(?m)^Wants=.*\\bnetwork-online\\.target\\b')
+        fail_msg: >-
+          Apache must want and start after network-online.target
+          ('{{ __apache_unit_order.stdout }}')
+
+    #
     # Sensitive Paths
     #
 
