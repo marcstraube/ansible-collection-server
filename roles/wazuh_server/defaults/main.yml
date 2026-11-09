@@ -13,13 +13,43 @@ wazuh_server_enabled: false
 # Wazuh dashboard on a single host.
 
 # Wazuh release, pins the indexer, manager and dashboard packages
-wazuh_server_version: '4.14.9'
+wazuh_server_version: '4.14.10'
 
 # Filebeat OSS release the Wazuh module supports
 wazuh_server_filebeat_version: '7.10.2'
 
 # Wazuh Filebeat module release
 wazuh_server_filebeat_module_version: '0.5'
+
+#
+# Updates
+#
+# A wazuh_server_version (or wazuh_server_filebeat_version) that differs
+# from the installed packages fails the run unless the update is requested.
+# The update follows the upstream order: indexer snapshot and backup set,
+# Filebeat and dashboard stopped, indexer with the shard allocation limited
+# to primaries, manager with the Filebeat module and alerts template, then
+# the dashboard. Wazuh does not support a downgrade; a lower version fails
+# the run.
+
+# Update the installed Wazuh packages to wazuh_server_version. Pass it with
+# the update command instead of setting it in inventory:
+#   --tags wazuh-server -e wazuh_server_update=true
+wazuh_server_update: false
+
+# Update without the indexer snapshot. Without
+# wazuh_server_indexer_snapshot_path the update fails before any change
+# unless this is true.
+wazuh_server_update_skip_snapshot: false
+
+# Directory for the backup sets taken before an update. A set
+# wazuh-<version>-<timestamp> holds /var/ossec/etc (agent keys, local rules
+# and decoders, enrollment key) and the indexer security configuration.
+wazuh_server_update_backup_path: '/var/backups/wazuh'
+
+# Backup sets and pre-update snapshots (update-<version>-<timestamp>) to
+# keep; the oldest beyond it are deleted
+wazuh_server_update_backup_keep: 3
 
 #
 # Certificates

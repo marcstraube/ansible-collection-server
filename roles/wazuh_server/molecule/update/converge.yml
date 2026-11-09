@@ -1,0 +1,73 @@
+---
+# Installs wazuh_server_update_previous_version (only on the first converge;
+# the idempotence run finds the updated release) and adds an older backup
+# set and pre-update snapshot for the rotation. Then updates to the role
+# default with wazuh_server_update.
+- name: Converge | Install the previous release
+  hosts: all
+  gather_facts: true
+
+  vars:
+    # vars/main.yml builds the indexer URL from these role defaults, which a
+    # play outside the role does not load
+    wazuh_server_indexer_network_host: '127.0.0.1'
+    wazuh_server_indexer_http_port: 9200
+
+  tasks:
+    - name: Converge | Gather package facts
+      ansible.builtin.package_facts:
+        manager: auto
+
+    # The role refreshes the package facts, and a block condition is
+    # evaluated for every task of the included role
+    - name: Converge | Decide on the previous release
+      ansible.builtin.set_fact:
+        __converge_install_previous: "{{ 'wazuh-manager' not in ansible_facts.packages }}"
+
+    - name: Converge | Install the previous release
+      when: __converge_install_previous | bool
+      block:
+        - name: Converge | Include wazuh_server role with the previous release  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            wazuh_server_version: '{{ wazuh_server_update_previous_version }}'
+
+        - name: Converge | Load shared variables
+          ansible.builtin.include_vars:
+            file: '../../vars/main.yml'
+
+        - name: Converge | Create an older backup set
+          ansible.builtin.file:
+            path: '/var/backups/wazuh/wazuh-4.14.10-20200101000000'
+            state: directory
+            owner: root
+            group: root
+            mode: '0700'
+
+        # An empty snapshot: no index matches
+        - name: Converge | Create an older pre-update snapshot
+          ansible.builtin.uri:
+            url: >-
+              {{ __wazuh_server_indexer_snapshot_repository_url
+              }}/update-4.14.10-20200101000000?wait_for_completion=true
+            method: PUT
+            body_format: json
+            body:
+              indices: 'molecule-none-*'
+              ignore_unavailable: true
+              include_global_state: false
+            client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+            client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+            ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+
+- name: Converge | Update to the role default
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Converge | Include wazuh_server role with the update  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        wazuh_server_update: true

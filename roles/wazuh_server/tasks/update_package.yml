@@ -1,0 +1,37 @@
+---
+# Updates one Wazuh package (__wazuh_server_update_package) to its pinned
+# version. The hold is released right before and set again right after, so
+# a failed update leaves the other packages held at their old version.
+
+- name: Update | Release package hold (Debian) - {{ __wazuh_server_update_package }}
+  ansible.builtin.dpkg_selections:
+    name: '{{ __wazuh_server_update_package }}'
+    selection: install
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Update | Release package version lock (RedHat) - {{ __wazuh_server_update_package }}
+  community.general.dnf_versionlock:
+    name: '{{ __wazuh_server_update_package }}'
+    state: absent
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Update | Update package - {{ __wazuh_server_update_package }}
+  ansible.builtin.package:
+    name: '{{ __wazuh_server_package_specs[__wazuh_server_update_package] }}'
+    state: present
+  retries: 3
+  delay: 5
+  register: __wazuh_server_update_package_result
+  until: __wazuh_server_update_package_result is not failed
+
+- name: Update | Hold package (Debian) - {{ __wazuh_server_update_package }}
+  ansible.builtin.dpkg_selections:
+    name: '{{ __wazuh_server_update_package }}'
+    selection: hold
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Update | Lock package version (RedHat) - {{ __wazuh_server_update_package }}
+  community.general.dnf_versionlock:
+    name: '{{ __wazuh_server_update_package }}'
+    state: present
+  when: ansible_facts['os_family'] == 'RedHat'
