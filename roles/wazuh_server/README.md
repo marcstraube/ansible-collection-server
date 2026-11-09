@@ -44,11 +44,11 @@ but are not actively tested. Use distro-specific vars overrides if needed.
 
 ### Installation
 
-| Variable                               | Default    | Description                                          |
-| -------------------------------------- | ---------- | ---------------------------------------------------- |
-| `wazuh_server_version`                 | `'4.14.9'` | Wazuh release (indexer, manager, dashboard packages) |
-| `wazuh_server_filebeat_version`        | `'7.10.2'` | Filebeat OSS release supported by the Wazuh module   |
-| `wazuh_server_filebeat_module_version` | `'0.5'`    | Wazuh Filebeat module release                        |
+| Variable                               | Default     | Description                                          |
+| -------------------------------------- | ----------- | ---------------------------------------------------- |
+| `wazuh_server_version`                 | `'4.14.10'` | Wazuh release (indexer, manager, dashboard packages) |
+| `wazuh_server_filebeat_version`        | `'7.10.2'`  | Filebeat OSS release supported by the Wazuh module   |
+| `wazuh_server_filebeat_module_version` | `'0.5'`     | Wazuh Filebeat module release                        |
 
 The role does not update Wazuh. With Wazuh installed, a
 `wazuh_server_version` that differs from the installed indexer, manager or
