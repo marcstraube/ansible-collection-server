@@ -1,0 +1,499 @@
+---
+# Included by install.yml with wazuh_server_update when an installed Wazuh
+# package differs from its configured version (never newer, install.yml
+# refuses a downgrade). Follows the upstream upgrade guide for a single
+# node: snapshot and backup set first, Filebeat and the dashboard stopped,
+# then the indexer, the manager with Filebeat and the dashboard. Each step
+# only updates packages that still differ, so a run after a failed step
+# continues with the remaining packages. The later stages of the role
+# deploy the configuration again and start the services.
+
+- name: Update | Set update facts
+  ansible.builtin.set_fact:
+    __wazuh_server_update_packages: '{{ __wazuh_server_version_mismatches }}'
+    __wazuh_server_update_installed_before: '{{ __wazuh_server_installed_versions }}'
+    # Version of the manager, else the indexer, else any installed package
+    __wazuh_server_update_from: >-
+      {{ __wazuh_server_installed_versions[
+           (['wazuh-manager', 'wazuh-indexer'] + __wazuh_server_installed_names)
+           | select('in', __wazuh_server_installed_names) | first] }}
+    __wazuh_server_update_timestamp: "{{ now(utc=true, fmt='%Y%m%d%H%M%S') }}"
+
+- name: Update | Set backup set facts
+  ansible.builtin.set_fact:
+    __wazuh_server_update_set_dir: >-
+      {{ wazuh_server_update_backup_path }}/{{ __wazuh_server_update_backup_prefix
+      }}{{ __wazuh_server_update_from }}-{{ __wazuh_server_update_timestamp }}
+    __wazuh_server_update_snapshot_name: >-
+      {{ __wazuh_server_update_snapshot_prefix }}{{ __wazuh_server_update_from
+      }}-{{ __wazuh_server_update_timestamp }}
+
+- name: Update | Assert the update preconditions
+  ansible.builtin.assert:
+    that:
+      - wazuh_server_indexer_service_enabled | bool
+      - wazuh_server_indexer_snapshot_path | length > 0
+        or wazuh_server_update_skip_snapshot | bool
+      - wazuh_server_update_backup_keep | int >= 1
+    fail_msg: >-
+      The update needs the running indexer (wazuh_server_indexer_service_enabled)
+      and an indexer snapshot (wazuh_server_indexer_snapshot_path), or
+      wazuh_server_update_skip_snapshot: true to update without it.
+      wazuh_server_update_backup_keep must be at least 1.
+    quiet: true
+
+#
+# Repository
+#
+# Nothing changes when the repository does not offer a configured version
+#
+
+- name: Update | Refresh apt cache (Debian)
+  ansible.builtin.apt:
+    update_cache: true
+  retries: 3
+  delay: 5
+  when: ansible_facts['os_family'] == 'Debian'
+
+# Cleared, not refreshed: dnf makecache --refresh keeps a stale mirror list
+- name: Update | Clear dnf metadata (RedHat)  # noqa: command-instead-of-module
+  ansible.builtin.command:
+    cmd: dnf clean metadata
+  changed_when: false
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Update | Refresh dnf metadata (RedHat)  # noqa: command-instead-of-module
+  ansible.builtin.command:
+    cmd: dnf makecache
+  retries: 3
+  delay: 5
+  register: __wazuh_server_update_makecache
+  until: __wazuh_server_update_makecache is not failed
+  changed_when: false
+  when: ansible_facts['os_family'] == 'RedHat'
+
+# Lists every version in the repository; the hold does not hide any
+- name: Update | List available versions
+  ansible.builtin.command:
+    argv: >-
+      {{ (ansible_facts['os_family'] == 'Debian')
+         | ternary(['apt-cache', 'madison', item],
+                   ['dnf', '-q', 'repoquery', '--showduplicates', '--qf', '%{version}\n', item]) }}
+  loop: '{{ __wazuh_server_update_packages }}'
+  register: __wazuh_server_update_available
+  changed_when: false
+
+- name: Update | Assert the repository offers the configured versions
+  ansible.builtin.assert:
+    that:
+      - __wazuh_server_expected_versions[item.item] in __wazuh_server_update_versions
+    fail_msg: >-
+      The Wazuh repository does not offer {{ item.item }}
+      {{ __wazuh_server_expected_versions[item.item] }}. Nothing was changed.
+    quiet: true
+  loop: '{{ __wazuh_server_update_available.results }}'
+  loop_control:
+    label: '{{ item.item }}'
+  vars:
+    # apt-cache madison: "pkg | 4.14.10-1 | URL"; repoquery: one version per line
+    __wazuh_server_update_versions: >-
+      {{ item.stdout_lines
+         | map('regex_replace', '^[^|]*\|\s*([^|\s]+)\s*\|.*$', '\1')
+         | map('regex_replace', '-[^-]*$', '')
+         | map('trim') | list }}
+
+#
+# Indexer Snapshot
+#
+
+- name: Update | Wait for the indexer
+  ansible.builtin.uri:
+    url: '{{ __wazuh_server_indexer_url }}/_cluster/health?wait_for_status=yellow&timeout=30s'
+    client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+    client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+    ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+  register: __wazuh_server_update_health
+  retries: 30
+  delay: 10
+  until: __wazuh_server_update_health is not failed
+
+- name: Update | Take the pre-update snapshot
+  when: wazuh_server_indexer_snapshot_path | length > 0
+  block:
+    - name: Update | Read snapshot repository
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_indexer_snapshot_repository_url }}'
+        client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+        client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+        ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+        status_code: [200, 404]
+      register: __wazuh_server_update_repository
+      retries: 5
+      delay: 10
+
+    - name: Update | Assert the snapshot repository is registered
+      ansible.builtin.assert:
+        that:
+          - __wazuh_server_update_repository.status == 200
+        fail_msg: >-
+          The snapshot repository {{ wazuh_server_indexer_snapshot_repository }}
+          is not registered yet. Run the role once without
+          wazuh_server_update to register it, then update.
+        quiet: true
+
+    - name: Update | Create the pre-update snapshot
+      ansible.builtin.uri:
+        url: >-
+          {{ __wazuh_server_indexer_snapshot_repository_url }}/{{ __wazuh_server_update_snapshot_name
+          }}?wait_for_completion=true
+        method: PUT
+        body_format: json
+        body:
+          include_global_state: true
+        client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+        client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+        ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+        timeout: 3600
+      register: __wazuh_server_update_snapshot
+      changed_when: true
+
+    - name: Update | Assert the pre-update snapshot succeeded
+      ansible.builtin.assert:
+        that:
+          - __wazuh_server_update_snapshot.json.snapshot.state == 'SUCCESS'
+        fail_msg: >-
+          The snapshot {{ __wazuh_server_update_snapshot_name }} ended with
+          state {{ __wazuh_server_update_snapshot.json.snapshot.state }}.
+          Nothing was updated.
+        quiet: true
+
+    - name: Update | List pre-update snapshots
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_indexer_snapshot_repository_url }}/{{ __wazuh_server_update_snapshot_prefix }}*'
+        client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+        client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+        ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+      register: __wazuh_server_update_snapshots
+
+    # Count-based: the newest wazuh_server_update_backup_keep stay
+    - name: Update | Delete pre-update snapshots beyond the retention
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_indexer_snapshot_repository_url }}/{{ item }}'
+        method: DELETE
+        client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+        client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+        ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+      loop: >-
+        {{ (__wazuh_server_update_snapshots.json.snapshots
+            | sort(attribute='start_time_in_millis', reverse=true)
+            | map(attribute='snapshot') | list)[wazuh_server_update_backup_keep | int:] }}
+      changed_when: true
+
+#
+# Backup Set
+#
+
+- name: Update | Create backup directory
+  ansible.builtin.file:
+    path: '{{ wazuh_server_update_backup_path }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Update | Create backup set directory
+  ansible.builtin.file:
+    path: '{{ __wazuh_server_update_set_dir }}/indexer-security'
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Update | Archive manager configuration
+  community.general.archive:
+    path: '{{ __wazuh_server_manager_dir }}/etc'
+    dest: '{{ __wazuh_server_update_set_dir }}/ossec-etc.tar.gz'
+    format: gz
+    owner: root
+    group: root
+    mode: '0600'
+
+# The security configuration stored in the indexer, uploaded again after
+# the indexer update (upstream: indexer-security-init.sh -backup)
+- name: Update | Back up indexer security configuration
+  ansible.builtin.command:
+    argv:
+      - '{{ __wazuh_server_indexer_security_tools_dir }}/securityadmin.sh'
+      - '-backup'
+      - '{{ __wazuh_server_update_set_dir }}/indexer-security'
+      - '-icl'
+      - '-nhnv'
+      - '-cacert'
+      - '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+      - '-cert'
+      - '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+      - '-key'
+      - '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+      - '-h'
+      - '{{ wazuh_server_indexer_network_host }}'
+      - '-p'
+      - '{{ wazuh_server_indexer_http_port | string }}'
+  environment:
+    JAVA_HOME: '{{ __wazuh_server_indexer_java_home }}'
+    OPENSEARCH_PATH_CONF: '{{ __wazuh_server_indexer_config_dir }}'
+  changed_when: true
+
+- name: Update | List backup sets
+  ansible.builtin.find:
+    paths: '{{ wazuh_server_update_backup_path }}'
+    file_type: directory
+    patterns: '{{ __wazuh_server_update_backup_prefix }}*'
+  register: __wazuh_server_update_sets
+
+# Count-based: the newest wazuh_server_update_backup_keep stay. Sorted by
+# the timestamp at the end of the name; the version before it does not
+# sort as text (4.14.9 > 4.14.10).
+- name: Update | Delete backup sets beyond the retention
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: absent
+  loop: >-
+    {{ (__wazuh_server_update_sets.files
+        | map(attribute='path')
+        | map('regex_replace', '^(.*-([0-9]{14}))$', '\2 \1')
+        | sort(reverse=true)
+        | map('regex_replace', '^[0-9]{14} ', '')
+        | list)[wazuh_server_update_backup_keep | int:] }}
+
+#
+# Stop
+#
+
+- name: Update | Stop Filebeat and the dashboard
+  ansible.builtin.systemd_service:
+    name: '{{ item }}'
+    state: stopped
+  loop:
+    - '{{ __wazuh_server_filebeat_service_name }}'
+    - '{{ __wazuh_server_dashboard_service_name }}'
+
+#
+# Indexer
+#
+
+- name: Update | Update the indexer
+  when: "'wazuh-indexer' in __wazuh_server_update_packages"
+  block:
+    - name: Update | Limit shard allocation to primaries
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_cluster_settings_url }}'
+        method: PUT
+        body_format: json
+        body:
+          persistent:
+            cluster.routing.allocation.enable: 'primaries'
+        client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+        client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+        ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+      changed_when: true
+
+    - name: Update | Flush the indices
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_indexer_url }}/_flush'
+        method: POST
+        client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+        client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+        ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+      changed_when: true
+
+    # Single indexer node: the manager stops while the indexer updates
+    - name: Update | Stop the manager and the indexer
+      ansible.builtin.systemd_service:
+        name: '{{ item }}'
+        state: stopped
+      loop:
+        - '{{ __wazuh_server_manager_service_name }}'
+        - '{{ __wazuh_server_indexer_service_name }}'
+
+    - name: Update | Update the indexer package
+      ansible.builtin.include_tasks: update_package.yml
+      vars:
+        __wazuh_server_update_package: 'wazuh-indexer'
+
+    - name: Update | Start the indexer
+      ansible.builtin.systemd_service:
+        name: '{{ __wazuh_server_indexer_service_name }}'
+        state: started
+        daemon_reload: true
+
+    - name: Update | Wait for the updated indexer
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_indexer_url }}/_cluster/health?wait_for_status=yellow&timeout=30s'
+        client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+        client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+        ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+      register: __wazuh_server_update_indexer_health
+      retries: 30
+      delay: 10
+      until: __wazuh_server_update_indexer_health is not failed
+
+    # upstream: indexer-security-init.sh after the update
+    - name: Update | Upload the backed up security configuration
+      ansible.builtin.command:
+        argv:
+          - '{{ __wazuh_server_indexer_security_tools_dir }}/securityadmin.sh'
+          - '-cd'
+          - '{{ __wazuh_server_update_set_dir }}/indexer-security/'
+          - '-icl'
+          - '-nhnv'
+          - '-cacert'
+          - '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+          - '-cert'
+          - '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+          - '-key'
+          - '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+          - '-h'
+          - '{{ wazuh_server_indexer_network_host }}'
+          - '-p'
+          - '{{ wazuh_server_indexer_http_port | string }}'
+      environment:
+        JAVA_HOME: '{{ __wazuh_server_indexer_java_home }}'
+        OPENSEARCH_PATH_CONF: '{{ __wazuh_server_indexer_config_dir }}'
+      register: __wazuh_server_update_securityadmin
+      retries: 5
+      delay: 10
+      until: __wazuh_server_update_securityadmin.rc == 0
+      changed_when: true
+
+    - name: Update | Enable shard allocation again
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_cluster_settings_url }}'
+        method: PUT
+        body_format: json
+        body:
+          persistent:
+            cluster.routing.allocation.enable: 'all'
+        client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+        client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+        ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+      changed_when: true
+
+#
+# Manager and Filebeat
+#
+# The Filebeat module and the alerts template of the new release are in
+# place before Filebeat starts. After the start, filebeat setup uploads the
+# template and the pipelines to the indexer (upstream order).
+#
+
+- name: Update | Update the manager and Filebeat
+  when: __wazuh_server_update_packages | intersect(['wazuh-manager', 'filebeat']) | length > 0
+  block:
+    - name: Update | Stop the manager
+      ansible.builtin.systemd_service:
+        name: '{{ __wazuh_server_manager_service_name }}'
+        state: stopped
+
+    - name: Update | Update the manager and Filebeat packages
+      ansible.builtin.include_tasks: update_package.yml
+      loop: "{{ ['wazuh-manager', 'filebeat'] | select('in', __wazuh_server_update_packages) | list }}"
+      loop_control:
+        loop_var: __wazuh_server_update_package
+
+    - name: Update | Download the Wazuh index template
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_filebeat_template_url }}'
+        return_content: true
+      register: __wazuh_server_update_template
+      retries: 5
+      delay: 10
+      until: __wazuh_server_update_template is not failed
+
+    - name: Update | Deploy the Wazuh index template
+      ansible.builtin.copy:
+        content: '{{ __wazuh_server_update_template.content }}'
+        dest: '{{ __wazuh_server_filebeat_template_file }}'
+        owner: root
+        group: root
+        mode: '0644'
+
+    # unarchive in configure.yml only extracts into a missing directory
+    - name: Update | Remove the Wazuh Filebeat module
+      ansible.builtin.file:
+        path: '{{ __wazuh_server_filebeat_module_dir }}'
+        state: absent
+
+    - name: Update | Install the Wazuh Filebeat module
+      ansible.builtin.unarchive:
+        src: '{{ __wazuh_server_filebeat_module_url }}'
+        dest: '{{ __wazuh_server_filebeat_module_parent_dir }}'
+        remote_src: true
+        owner: root
+        group: root
+      register: __wazuh_server_update_module
+      retries: 5
+      delay: 10
+      until: __wazuh_server_update_module is not failed
+
+#
+# Start
+#
+# Upstream order: manager, Filebeat, dashboard. Disabled services stay
+# stopped.
+#
+
+- name: Update | Start the manager
+  ansible.builtin.systemd_service:
+    name: '{{ __wazuh_server_manager_service_name }}'
+    state: started
+    daemon_reload: true
+  when: wazuh_server_manager_service_enabled | bool
+
+- name: Update | Start Filebeat
+  ansible.builtin.systemd_service:
+    name: '{{ __wazuh_server_filebeat_service_name }}'
+    state: started
+  when: wazuh_server_filebeat_service_enabled | bool
+
+- name: Update | Upload the Filebeat pipelines and index template
+  ansible.builtin.command:
+    argv: '{{ [__wazuh_server_filebeat_bin, "setup"] + item }}'
+  loop:
+    - ['--pipelines']
+    - ['--index-management', '-E', 'output.logstash.enabled=false']
+  register: __wazuh_server_update_filebeat_setup
+  retries: 5
+  delay: 10
+  until: __wazuh_server_update_filebeat_setup is not failed
+  changed_when: true
+  when:
+    - wazuh_server_filebeat_service_enabled | bool
+    - __wazuh_server_update_packages | intersect(['wazuh-manager', 'filebeat']) | length > 0
+
+- name: Update | Update the dashboard package
+  ansible.builtin.include_tasks: update_package.yml
+  vars:
+    __wazuh_server_update_package: 'wazuh-dashboard'
+  when: "'wazuh-dashboard' in __wazuh_server_update_packages"
+
+- name: Update | Start the dashboard
+  ansible.builtin.systemd_service:
+    name: '{{ __wazuh_server_dashboard_service_name }}'
+    state: started
+    daemon_reload: true
+  when: wazuh_server_dashboard_service_enabled | bool
+
+#
+# Result
+#
+
+- name: Update | Refresh package facts after the update
+  ansible.builtin.package_facts:
+    manager: auto
+
+- name: Update | Report the updated packages
+  ansible.builtin.debug:
+    msg: >-
+      Updated {{ item }} from {{ __wazuh_server_update_installed_before[item] }}
+      to {{ __wazuh_server_installed_versions[item] }}
+  loop: '{{ __wazuh_server_update_packages }}'

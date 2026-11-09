@@ -1,10 +1,11 @@
 ---
-# Packages pinned to wazuh_server_version / wazuh_server_filebeat_version
-__wazuh_server_packages:
-  - 'wazuh-indexer={{ wazuh_server_version }}-*'
-  - 'wazuh-manager={{ wazuh_server_version }}-*'
-  - 'filebeat={{ wazuh_server_filebeat_version }}-*'
-  - 'wazuh-dashboard={{ wazuh_server_version }}-*'
+# Package specifications pinned to wazuh_server_version /
+# wazuh_server_filebeat_version, per package name
+__wazuh_server_package_specs:
+  wazuh-indexer: 'wazuh-indexer={{ wazuh_server_version }}-*'
+  wazuh-manager: 'wazuh-manager={{ wazuh_server_version }}-*'
+  filebeat: 'filebeat={{ wazuh_server_filebeat_version }}-*'
+  wazuh-dashboard: 'wazuh-dashboard={{ wazuh_server_version }}-*'
 
 # Dependencies (dashboard: debhelper, libcap2-bin; certificate handling:
 # cryptography; deb822_repository: python3-debian)

@@ -1,0 +1,52 @@
+---
+# Refused updates: each run has to fail before any change. verify.yml then
+# checks that the updated release is still in place.
+- name: Side Effect | Refused updates
+  hosts: all
+  gather_facts: true
+
+  vars:
+    # Messages of a failed task, also of a failed loop item
+    __side_effect_messages: >-
+      {{ ([ansible_failed_result.msg | default('')]
+          + (ansible_failed_result.results | default([]) | map(attribute='msg', default='') | list))
+         | join(' ') }}
+
+  tasks:
+    - name: Side Effect | Downgrade with the update
+      block:
+        - name: Side Effect | Include wazuh_server role with the previous release  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            wazuh_server_version: '{{ wazuh_server_update_previous_version }}'
+            wazuh_server_update: true
+
+        - name: Side Effect | Fail when the downgrade passed
+          ansible.builtin.fail:
+            msg: 'The role accepted a downgrade to {{ wazuh_server_update_previous_version }}'
+      rescue:
+        - name: Side Effect | Assert the downgrade was refused
+          ansible.builtin.assert:
+            that:
+              - "'does not support a downgrade' in __side_effect_messages"
+            fail_msg: 'Unexpected failure: {{ __side_effect_messages }}'
+
+    - name: Side Effect | Version the repository does not offer
+      block:
+        - name: Side Effect | Include wazuh_server role with a missing release  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            wazuh_server_version: '4.99.99'
+            wazuh_server_update: true
+
+        - name: Side Effect | Fail when the missing release passed
+          ansible.builtin.fail:
+            msg: 'The role updated to a release the repository does not offer'
+      rescue:
+        - name: Side Effect | Assert the missing release was refused
+          ansible.builtin.assert:
+            that:
+              - "'does not offer' in __side_effect_messages"
+            fail_msg: 'Unexpected failure: {{ __side_effect_messages }}'
