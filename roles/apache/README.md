@@ -453,6 +453,18 @@ its own `ulimit -n` from `APACHE_ULIMIT_MAX_FILES` (8192 when unset); the role
 sets that line in `/etc/apache2/envvars` to the same value. Emptying the
 variable removes the drop-in and restores the commented distro line.
 
+### Service Startup
+
+The distribution units start Apache after `network.target`, which does not
+wait until addresses are configured. A `Listen` entry with an address (for
+example `192.0.2.10:8081` in `apache_listen_ports`) then fails at boot with
+`AH00072: make_sock: could not bind to address`, and the service stays
+stopped. The role deploys a systemd drop-in that orders Apache after
+`network-online.target`. That target only waits for configured addresses
+when the wait-online service of the network manager is enabled, such as
+`NetworkManager-wait-online.service` or
+`systemd-networkd-wait-online.service`.
+
 ## Tags
 
 | Tag                | Scope                     |
