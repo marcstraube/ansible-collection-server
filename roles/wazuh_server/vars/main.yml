@@ -167,3 +167,45 @@ __wazuh_server_package_names:
   - 'wazuh-manager'
   - 'filebeat'
   - 'wazuh-dashboard'
+
+# Pinned package specifications in install order (OS vars define the map)
+__wazuh_server_packages: '{{ __wazuh_server_package_names | map("extract", __wazuh_server_package_specs) | list }}'
+
+# Configured version of each package
+__wazuh_server_expected_versions:
+  wazuh-indexer: '{{ wazuh_server_version }}'
+  wazuh-manager: '{{ wazuh_server_version }}'
+  filebeat: '{{ wazuh_server_filebeat_version }}'
+  wazuh-dashboard: '{{ wazuh_server_version }}'
+
+# Installed packages of the role and their versions without the package
+# release
+__wazuh_server_installed_names: >-
+  {{ __wazuh_server_package_names | select('in', ansible_facts.packages | default({})) | list }}
+__wazuh_server_installed_versions: >-
+  {{ dict(__wazuh_server_installed_names
+          | zip(__wazuh_server_installed_names
+                | map('extract', ansible_facts.packages)
+                | map('first')
+                | map(attribute='version')
+                | map('regex_replace', '-.*$', ''))) }}
+
+# Installed packages whose version differs from the configured one
+__wazuh_server_version_mismatches: >-
+  {{ __wazuh_server_installed_names
+     | zip(__wazuh_server_installed_names | map('extract', __wazuh_server_expected_versions))
+     | map('join', '=')
+     | difference(__wazuh_server_installed_names
+                  | zip(__wazuh_server_installed_names | map('extract', __wazuh_server_installed_versions))
+                  | map('join', '='))
+     | map('regex_replace', '=.*$', '')
+     | list }}
+
+# Update: names of the pre-update backup sets and snapshots. The snapshot
+# names must not start with the snapshot policy name, whose retention would
+# delete them.
+__wazuh_server_update_backup_prefix: 'wazuh-'
+__wazuh_server_update_snapshot_prefix: 'update-'
+__wazuh_server_cluster_settings_url: '{{ __wazuh_server_indexer_url }}/_cluster/settings'
+# Wrapper of the Filebeat package with the paths of the Wazuh installation
+__wazuh_server_filebeat_bin: '/usr/bin/filebeat'

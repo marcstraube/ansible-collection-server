@@ -50,12 +50,24 @@ but are not actively tested. Use distro-specific vars overrides if needed.
 | `wazuh_server_filebeat_version`        | `'7.10.2'`  | Filebeat OSS release supported by the Wazuh module   |
 | `wazuh_server_filebeat_module_version` | `'0.5'`     | Wazuh Filebeat module release                        |
 
-The role does not update Wazuh. With Wazuh installed, a
-`wazuh_server_version` that differs from the installed indexer, manager or
-dashboard, or a `wazuh_server_filebeat_version` that differs from the
-installed Filebeat, fails the run with both versions. The packages are
-locked against a system upgrade, see [Package Lock](#package-lock) under
-Notes.
+With Wazuh installed, a `wazuh_server_version` that differs from the
+installed indexer, manager or dashboard, or a
+`wazuh_server_filebeat_version` that differs from the installed Filebeat,
+fails the run with both versions unless the update is requested, see
+[Updates](#updates). The packages are locked against a system upgrade, see
+[Package Lock](#package-lock) under Notes.
+
+### Updates
+
+| Variable                            | Default                | Description                              |
+| ----------------------------------- | ---------------------- | ---------------------------------------- |
+| `wazuh_server_update`               | `false`                | Update to the configured versions        |
+| `wazuh_server_update_skip_snapshot` | `false`                | Update without the indexer snapshot      |
+| `wazuh_server_update_backup_path`   | `'/var/backups/wazuh'` | Directory for the pre-update backup sets |
+| `wazuh_server_update_backup_keep`   | `3`                    | Backup sets and snapshots to keep        |
+
+`wazuh_server_update` is passed with the update command, not set in
+inventory. See [Updating Wazuh](#updating-wazuh) under Notes.
 
 ### Certificates
 
@@ -210,12 +222,69 @@ molecule test -p wazuh-server-rocky-10
 molecule converge -p wazuh-server-rocky-10
 ```
 
-Driver: `podman` | Scenario: `default` (certificates issued by
-`marcstraube.common.pki` in `prepare.yml`). The scenario runs with an
-outgoing proxy that is never contacted; `side_effect.yml` removes the
-proxy, checks that the drop-in is gone and sets it again.
+Driver: `podman` | Scenarios: `default` and `update` (certificates issued
+by `marcstraube.common.pki` in `prepare.yml`). The `default` scenario runs
+with an outgoing proxy that is never contacted; `side_effect.yml` removes
+the proxy, checks that the drop-in is gone and sets it again. The `update`
+scenario installs the previous release, updates it with
+`wazuh_server_update` and checks the versions, locks, shard allocation,
+snapshot and backup set; `side_effect.yml` asserts that a downgrade and a
+release the repository does not offer are refused.
 
 ## Notes
+
+### Updating Wazuh
+
+Raise `wazuh_server_version` (and `wazuh_server_filebeat_version`, if the
+new release requires another Filebeat), then run the role with the update:
+
+```bash
+ansible-playbook site.yml --tags wazuh-server -e wazuh_server_update=true
+```
+
+The role follows the upstream upgrade guide for a single node (see
+References):
+
+1. Checks that the Wazuh repository offers every configured version;
+   nothing changes otherwise.
+2. Takes the indexer snapshot `update-<version>-<timestamp>` into the
+   repository of `wazuh_server_indexer_snapshot_path` and waits until it
+   completes. Without a snapshot path the update fails before any change,
+   unless `wazuh_server_update_skip_snapshot: true`. The repository has to
+   be registered by an earlier run of the role.
+3. Writes the backup set `wazuh-<version>-<timestamp>` to
+   `wazuh_server_update_backup_path` (root only): `ossec-etc.tar.gz` with
+   `/var/ossec/etc` (agent keys, local rules and decoders, enrollment
+   key) and `indexer-security/` with the security configuration stored in
+   the indexer.
+4. Stops Filebeat and the dashboard.
+5. Indexer: limits the shard allocation to primaries, flushes, stops the
+   manager and the indexer, updates `wazuh-indexer`, starts it, uploads the
+   backed up security configuration and enables the shard allocation again.
+6. Manager: updates `wazuh-manager` (and `filebeat`), deploys the alerts
+   template and the Wazuh Filebeat module of the release, starts the
+   manager and Filebeat and uploads the template and the pipelines
+   (`filebeat setup`).
+7. Dashboard: updates `wazuh-dashboard` and starts it.
+
+Each package lock is released right before its update and set again right
+after it. A step only updates packages that still differ from the
+configured version, so running the update again after a failed step
+continues with the remaining packages. The rest of the role then deploys
+the configuration as on every run. Check mode reports the pending update
+without changing anything.
+
+An installed version newer than the configured one fails the run, with or
+without the update: Wazuh does not support a downgrade. The role keeps the
+newest `wazuh_server_update_backup_keep` backup sets and pre-update
+snapshots and deletes older ones.
+
+To return to the previous release, reinstall its packages, restore the
+pre-update snapshot (see [Snapshots](#snapshots)) and unpack
+`ossec-etc.tar.gz` into `/var/ossec`.
+
+Agents must not be newer than the manager: update the manager before the
+agents.
 
 ### Package Lock
 
@@ -224,22 +293,8 @@ After the install the role holds `wazuh-indexer`, `wazuh-manager`,
 (`dpkg` hold on Debian, `dnf versionlock` on EL). A system upgrade
 (`apt upgrade`, `dnf upgrade`) leaves these packages untouched, so it can
 neither update them outside the upstream order nor make the next run fail
-the version check. The role never releases the locks.
-
-For a planned update, release the locks on the host and follow the Wazuh
-upgrade guide (see References):
-
-```bash
-# Debian
-apt-mark unhold wazuh-indexer wazuh-manager filebeat wazuh-dashboard
-
-# EL
-dnf versionlock delete wazuh-indexer wazuh-manager filebeat wazuh-dashboard
-```
-
-Afterwards set `wazuh_server_version` (and `wazuh_server_filebeat_version`,
-if the new release requires another Filebeat) to the installed versions.
-The next run passes the version check and sets the locks again.
+the version check. Only the update releases a lock, see
+[Updating Wazuh](#updating-wazuh).
 
 ### Certificates
 

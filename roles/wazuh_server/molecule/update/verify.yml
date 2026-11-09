@@ -1,0 +1,237 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  vars:
+    # vars/main.yml builds the indexer URL from these role defaults, which a
+    # play outside the role does not load
+    wazuh_server_indexer_network_host: '127.0.0.1'
+    wazuh_server_indexer_http_port: 9200
+    __verify_backup_path: '/var/backups/wazuh'
+    __verify_previous: '{{ wazuh_server_update_previous_version | regex_escape }}'
+    __verify_admin_tls:
+      client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+      client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+      ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+
+  tasks:
+    - name: Verify | Load role defaults
+      ansible.builtin.include_vars:
+        file: '../../defaults/main.yml'
+        name: __verify_defaults
+
+    - name: Verify | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    #
+    # Packages
+    #
+
+    - name: Verify | Gather package facts
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Verify | Assert the packages run the updated release
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.packages[item][0].version is match(__verify_defaults.wazuh_server_version ~ '(-|$)')
+        fail_msg: >-
+          {{ item }} is {{ ansible_facts.packages[item][0].version }}, expected
+          {{ __verify_defaults.wazuh_server_version }}
+      loop:
+        - wazuh-indexer
+        - wazuh-manager
+        - wazuh-dashboard
+
+    - name: Verify | Read package holds (Debian)
+      ansible.builtin.command:
+        cmd: dpkg --get-selections {{ __wazuh_server_package_names | join(' ') }}
+      register: __verify_package_holds
+      changed_when: false
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Verify | Assert Wazuh packages are held again (Debian)
+      ansible.builtin.assert:
+        that:
+          - (item ~ ' hold') in __verify_package_hold_lines
+        fail_msg: '{{ item }} is not held'
+      loop: '{{ __wazuh_server_package_names }}'
+      vars:
+        __verify_package_hold_lines: >-
+          {{ __verify_package_holds.stdout_lines | map('regex_replace', '\s+', ' ') | list }}
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Verify | Read version locks (RedHat)
+      ansible.builtin.command:
+        cmd: dnf versionlock list
+      register: __verify_version_locks
+      changed_when: false
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Verify | Assert the updated versions are locked (RedHat)
+      ansible.builtin.assert:
+        that:
+          - __verify_version_locks.stdout is regex(__verify_lock_prefix ~ __verify_current ~ '-')
+          - __verify_version_locks.stdout is not regex(__verify_lock_prefix ~ __verify_previous ~ '-')
+        fail_msg: '{{ item }} is not locked at {{ __verify_defaults.wazuh_server_version }} alone'
+      vars:
+        __verify_lock_prefix: '(?m)^{{ item }}-[0-9]+:'
+        __verify_current: '{{ __verify_defaults.wazuh_server_version | regex_escape }}'
+      loop:
+        - wazuh-indexer
+        - wazuh-manager
+        - wazuh-dashboard
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    #
+    # Indexer
+    #
+
+    - name: Verify | Read cluster settings
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_cluster_settings_url }}'
+        client_cert: '{{ __verify_admin_tls.client_cert }}'
+        client_key: '{{ __verify_admin_tls.client_key }}'
+        ca_path: '{{ __verify_admin_tls.ca_path }}'
+      register: __verify_cluster_settings
+
+    - name: Verify | Assert shard allocation is enabled again
+      ansible.builtin.assert:
+        that:
+          - __verify_allocation in ['', 'all']
+        fail_msg: 'cluster.routing.allocation.enable is {{ __verify_allocation }}'
+      vars:
+        __verify_allocation: >-
+          {{ __verify_cluster_settings.json.persistent.cluster.routing.allocation.enable | default('') }}
+
+    - name: Verify | Authenticate indexer users with the configured passwords
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_indexer_url }}/_plugins/_security/authinfo'
+        url_username: '{{ item.name }}'
+        url_password: '{{ item.password }}'
+        force_basic_auth: true
+        ca_path: '{{ __verify_admin_tls.ca_path }}'
+      loop:
+        - { name: 'admin', password: '{{ wazuh_server_indexer_admin_password }}' }
+        - { name: 'kibanaserver', password: '{{ wazuh_server_indexer_kibanaserver_password }}' }
+      loop_control:
+        label: '{{ item.name }}'
+      no_log: true
+
+    #
+    # Pre-update snapshot and backup set
+    #
+
+    - name: Verify | List pre-update snapshots
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_indexer_snapshot_repository_url }}/update-*'
+        client_cert: '{{ __verify_admin_tls.client_cert }}'
+        client_key: '{{ __verify_admin_tls.client_key }}'
+        ca_path: '{{ __verify_admin_tls.ca_path }}'
+      register: __verify_snapshots
+
+    - name: Verify | Assert one successful pre-update snapshot of the previous release
+      ansible.builtin.assert:
+        that:
+          - __verify_snapshots.json.snapshots | length == 1
+          - __verify_snapshots.json.snapshots[0].snapshot is match('update-' ~ __verify_previous ~ '-[0-9]{14}$')
+          - __verify_snapshots.json.snapshots[0].state == 'SUCCESS'
+        fail_msg: >-
+          Expected one pre-update snapshot of {{ wazuh_server_update_previous_version }},
+          got {{ __verify_snapshots.json.snapshots | map(attribute='snapshot') | list }}
+
+    - name: Verify | List backup sets
+      ansible.builtin.find:
+        paths: '{{ __verify_backup_path }}'
+        file_type: directory
+        patterns: 'wazuh-*'
+      register: __verify_sets
+
+    - name: Verify | Assert one backup set of the previous release
+      ansible.builtin.assert:
+        that:
+          - __verify_sets.files | length == 1
+          - __verify_sets.files[0].path | basename is match('wazuh-' ~ __verify_previous ~ '-[0-9]{14}$')
+          - __verify_sets.files[0].mode == '0700'
+        fail_msg: 'Expected one backup set, got {{ __verify_sets.files | map(attribute="path") | list }}'
+
+    - name: Verify | Stat backup directory and manager archive
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+        - '{{ __verify_backup_path }}'
+        - '{{ __verify_sets.files[0].path }}/ossec-etc.tar.gz'
+      register: __verify_backup_stat
+
+    - name: Verify | Assert backup directory and manager archive are root-only
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.pw_name == 'root'
+          - item.stat.mode in ['0700', '0600']
+        fail_msg: '{{ item.item }} is missing or not root-only'
+      loop: '{{ __verify_backup_stat.results }}'
+      loop_control:
+        label: '{{ item.item }}'
+
+    - name: Verify | List manager archive
+      ansible.builtin.command:
+        argv: ['tar', '-tzf', '{{ __verify_sets.files[0].path }}/ossec-etc.tar.gz']
+      register: __verify_archive
+      changed_when: false
+
+    - name: Verify | Assert the manager archive holds the agent keys and ossec.conf
+      ansible.builtin.assert:
+        that:
+          - __verify_archive.stdout_lines | select('match', '^(\./)?(etc/)?client\.keys$') | list | length == 1
+          - __verify_archive.stdout_lines | select('match', '^(\./)?(etc/)?ossec\.conf$') | list | length == 1
+        fail_msg: 'ossec-etc.tar.gz lacks client.keys or ossec.conf'
+
+    - name: Verify | Stat indexer security backup
+      ansible.builtin.stat:
+        path: '{{ __verify_sets.files[0].path }}/indexer-security/internal_users.yml'
+      register: __verify_security_backup
+
+    - name: Verify | Assert the indexer security configuration is backed up
+      ansible.builtin.assert:
+        that:
+          - __verify_security_backup.stat.exists
+        fail_msg: 'The backup set lacks the indexer security configuration'
+
+    #
+    # Services
+    #
+
+    - name: Verify | Assert services are running
+      ansible.builtin.systemd_service:
+        name: '{{ item }}'
+      register: __verify_service
+      failed_when: __verify_service.status.ActiveState != 'active'
+      loop:
+        - '{{ __wazuh_server_indexer_service_name }}'
+        - '{{ __wazuh_server_manager_service_name }}'
+        - '{{ __wazuh_server_filebeat_service_name }}'
+        - '{{ __wazuh_server_dashboard_service_name }}'
+
+    - name: Verify | Test Filebeat connection to the indexer
+      ansible.builtin.command:
+        cmd: filebeat test output
+      register: __verify_filebeat_output
+      changed_when: false
+      retries: 6
+      delay: 10
+      until: __verify_filebeat_output.rc == 0
+
+    - name: Verify | Wait for the dashboard
+      ansible.builtin.uri:
+        url: 'https://127.0.0.1:443/api/status'
+        url_username: 'admin'
+        url_password: '{{ wazuh_server_indexer_admin_password }}'
+        force_basic_auth: true
+        ca_path: '{{ __wazuh_server_dashboard_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+      register: __verify_dashboard_status
+      retries: 30
+      delay: 10
+      until: __verify_dashboard_status is not failed

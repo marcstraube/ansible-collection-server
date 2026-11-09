@@ -1,57 +1,82 @@
 ---
 # A Wazuh update has to follow the upstream order (indexer, manager,
-# dashboard) with the indexer shard allocation disabled in between. The role
-# does not perform updates: a changed wazuh_server_version on a host with
-# Wazuh installed fails here with both versions. Tagged always so that every
-# stage sees the same precondition.
+# dashboard) with the indexer shard allocation limited in between. A
+# changed wazuh_server_version on a host with Wazuh installed fails here
+# with both versions, unless wazuh_server_update requests the update
+# (update.yml). Tagged always so that every stage sees the same
+# precondition.
 # The packages are held at the installed version so that a system upgrade
-# cannot move them either. The role never releases the hold: a planned
-# update releases it by hand (see README).
+# cannot move them either. Only the update releases the hold, one package
+# at a time.
 - name: Install | Gather package facts
   ansible.builtin.package_facts:
     manager: auto
   tags:
     - always
 
+# Wazuh does not support a downgrade, with or without the update
+- name: Install | Assert no Wazuh package is newer than the configured version
+  ansible.builtin.assert:
+    that:
+      - __wazuh_server_installed_versions[item]
+        is version(__wazuh_server_expected_versions[item], '<=')
+    fail_msg: >-
+      {{ item }} {{ __wazuh_server_installed_versions[item] }} is installed,
+      newer than the configured {{ __wazuh_server_expected_versions[item] }}.
+      Wazuh does not support a downgrade; set wazuh_server_version and
+      wazuh_server_filebeat_version to the installed versions.
+    quiet: true
+  loop: '{{ __wazuh_server_version_mismatches }}'
+  tags:
+    - always
+
+- name: Install | Include update tasks
+  ansible.builtin.include_tasks:
+    file: update.yml
+    apply:
+      tags:
+        - always
+  when:
+    - wazuh_server_update | bool
+    - __wazuh_server_version_mismatches | length > 0
+    - not ansible_check_mode
+  tags:
+    - always
+
+# Check mode does not run the update; it reports the pending one instead
+- name: Install | Report pending Wazuh update
+  ansible.builtin.debug:
+    msg: >-
+      Would update {{ item }} from {{ __wazuh_server_installed_versions[item] }}
+      to {{ __wazuh_server_expected_versions[item] }}
+  loop: '{{ __wazuh_server_version_mismatches }}'
+  changed_when: true
+  when:
+    - wazuh_server_update | bool
+    - ansible_check_mode
+  tags:
+    - always
+
 # filebeat is checked against wazuh_server_filebeat_version: the hold below
 # would otherwise fail a changed version with a package manager error.
+# After an update the facts are current again (update.yml), so this also
+# checks the result of the update.
 - name: Install | Assert installed Wazuh versions match the configured versions
   ansible.builtin.assert:
     that:
       - __wazuh_server_version_mismatches | length == 0
+        or (wazuh_server_update | bool and ansible_check_mode)
     fail_msg: |
       Installed Wazuh packages differ from the configured versions:
 
       {% for package in __wazuh_server_version_mismatches %}
-      {% set installed = ansible_facts.packages[package][0].version %}
+      {% set installed = __wazuh_server_installed_versions[package] %}
         - {{ package }} {{ installed }}, configured {{ __wazuh_server_expected_versions[package] }}
       {% endfor %}
 
-      The role does not update Wazuh. Follow the upstream upgrade guide or
-      restore the previous wazuh_server_version and wazuh_server_filebeat_version.
-  vars:
-    __wazuh_server_expected_versions:
-      wazuh-indexer: '{{ wazuh_server_version }}'
-      wazuh-manager: '{{ wazuh_server_version }}'
-      wazuh-dashboard: '{{ wazuh_server_version }}'
-      filebeat: '{{ wazuh_server_filebeat_version }}'
-    __wazuh_server_installed_packages: >-
-      {{ __wazuh_server_expected_versions.keys() | select('in', ansible_facts.packages) | list }}
-    __wazuh_server_installed_pairs: >-
-      {{ __wazuh_server_installed_packages
-         | zip(__wazuh_server_installed_packages
-               | map('extract', ansible_facts.packages)
-               | map('first')
-               | map(attribute='version')
-               | map('regex_replace', '-.*$', ''))
-         | map('join', '=') | list }}
-    __wazuh_server_expected_pairs: >-
-      {{ __wazuh_server_installed_packages
-         | zip(__wazuh_server_installed_packages | map('extract', __wazuh_server_expected_versions))
-         | map('join', '=') | list }}
-    __wazuh_server_version_mismatches: >-
-      {{ __wazuh_server_expected_pairs | difference(__wazuh_server_installed_pairs)
-         | map('regex_replace', '=.*$', '') | list }}
+      Pass -e wazuh_server_update=true to update Wazuh in the upstream
+      order, or restore the previous wazuh_server_version and
+      wazuh_server_filebeat_version.
   tags:
     - always
 
@@ -66,9 +91,9 @@
 # The Wazuh repo file check (repos.yml) only exists on RedHat; everywhere
 # else the gate falls through.
 # The hold (versionlock) from an earlier run does not get in the way: the
-# assertion above guarantees that the installed indexer, manager and
-# dashboard already match the pinned version, so the install changes nothing
-# on a held package and needs no option to bypass the hold.
+# assertion above guarantees that the installed packages already match the
+# pinned versions, so the install changes nothing on a held package and
+# needs no option to bypass the hold.
 - name: Install | Wazuh packages
   ansible.builtin.package:
     name: '{{ __wazuh_server_packages }}'
@@ -76,7 +101,11 @@
   retries: 3
   delay: 5
   register: __wazuh_server_install
-  when: __wazuh_server_repo_stat.stat.exists | default(true)
+  # In check mode a pending update leaves the held packages at the
+  # installed version
+  when:
+    - __wazuh_server_repo_stat.stat.exists | default(true)
+    - not (ansible_check_mode and __wazuh_server_version_mismatches | length > 0)
   notify:
     - Reload Wazuh systemd units
 
