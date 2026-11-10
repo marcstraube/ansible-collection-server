@@ -431,6 +431,14 @@ indexer API requests authenticate with the admin certificate.
   repository with its snapshots stays in place. Deregister it manually
   with `DELETE _snapshot/<old name>` when the old snapshots are no longer
   needed.
+- The policy makes the indexer create the plugin indices
+  `.opendistro-ism-config` and, about a minute later,
+  `.opendistro-job-scheduler-lock`. The plugins create them with one
+  replica shard, which a single node cannot allocate, so the cluster
+  health would stay `yellow`. The role waits for both indices and sets
+  their replica count to 0; the first run with a snapshot path therefore
+  takes about a minute longer. The indices and their setting stay when
+  the path is emptied.
 - The role restores nothing. Restore a snapshot with
   `POST _snapshot/<repository>/<snapshot>/_restore` and the indices to
   restore; see the OpenSearch documentation under References.

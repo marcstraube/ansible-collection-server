@@ -92,6 +92,41 @@
       vars:
         __side_effect_sm_policy: '{{ __side_effect_policy.json.sm_policy }}'
 
+    # The plugins create .opendistro-ism-config and, about a minute after the
+    # policy is registered, .opendistro-job-scheduler-lock with one replica
+    # shard each; both have to exist before the health shows whether the role
+    # removed the replicas
+    - name: Side Effect | Wait for the job scheduler lock index
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_indexer_url }}/.opendistro-job-scheduler-lock'
+        client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+        client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+        ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+      register: __side_effect_lock_index
+      retries: 30
+      delay: 10
+      until: __side_effect_lock_index is not failed
+
+    - name: Side Effect | Read cluster health
+      ansible.builtin.uri:
+        url: '{{ __wazuh_server_indexer_url }}/_cluster/health?wait_for_status=green&timeout=60s'
+        client_cert: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_cert_name }}'
+        client_key: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_admin_key_name }}'
+        ca_path: '{{ __wazuh_server_indexer_certs_dir }}/{{ __wazuh_server_ca_cert_name }}'
+        status_code: [200, 408]
+        # Longer than the server-side wait, which answers 408 on timeout
+        timeout: 90
+      register: __side_effect_health
+
+    - name: Side Effect | Assert cluster health is green
+      ansible.builtin.assert:
+        that:
+          - __side_effect_health.json.status == 'green'
+          - __side_effect_health.json.unassigned_shards | int == 0
+        fail_msg: >-
+          Cluster health is {{ __side_effect_health.json.status }} with
+          {{ __side_effect_health.json.unassigned_shards }} unassigned shards
+
 - name: Side Effect | Remove the proxy
   ansible.builtin.import_playbook: converge.yml
   vars:

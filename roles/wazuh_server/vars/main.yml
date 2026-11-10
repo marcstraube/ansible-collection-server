@@ -40,6 +40,11 @@ __wazuh_server_indexer_snapshot_policy_url: >-
   {{ __wazuh_server_indexer_url }}/_plugins/_sm/policies/{{ __wazuh_server_indexer_snapshot_policy_name }}
 __wazuh_server_indexer_snapshot_repository_url: >-
   {{ __wazuh_server_indexer_url }}/_snapshot/{{ wazuh_server_indexer_snapshot_repository }}
+# Plugin indices the snapshot management policy brings along; the plugins
+# create them with one replica shard, which a single node cannot allocate
+__wazuh_server_indexer_plugin_indices:
+  - '.opendistro-ism-config'
+  - '.opendistro-job-scheduler-lock'
 
 # Desired snapshot management policy; the role compares the same fields of
 # the stored policy with it. The retention keeps the newest
