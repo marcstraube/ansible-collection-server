@@ -2,6 +2,18 @@
 
 All notable changes to this collection will be documented in this file.
 
+## 1.1.1 (2026-11-11)
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+## What's Changed
+### Bug Fixes
+* fix(wazuh_server): remove plugin index replicas on a single node by @marcstraube in https://github.com/marcstraube/ansible-collection-server/pull/138
+* fix(wazuh_server): keep indexer config mode across an update by @marcstraube in https://github.com/marcstraube/ansible-collection-server/pull/141
+
+
+**Full Changelog**: https://github.com/marcstraube/ansible-collection-server/compare/v1.1.0...v1.1.1
+
 ## 1.1.0 (2026-11-09)
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->

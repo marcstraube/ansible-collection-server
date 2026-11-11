@@ -71,3 +71,22 @@
         name: '{{ playbook_dir }}/../..'
       vars:
         wazuh_server_update: true
+
+  # The update step starts the indexer with its configuration in place; a
+  # notification of the role's restart handler means the configure tasks
+  # found something to change after the update
+  handlers:
+    - name: Converge | Record an indexer restart
+      ansible.builtin.set_fact:
+        __converge_indexer_restarted: true
+      listen: Restart Wazuh indexer
+
+  post_tasks:
+    - name: Converge | Assert the update does not restart the indexer again
+      ansible.builtin.assert:
+        that:
+          - not (__converge_indexer_restarted | default(false))
+        fail_msg: >-
+          The configure tasks changed the indexer configuration after the
+          update and notified the indexer restart
+        quiet: true

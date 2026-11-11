@@ -320,6 +320,24 @@
       vars:
         __wazuh_server_update_package: 'wazuh-indexer'
 
+    # The package update resets owner and mode of the configuration to the
+    # package defaults and keeps the content. Restored before the start, the
+    # configure tasks find them unchanged and do not restart the indexer a
+    # second time.
+    - name: Update | Restore owner and mode of the indexer configuration
+      ansible.builtin.file:
+        path: '{{ item.path }}'
+        owner: root
+        group: '{{ __wazuh_server_indexer_user }}'
+        mode: '{{ item.mode }}'
+      loop: >-
+        {{ [{'path': __wazuh_server_indexer_config_file, 'mode': '0640'},
+            {'path': __wazuh_server_indexer_jvm_options_dir, 'mode': '0750'}]
+           + ([{'path': __wazuh_server_indexer_heap_config_file, 'mode': '0640'}]
+              if wazuh_server_indexer_heap_size | length > 0 else []) }}
+      loop_control:
+        label: '{{ item.path }}'
+
     - name: Update | Start the indexer
       ansible.builtin.systemd_service:
         name: '{{ __wazuh_server_indexer_service_name }}'
