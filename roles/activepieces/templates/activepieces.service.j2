@@ -15,6 +15,12 @@ Type=simple
 User={{ activepieces_user }}
 Group={{ activepieces_group }}
 
+# The service runs rootless podman without a systemd user session, so
+# podman falls back to cgroupfs and cannot create a cgroup of its own:
+# crun then refuses the resource limits. Delegate lets the service user
+# manage its cgroup, and --cgroups=split places the container below it.
+Delegate=yes
+
 # Rootless podman keeps its runtime state in XDG_RUNTIME_DIR; systemd
 # creates the directory and keeps it across restarts
 RuntimeDirectory={{ __activepieces_runtime_dir | regex_replace('^/run/', '') }}
@@ -42,6 +48,7 @@ ExecStartPre=-/usr/bin/podman rm -f {{ activepieces_podman_container_name }}
 ExecStart=/usr/bin/podman run \
   --name={{ activepieces_podman_container_name }} \
   --rm \
+  --cgroups=split \
   --replace \
   --log-driver=passthrough \
   --userns=keep-id:uid=0,gid=0 \
