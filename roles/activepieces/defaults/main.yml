@@ -16,7 +16,7 @@ activepieces_service_enabled: true
 # Activepieces release: the tag of the container image the role runs. The
 # default follows the latest GitHub release and is bumped by the
 # update-activepieces-version workflow once the image tag is published.
-activepieces_version: '0.92.3-hotfix.2'
+activepieces_version: '0.93.0'
 
 # Container image and runtime settings
 activepieces_podman_image: 'docker.io/activepieces/activepieces'
