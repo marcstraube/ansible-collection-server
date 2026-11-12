@@ -2,6 +2,17 @@
 
 All notable changes to this collection will be documented in this file.
 
+## 1.1.2 (2026-11-12)
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+## What's Changed
+### Bug Fixes
+* fix(certbot): fail on EL 10 while the EPEL packages are not installable by @marcstraube in https://github.com/marcstraube/ansible-collection-server/pull/148
+
+
+**Full Changelog**: https://github.com/marcstraube/ansible-collection-server/compare/v1.1.1...v1.1.2
+
 ## 1.1.1 (2026-11-11)
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
