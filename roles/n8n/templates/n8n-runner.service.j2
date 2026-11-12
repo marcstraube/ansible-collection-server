@@ -11,6 +11,12 @@ Type=simple
 User={{ n8n_user }}
 Group={{ n8n_group }}
 
+# The service runs rootless podman without a systemd user session, so
+# podman falls back to cgroupfs and cannot create a cgroup of its own:
+# crun then refuses the resource limits. Delegate lets the service user
+# manage its cgroup, and --cgroups=split places the container below it.
+Delegate=yes
+
 # Shares the podman runtime directory that n8n.service creates
 Environment="XDG_RUNTIME_DIR={{ __n8n_runtime_dir }}"
 
@@ -31,6 +37,7 @@ ExecStartPre=-/usr/bin/podman rm -f {{ n8n_runners_podman_container_name }}
 ExecStart=/usr/bin/podman run \
   --name={{ n8n_runners_podman_container_name }} \
   --rm \
+  --cgroups=split \
   --replace \
   --log-driver=passthrough \
   --userns=keep-id:uid=1000,gid=1000 \
