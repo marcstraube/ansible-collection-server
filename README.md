@@ -17,7 +17,8 @@ for the base system (podman, pki, firewalld, fail2ban).
 - Arch Linux (rolling)
 - Debian Trixie (13)
 - EL 9 (Rocky, Alma, RHEL)
-- EL 10 (Rocky, Alma, RHEL)
+- EL 10 (Rocky, Alma, RHEL); `certbot` is currently unsupported there, see
+  its README
 
 ## Requirements
 

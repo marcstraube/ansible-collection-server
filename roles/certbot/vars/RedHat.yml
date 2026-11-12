@@ -26,3 +26,15 @@ __certbot_service_name: 'certbot-renew.service'
 __certbot_apache_service_name: 'httpd'
 
 __certbot_cron_file: '/etc/cron.d/certbot'
+
+# EL major versions where the EPEL certbot packages cannot be installed; the
+# role fails on them before it installs anything. EL 10: python3-acme needs
+# python3-pyOpenSSL >= 25, and the only build EPEL offers requires a newer
+# python3-cryptography than the distribution ships (#145). The drift
+# detection workflow opens an issue when certbot installs again. To lift the
+# block: remove the version from this list, uncomment the platform in
+# molecule/default/molecule.yml, revert the EL 10 notes in this role's README
+# and the collection README, and remove the target from
+# .github/drift-targets.yml.
+__certbot_blocked_major_versions:
+  - '10'

@@ -13,6 +13,21 @@
   tags:
     - always
 
+- name: Main | Assert the EPEL certbot packages are installable
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution_major_version'] not in (__certbot_blocked_major_versions | default([], true))
+    fail_msg: >-
+      certbot cannot be installed on {{ ansible_facts['distribution'] }}
+      {{ ansible_facts['distribution_major_version'] }}: the EPEL packages
+      python3-acme and python3-pyOpenSSL depend on a newer python3-cryptography
+      than the distribution ships. See
+      https://github.com/marcstraube/ansible-collection-server/issues/145
+    quiet: true
+  when: certbot_enabled | bool
+  tags:
+    - always
+
 - name: Main | Import installation tasks
   ansible.builtin.import_tasks: install.yml
   when: certbot_enabled | bool

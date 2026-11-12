@@ -24,14 +24,15 @@ The role is **opt-in**: it does nothing until `certbot_enabled` is set to `true`
 
 ## Supported Platforms
 
-| Platform                 | Notes                       |
-| ------------------------ | --------------------------- |
-| Arch Linux               |                             |
-| Debian Trixie            |                             |
-| EL 9 (Rocky, Alma, RHEL) | Requires EPEL for `certbot` |
+| Platform                  | Notes                                      |
+| ------------------------- | ------------------------------------------ |
+| Arch Linux                |                                            |
+| Debian Trixie             |                                            |
+| EL 9 (Rocky, Alma, RHEL)  | Requires EPEL for `certbot`                |
+| EL 10 (Rocky, Alma, RHEL) | Currently unsupported, see [Notes](#notes) |
 
 Other distributions in the same os_family (EndeavourOS, Manjaro, Ubuntu, Mint,
-Fedora, EL 10) should work but are not actively tested. Use distro-specific vars
+Fedora) should work but are not actively tested. Use distro-specific vars
 overrides if needed.
 
 ## Role Variables
@@ -230,6 +231,12 @@ configuration, the webroot layout, and the renewal timer.
 - **EPEL on EL:** the RedHat `certbot` package requires EPEL. This role installs
   packages but never enables repositories — provision EPEL via
   `marcstraube.common.package_management` (`dnf_epel_enabled`) first.
+- **EL 10 currently unsupported:** the EPEL certbot packages cannot be
+  installed there. `python3-acme` needs `python3-pyOpenSSL >= 25`, and the only
+  build EPEL offers requires a newer `python3-cryptography` than the
+  distribution ships. The role fails on EL 10 before it installs anything
+  ([#145](https://github.com/marcstraube/ansible-collection-server/issues/145));
+  the support returns once EPEL ships installable packages.
 - **Webroot vs. apache authenticator:** the webroot authenticator serves the ACME
   challenge from `certbot_webroot_path` without restarting the web server, which
   is preferable when the running vhost already exposes `/.well-known/acme-challenge/`.
