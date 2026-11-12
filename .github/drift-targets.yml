@@ -1,0 +1,26 @@
+---
+# Drift-detection targets: packages a role currently blocks or leaves out
+# on a platform because they cannot be installed there. The drift-detection
+# workflow probes each entry weekly and opens an issue when the package
+# becomes installable again, so the block can be lifted.
+#
+# Schema (per entry):
+#   role:       role directory under roles/
+#   platform:   one of archlinux | debian-trixie | rocky-9 | rocky-10
+#   package:    upstream package name to probe with the platform's PM
+#   source:     'repo' (default) or 'aur' — aur targets attempt a
+#               makepkg build instead of a pacman download
+#   vars_file:  path (relative to the role) to the vars file that holds
+#               the block; included in the drift issue so the fix
+#               location is obvious
+#
+# Add an entry when blocking a package; remove it when lifting the block.
+
+targets:
+  # #145: EPEL python3-pyOpenSSL needs a newer python3-cryptography than
+  # EL 10 ships. Lift: see the comment above __certbot_blocked_major_versions
+  # in vars/RedHat.yml.
+  - role: certbot
+    platform: rocky-10
+    package: certbot
+    vars_file: vars/RedHat.yml
