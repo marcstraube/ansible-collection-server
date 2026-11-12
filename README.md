@@ -44,6 +44,12 @@ for the base system (podman, pki, firewalld, fail2ban).
 | **postgresql** | PostgreSQL server with TLS and the PGDG repository option   |
 | **mariadb**    | MariaDB server with TLS and the upstream repository option  |
 
+### Mail
+
+| Role             | Description                                                      |
+| ---------------- | ---------------------------------------------------------------- |
+| **postfixadmin** | PostfixAdmin with its schema, read-only users and mail accounts  |
+
 ### Applications
 
 | Role             | Description                                                     |

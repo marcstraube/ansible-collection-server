@@ -1,0 +1,135 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __verify_dir: '/var/www/postfixadmin'
+    __verify_helper: '/usr/local/lib/postfixadmin-ansible/postfixadmin-ansible.php'
+
+  tasks:
+    - name: Verify | Load role defaults
+      ansible.builtin.include_vars:
+        file: '../../defaults/main.yml'
+        name: __verify_defaults
+
+    - name: Verify | Read the state before the update
+      ansible.builtin.slurp:
+        src: /root/molecule-before-update.json
+      register: __verify_before_raw
+
+    - name: Verify | Read the release marker
+      ansible.builtin.slurp:
+        src: '{{ __verify_dir }}/.ansible-release'
+      register: __verify_marker
+
+    - name: Verify | Read the schema version
+      ansible.builtin.command:
+        argv: [php, '{{ __verify_helper }}', '{{ __verify_dir }}']
+        stdin: '{"action": "status"}'
+      register: __verify_status
+      changed_when: false
+
+    - name: Verify | Stat config.local.php and templates_c
+      ansible.builtin.stat:
+        path: '{{ item }}'
+        checksum_algorithm: sha256
+      loop:
+        - /etc/postfixadmin/config.local.php
+        - '{{ __verify_dir }}/templates_c'
+        - '{{ __verify_dir }}/config.local.php'
+        - /var/www/.postfixadmin.new
+        - /var/www/.postfixadmin.old
+        - '/var/cache/postfixadmin/postfixadmin-v{{ __molecule_previous_version }}-php84.tar.gz'
+      register: __verify_stat
+
+    - name: Verify | Assert the update
+      ansible.builtin.assert:
+        that:
+          - __verify_before.status.release == __molecule_previous_version
+          - (__verify_marker.content | b64decode | trim) == __verify_defaults.postfixadmin_version
+          - __verify_now.release == __verify_defaults.postfixadmin_version
+          # The schema of the new release was applied
+          - __verify_before.status.db_version < __verify_now.db_version
+          - __verify_now.db_version == __verify_now.target_version
+          # config.local.php stayed as it was, the new release links to it
+          - __verify_stat.results[0].stat.checksum == __verify_before.config_checksum
+          - __verify_stat.results[1].stat.pw_name == 'www-data'
+          - __verify_stat.results[2].stat.islnk
+          # Nothing of the replaced release is left
+          - not __verify_stat.results[3].stat.exists
+          - not __verify_stat.results[4].stat.exists
+          - not __verify_stat.results[5].stat.exists
+        fail_msg: 'Before: {{ __verify_before.status }}, now: {{ __verify_now }}'
+      vars:
+        __verify_before: '{{ __verify_before_raw.content | b64decode | from_json }}'
+        __verify_now: '{{ __verify_status.stdout | from_json }}'
+
+    - name: Verify | List the pre-update dumps
+      ansible.builtin.find:
+        paths: /var/backups/postfixadmin
+        patterns: 'postfixadmin-*'
+      register: __verify_dumps
+
+    - name: Verify | Read the tables of the pre-update dump
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail &&
+          gunzip -c /var/backups/postfixadmin/postfixadmin-{{ __molecule_previous_version }}-*.sql.gz
+          | grep -E '^(CREATE TABLE|COPY) public\.(mailbox|config) '
+        executable: /bin/bash
+      register: __verify_dump_content
+      changed_when: false
+
+    # One dump of the previous release (taken once, not by the check run or
+    # the idempotence run) and the newer of the two older dumps
+    - name: Verify | Assert the pre-update dump and its rotation
+      ansible.builtin.assert:
+        that:
+          - __verify_names | length == 2
+          - __verify_names[0] == 'postfixadmin-4.0.4-20200102T000000.sql.gz'
+          - >-
+            __verify_names[1] is match('^postfixadmin-' ~ (__molecule_previous_version | regex_escape)
+                                       ~ '-[0-9]{8}T[0-9]{6}\.sql\.gz$')
+          - (__verify_dumps.files | selectattr('path', 'search', __verify_names[1]) | first).mode == '0600'
+          - __verify_dump_content.stdout_lines | length == 4
+        fail_msg: '{{ __verify_names }} {{ __verify_dump_content.stdout_lines }}'
+      vars:
+        __verify_names: '{{ __verify_dumps.files | map(attribute="path") | map("basename") | sort }}'
+
+    # The accounts of the previous release still log in
+    - name: Verify | Check a mailbox password with the new release
+      ansible.builtin.command:
+        argv: [php, '{{ __verify_helper }}', '{{ __verify_dir }}']
+        stdin: >-
+          {{ {'action': 'accounts', 'type': 'mailbox', 'check': true,
+              'entries': [{'id': 'alice@example.com', 'mode': 'managed',
+                           'values': {'name': 'Alice'}, 'password': 'alice-Secret-42'}]} | to_json }}
+      register: __verify_alice
+      changed_when: false
+      no_log: true
+
+    - name: Verify | Assert the mailbox is unchanged
+      ansible.builtin.assert:
+        that:
+          - (__verify_alice.stdout | from_json).results[0].action == 'unchanged'
+        fail_msg: '{{ __verify_alice.stdout }}'
+
+    - name: Verify | Run the role with the previous release
+      block:
+        - name: Verify | Include postfixadmin role  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            postfixadmin_version: '{{ __molecule_previous_version }}'
+            postfixadmin_checksum: '{{ __molecule_previous_checksum }}'
+
+        - name: Verify | Fail when the downgrade was accepted
+          ansible.builtin.fail:
+            msg: 'The role installed an older release'
+      rescue:
+        - name: Verify | Assert the downgrade was refused
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search('is older')
+            fail_msg: '{{ ansible_failed_result.msg }}'

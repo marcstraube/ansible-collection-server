@@ -1,0 +1,218 @@
+---
+#
+# PostfixAdmin — Shared Variables
+#
+
+# Release archive on GitHub: the build for PHP 8.1 and newer. The other
+# build (php74) bundles older dependencies for PHP 7.4 to 8.0.
+__postfixadmin_build: 'php84'
+__postfixadmin_release_url: 'https://github.com/postfixadmin/postfixadmin/releases/download'
+__postfixadmin_latest_api_url: 'https://api.github.com/repos/postfixadmin/postfixadmin/releases/latest'
+__postfixadmin_version_pattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
+
+# Lowest PHP version the build runs on (its composer platform check)
+__postfixadmin_php_minimum_id: 80100
+
+# Download cache of the release archive
+__postfixadmin_cache_dir: '/var/cache/postfixadmin'
+
+# Marker in postfixadmin_install_dir naming the installed release; a
+# directory without it was not installed by the role
+__postfixadmin_release_marker: '{{ postfixadmin_install_dir }}/.ansible-release'
+
+# Directories of a new release before it replaces the installed one and of
+# the replaced release, next to postfixadmin_install_dir (same file system)
+__postfixadmin_staging_dir: >-
+  {{ postfixadmin_install_dir | dirname }}/.{{ postfixadmin_install_dir | basename }}.new
+__postfixadmin_replaced_dir: >-
+  {{ postfixadmin_install_dir | dirname }}/.{{ postfixadmin_install_dir | basename }}.old
+
+# Pre-update backup script; it runs for a database server on this host
+__postfixadmin_backup_script: '/usr/local/bin/postfixadmin-backup'
+__postfixadmin_backup_active: >-
+  {{ postfixadmin_backup_enabled | bool and __postfixadmin_db_local | bool }}
+
+# config.local.php lives outside the release directory, so it survives a
+# version change; the release links to it
+__postfixadmin_config_dir: '/etc/postfixadmin'
+__postfixadmin_config_file: '{{ __postfixadmin_config_dir }}/config.local.php'
+
+# Helper that runs PostfixAdmin's own code for the schema, the accounts and
+# the SOGo view (request as JSON on stdin)
+__postfixadmin_helper_dir: '/usr/local/lib/postfixadmin-ansible'
+__postfixadmin_helper: '{{ __postfixadmin_helper_dir }}/postfixadmin-ansible.php'
+
+# PHP-FPM pool user and group
+__postfixadmin_fpm_user: '{{ postfixadmin_php_fpm_user or __postfixadmin_default_fpm_user }}'
+__postfixadmin_fpm_group: '{{ postfixadmin_php_fpm_group or __postfixadmin_default_fpm_group }}'
+
+# PostfixAdmin database driver per postfixadmin_db_type
+__postfixadmin_db_drivers:
+  postgresql: 'pgsql'
+  mariadb: 'mysqli'
+
+# PDO driver PHP needs per postfixadmin_db_type
+__postfixadmin_pdo_drivers:
+  postgresql: 'pgsql'
+  mariadb: 'mysql'
+
+# Addresses of a database server on the host itself
+__postfixadmin_loopback_hosts:
+  - 'localhost'
+  - '127.0.0.1'
+  - '::1'
+
+# The database server runs on this host: a loopback address or a unix
+# socket
+__postfixadmin_db_local: >-
+  {{ postfixadmin_db_host in __postfixadmin_loopback_hosts
+     or postfixadmin_db_host is match('/') }}
+
+# Connection through a unix socket: a socket path, or 'localhost' with
+# MariaDB (the convention of the MySQL clients)
+__postfixadmin_db_socket: >-
+  {{ postfixadmin_db_host if postfixadmin_db_host is match('/')
+     else (__postfixadmin_mariadb_socket
+           if postfixadmin_db_type == 'mariadb' and postfixadmin_db_host == 'localhost'
+           else '') }}
+
+# Socket directory the PostgreSQL modules connect through as the postgres
+# user: the one in postfixadmin_db_host, otherwise the default of the
+# platform's client library (the server's default). The socket file is
+# named after the port, so the modules pass postfixadmin_db_port as well.
+__postfixadmin_pg_socket_dir: >-
+  {{ postfixadmin_db_host if postfixadmin_db_host is match('/') else '' }}
+
+# Socket the MariaDB modules connect through as root: the one in
+# postfixadmin_db_host, otherwise the socket of the platform
+__postfixadmin_mariadb_login_socket: >-
+  {{ postfixadmin_db_host if postfixadmin_db_host is match('/') else __postfixadmin_mariadb_socket }}
+
+# Account host of the database owner on MariaDB: socket connections log in
+# as 'localhost', TCP connections with the loopback address
+__postfixadmin_db_owner_host: >-
+  {{ 'localhost' if __postfixadmin_db_socket | length > 0 else postfixadmin_db_host }}
+
+# Schemes PostfixAdmin writes with their prefix through its own hashing
+# library ($CONF['encrypt'])
+__postfixadmin_password_schemes:
+  - 'ARGON2ID'
+  - 'BLF-CRYPT'
+  - 'SHA512-CRYPT'
+
+# $CONF keys config.local.php writes from role variables (key => the
+# variable to set instead); postfixadmin_extra_config must not override
+# them. Every key with a prefix of __postfixadmin_managed_config_prefixes
+# is rejected as well (the connection settings of the database).
+__postfixadmin_managed_config:
+  configured: '(always true, set by the role)'
+  setup_password: 'postfixadmin_setup_password_hash'
+  encrypt: 'postfixadmin_password_scheme'
+  password_validation: 'postfixadmin_password_validation'
+  totp: 'postfixadmin_totp'
+  admin_email: 'postfixadmin_admin_email'
+  smtp_server: 'postfixadmin_smtp_server'
+  smtp_port: 'postfixadmin_smtp_port'
+  domain_path: 'postfixadmin_domain_path'
+  domain_in_mailbox: 'postfixadmin_domain_in_mailbox'
+  quota: 'postfixadmin_quota'
+  domain_quota: 'postfixadmin_domain_quota'
+  quota_multiplier: 'postfixadmin_quota_multiplier'
+  aliases: 'postfixadmin_domain_aliases_limit'
+  mailboxes: 'postfixadmin_domain_mailboxes_limit'
+  maxquota: 'postfixadmin_domain_maxquota'
+  domain_quota_default: 'postfixadmin_domain_quota_default'
+  default_aliases: 'postfixadmin_default_aliases'
+  vacation: 'postfixadmin_vacation_enabled'
+  vacation_domain: 'postfixadmin_vacation_domain'
+__postfixadmin_managed_config_prefixes:
+  database_: 'the postfixadmin_db_* variables'
+
+# Keys of postfixadmin_extra_config the role manages itself, each with the
+# variable to set instead
+__postfixadmin_extra_config_rejected: >-
+  {%- set ns = namespace(keys={}) -%}
+  {%- for key in (postfixadmin_extra_config if postfixadmin_extra_config is mapping else {}) -%}
+  {%- if key | string in __postfixadmin_managed_config -%}
+  {%- set ns.keys = ns.keys | combine({key | string: __postfixadmin_managed_config[key | string]}) -%}
+  {%- endif -%}
+  {%- for prefix, variable in __postfixadmin_managed_config_prefixes.items() -%}
+  {%- if (key | string).startswith(prefix) -%}
+  {%- set ns.keys = ns.keys | combine({key | string: variable}) -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {%- endfor -%}
+  {{ ns.keys }}
+
+__postfixadmin_account_modes:
+  - 'managed'
+  - 'initial'
+  - 'disabled'
+
+# Tables the read-only users get when their entry lists none
+__postfixadmin_reader_tables:
+  - 'domain'
+  - 'mailbox'
+  - 'alias'
+  - 'alias_domain'
+
+# postfixadmin_db_readers without the passwords, for the tasks that do not
+# need them: a loop prints its items with -v and on a failure
+__postfixadmin_db_readers_public: >-
+  {{ postfixadmin_db_readers | map('dict2items') | map('rejectattr', 'key', 'eq', 'password')
+     | map('list') | map('items2dict') | list }}
+
+# Account types in the order they are created; removal runs in reverse.
+# 'key' is the identifying attribute of an entry, 'fields' the attributes
+# passed to PostfixAdmin, 'password' whether the entry carries one.
+__postfixadmin_account_types:
+  - type: 'domain'
+    variable: 'postfixadmin_domains'
+    key: 'domain'
+    fields: ['description', 'aliases', 'mailboxes', 'maxquota', 'quota', 'backupmx', 'active', 'default_aliases']
+    password: false
+  - type: 'admin'
+    variable: 'postfixadmin_admins'
+    key: 'username'
+    fields: ['superadmin', 'domains', 'active']
+    password: true
+  - type: 'mailbox'
+    variable: 'postfixadmin_mailboxes'
+    key: 'username'
+    fields: ['name', 'quota', 'active']
+    password: true
+  - type: 'alias'
+    variable: 'postfixadmin_aliases'
+    key: 'address'
+    fields: ['goto', 'active']
+    password: false
+  - type: 'alias_domain'
+    variable: 'postfixadmin_alias_domains'
+    key: 'alias_domain'
+    fields: ['target_domain', 'active']
+    password: false
+
+# Entries of the account type of the current loop item (an entry of
+# __postfixadmin_account_types) with mode and state filled in
+__postfixadmin_type_entries: >-
+  {%- set ns = namespace(entries=[]) -%}
+  {%- for entry in lookup('vars', item.variable) -%}
+  {%- set ns.entries = ns.entries + [entry | combine({
+        'mode': entry.mode | default(postfixadmin_account_mode),
+        'state': entry.state | default('present')})] -%}
+  {%- endfor -%}
+  {{ ns.entries }}
+
+# Results of the accounts tasks without what the request carried (the
+# passwords): per entry type the helper's JSON response, or stderr when it
+# printed none
+__postfixadmin_account_reports: >-
+  {%- set ns = namespace(reports=[]) -%}
+  {%- for result in __postfixadmin_accounts.results | default([]) | selectattr('rc', 'defined') -%}
+  {%- set response = result.stdout | from_json if result.stdout is match('\s*\{') else {} -%}
+  {%- set ns.reports = ns.reports + [{
+        'variable': result.item.0.variable, 'state': result.item.1, 'rc': result.rc,
+        'response': response,
+        'stderr': '' if response else result.stderr | default('') | trim}] -%}
+  {%- endfor -%}
+  {{ ns.reports }}

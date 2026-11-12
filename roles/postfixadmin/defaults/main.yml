@@ -1,0 +1,284 @@
+---
+#
+# Role Control
+#
+
+# Enable the postfixadmin role
+postfixadmin_enabled: false
+
+#
+# Installation
+#
+# The role installs the release archive of PostfixAdmin from GitHub (the
+# build for PHP 8.1 and newer) into postfixadmin_install_dir. The web
+# server serves postfixadmin_install_dir/public through PHP-FPM; neither is
+# managed by this role (see README).
+
+# PostfixAdmin release, without the leading 'v'. The default follows the
+# latest GitHub release and is bumped by the update-postfixadmin-version
+# workflow together with postfixadmin_checksum. 'latest' installs the
+# newest release and takes its checksum from the GitHub API.
+postfixadmin_version: '4.0.6'
+
+# SHA-256 checksum of the release archive of postfixadmin_version
+# ('sha256:<hash>'); ignored with 'latest'
+postfixadmin_checksum: 'sha256:135aa69bd60d4268baa842d2b608e116b2156e8020290d60a1c511ca105a3d38'
+
+# Directory of the installed release; the web server root is its public/
+# subdirectory. The role owns the directory and replaces it on a version
+# change.
+postfixadmin_install_dir: '/var/www/postfixadmin'
+
+# PHP command line binary the role runs PostfixAdmin with (schema upgrade,
+# accounts). Use the binary of the version PHP-FPM runs, e.g. 'php8.4'.
+postfixadmin_php_cli: 'php'
+
+# User and group of the PHP-FPM pool that runs PostfixAdmin: templates_c
+# is writable for the user, config.local.php readable for the group.
+# Empty uses the pool default of the platform (Arch Linux 'http', Debian
+# 'www-data', EL 'apache').
+postfixadmin_php_fpm_user: ''
+postfixadmin_php_fpm_group: ''
+
+#
+# Database
+#
+# Connection settings of the PostfixAdmin database. The database server
+# may run on another host and does not have to be managed by Ansible.
+# PostfixAdmin needs a user that owns the database (it creates and
+# upgrades its schema).
+
+# Database type: 'postgresql' or 'mariadb'
+postfixadmin_db_type: 'postgresql'
+
+# Host name, IP address or the path of a unix socket (PostgreSQL: the
+# socket directory). 'localhost' with MariaDB connects through the socket
+# of the platform.
+postfixadmin_db_host: 'localhost'
+
+# Port; PostgreSQL also uses it for a unix socket (the socket file is
+# named after it), MariaDB ignores it there
+postfixadmin_db_port: "{{ (postfixadmin_db_type == 'mariadb') | ternary(3306, 5432) }}"
+
+# Database name, user and password (REQUIRED)
+postfixadmin_db_name: 'postfixadmin'
+postfixadmin_db_user: 'postfixadmin'
+postfixadmin_db_password: ''
+
+# Connect with TLS and verify the server certificate against
+# postfixadmin_db_tls_ca_file and the host name (PostgreSQL sslmode
+# verify-full). The CA file is required with TLS; use the system bundle
+# for a publicly signed certificate. Not possible through a unix socket.
+# Without TLS the connection is unencrypted: only for a private network or
+# WireGuard.
+postfixadmin_db_tls: false
+postfixadmin_db_tls_ca_file: ''
+
+# Create the database and its owner postfixadmin_db_user. Only for a
+# database server on the same host (postfixadmin_db_host a loopback
+# address or a unix socket); requires the marcstraube.server.postgresql or
+# marcstraube.server.mariadb role to run first.
+postfixadmin_db_create: false
+
+# Read-only database users for the mail services that read the
+# PostfixAdmin tables (Postfix, Dovecot, SOGo), created with SELECT on
+# 'tables'. Same requirement as postfixadmin_db_create. 'host' is the
+# MariaDB account host (default 'localhost'); PostgreSQL controls the
+# client addresses in pg_hba.conf. 'tables' defaults to domain, mailbox,
+# alias and alias_domain; the SOGo user needs the view
+# (postfixadmin_sogo_view_name). state: absent removes the user.
+postfixadmin_db_readers: []
+# Example:
+#   - name: 'postfix'
+#     password: '{{ vault_postfixadmin_db_postfix_password }}'
+#     host: '192.0.2.25'
+#   - name: 'dovecot'
+#     password: '{{ vault_postfixadmin_db_dovecot_password }}'
+#     tables: ['domain', 'mailbox', 'alias_domain']
+#   - name: 'sogo'
+#     password: '{{ vault_postfixadmin_db_sogo_password }}'
+#     tables: ['sogo_users']
+
+#
+# Pre-update Backup
+#
+# The schema upgrade of a new release is forward-only. Before a version
+# change the role dumps the database when its server runs on this host
+# (postfixadmin_db_host a loopback address or a unix socket) with
+# /usr/local/bin/postfixadmin-backup: pg_dump as the postgres user or
+# mariadb-dump as root, through the socket of the server, compressed to
+# postfixadmin_backup_dir/postfixadmin-<installed release>-<timestamp>.sql.gz.
+# A database on another host has to be backed up by its operator before
+# the update (see README). The regular backups come from the database role.
+
+# Dump the database before a version change
+postfixadmin_backup_enabled: true
+
+# Directory of the dumps
+postfixadmin_backup_dir: '/var/backups/postfixadmin'
+
+# Pre-update dumps to keep (count-based, newest first)
+postfixadmin_backup_update_keep: 3
+
+#
+# Password Scheme
+#
+
+# Scheme of the password hashes PostfixAdmin writes ($CONF['encrypt']):
+# 'ARGON2ID', 'BLF-CRYPT' or 'SHA512-CRYPT'. PostfixAdmin stores the hash
+# with the scheme prefix ({ARGON2ID}$argon2id$...), which Dovecot, SOGo and
+# the Roundcube password plugin read. ARGON2ID needs PHP with Argon2
+# (missing on EL 9 before the php:8.3 module stream).
+postfixadmin_password_scheme: 'ARGON2ID'
+
+#
+# Configuration
+#
+# Settings written to config.local.php.
+
+# Hash of the password of setup.php ($CONF['setup_password']). Empty
+# disables the setup.php login; the role creates the schema and the
+# accounts without it.
+# Generate with: php -r 'echo password_hash("<password>", PASSWORD_DEFAULT), "\n";'
+postfixadmin_setup_password_hash: ''
+
+# Password rules of PostfixAdmin ($CONF['password_validation']): PCRE
+# pattern => message key of the language files, optionally followed by a
+# space and the value of its %s. A password must match every pattern; the
+# web interface and the accounts of the role are checked against them. The
+# default raises upstream's minimum of 5 characters to 12 and keeps its 3
+# letters and 2 digits. {} disables the check.
+postfixadmin_password_validation:
+  '/.{12}/': 'password_too_short 12'
+  '/([a-zA-Z].*){3}/': 'password_no_characters 3'
+  '/([0-9].*){2}/': 'password_no_digits 2'
+
+# Offer TOTP (two-factor login) in PostfixAdmin ($CONF['totp']): admins and
+# mailbox users can then add a TOTP secret to their account; logins of
+# accounts with a secret ask for the code
+postfixadmin_totp: false
+
+# Sender address of the mails PostfixAdmin sends (welcome mail, broadcast,
+# password recovery) and the SMTP server it sends them through
+postfixadmin_admin_email: ''
+postfixadmin_smtp_server: 'localhost'
+postfixadmin_smtp_port: 25
+
+# Maildir layout of new mailboxes ($CONF['domain_path'],
+# $CONF['domain_in_mailbox']):
+#   true / false: example.com/alice/
+#   true / true:  example.com/alice@example.com/
+#   false:        alice@example.com/
+postfixadmin_domain_path: true
+postfixadmin_domain_in_mailbox: false
+
+# Quota per mailbox and per domain ($CONF['quota'], $CONF['domain_quota'])
+# and the bytes of a quota megabyte ($CONF['quota_multiplier'])
+postfixadmin_quota: true
+postfixadmin_domain_quota: true
+postfixadmin_quota_multiplier: 1024000
+
+# Limits of a new domain ($CONF['aliases'], $CONF['mailboxes'],
+# $CONF['maxquota'] in MB per mailbox, $CONF['domain_quota_default'] in MB
+# for the domain): 0 is unlimited, -1 disabled
+postfixadmin_domain_aliases_limit: 0
+postfixadmin_domain_mailboxes_limit: 0
+postfixadmin_domain_maxquota: 0
+postfixadmin_domain_quota_default: 0
+
+# Aliases created with every new domain ($CONF['default_aliases']): local
+# part => target, a full address or a local part of the same domain
+postfixadmin_default_aliases: {}
+# Example:
+#   abuse: 'postmaster@example.com'
+#   postmaster: 'admin@example.com'
+
+# PostfixAdmin vacation feature ($CONF['vacation']): needs the vacation
+# script of PostfixAdmin on the mail host and a transport for
+# postfixadmin_vacation_domain. Out-of-office replies through Sieve
+# (Dovecot ManageSieve, SOGo, Roundcube) need neither (see README).
+postfixadmin_vacation_enabled: false
+postfixadmin_vacation_domain: ''
+
+# Further $CONF settings (name => value); strings, numbers, booleans, lists
+# and mappings are written as PHP values. Keys the role writes from its own
+# variables (encrypt, password_validation, totp, every database_* key, ...)
+# are rejected; set the role variable instead.
+postfixadmin_extra_config: {}
+# Example:
+#   site_url: 'https://postfixadmin.example.com/'
+
+#
+# Accounts
+#
+# Admins, domains, mailboxes, aliases and alias domains from role
+# variables, applied through the PostfixAdmin handler classes that
+# postfixadmin-cli uses. Entries that are not listed stay untouched, so
+# accounts created in the web interface are kept. Every entry takes
+# 'mode' (overrides postfixadmin_account_mode) and 'state' ('present' or
+# 'absent'). Passwords have no default; they must meet
+# postfixadmin_password_validation.
+
+# How listed entries are applied:
+#   'managed'  - Create the entry and reconcile the attributes it sets on
+#                every run; the password is checked against the stored
+#                hash and only updated when it differs.
+#   'initial'  - Create the entry when it is missing, then leave it alone.
+#   'disabled' - Skip the entry.
+postfixadmin_account_mode: 'managed'
+
+# Admins: username (an address), password, superadmin, domains, active
+postfixadmin_admins: []
+# Example:
+#   - username: 'admin@example.com'
+#     password: '{{ vault_postfixadmin_admin_password }}'
+#     superadmin: true
+#   - username: 'helpdesk@example.com'
+#     password: '{{ vault_postfixadmin_helpdesk_password }}'
+#     domains: ['example.com']
+#     mode: 'initial'
+
+# Domains: domain, description, aliases, mailboxes, maxquota (MB per
+# mailbox), quota (MB for the domain), backupmx, active and
+# default_aliases (create the default aliases; only on creation)
+postfixadmin_domains: []
+# Example:
+#   - domain: 'example.com'
+#     description: 'Example'
+#     maxquota: 10240
+#   - domain: 'old.example.com'
+#     state: 'absent'
+
+# Mailboxes: username (the address), password, name, quota (MB; needed
+# when the domain limits maxquota or quota), active
+postfixadmin_mailboxes: []
+# Example:
+#   - username: 'alice@example.com'
+#     password: '{{ vault_postfixadmin_alice_password }}'
+#     name: 'Alice'
+#     quota: 2048
+
+# Aliases: address, goto (list of targets), active
+postfixadmin_aliases: []
+# Example:
+#   - address: 'info@example.com'
+#     goto: ['alice@example.com', 'bob@example.com']
+
+# Alias domains: alias_domain, target_domain, active. Both have to be
+# domains of PostfixAdmin.
+postfixadmin_alias_domains: []
+# Example:
+#   - alias_domain: 'example.org'
+#     target_domain: 'example.com'
+
+#
+# SOGo
+#
+
+# Create a view for the SOGo user source in the PostfixAdmin database:
+# one row per active mailbox of an active domain with the columns c_uid,
+# c_name, c_password, c_cn, mail and domain. false removes the view.
+postfixadmin_sogo_view_enabled: false
+
+# Name of the view
+postfixadmin_sogo_view_name: 'sogo_users'

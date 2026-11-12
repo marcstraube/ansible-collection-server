@@ -1,0 +1,70 @@
+#!/bin/bash
+{{ ansible_managed | comment }}
+#
+# Writes a compressed dump of the PostfixAdmin database
+# {{ postfixadmin_db_name }} ({{ postfixadmin_db_type }} on this host) to
+# {{ postfixadmin_backup_dir }}, named
+# postfixadmin-<installed release>-<YYYYmmddTHHMMSS>.sql.gz. The role runs it
+# before a version change replaces the release and upgrades the schema.
+#
+# Usage: postfixadmin-backup
+#
+# The retention is count-based: the newest dumps stay, the one just written
+# among them ({{ postfixadmin_backup_update_keep | int }} in all); a failing dump removes nothing.
+
+set -euo pipefail
+umask 077
+
+BACKUP_DIR="{{ postfixadmin_backup_dir }}"
+BACKUP_DIR="${BACKUP_DIR%/}"
+MARKER="{{ __postfixadmin_release_marker }}"
+KEEP={{ postfixadmin_backup_update_keep | int }}
+
+# The release in the name is the one the schema in the dump belongs to
+VERSION=$(head -n 1 "${MARKER}" 2>/dev/null | tr -d '[:space:]' || true)
+if [ -z "${VERSION}" ]; then
+    echo "No release installed by the role: ${MARKER} is missing" >&2
+    exit 1
+fi
+
+DUMP="${BACKUP_DIR}/postfixadmin-${VERSION}-$(date +%Y%m%dT%H%M%S).sql.gz"
+mkdir -p "${BACKUP_DIR}"
+
+# A failed dump leaves no partial file that the rotation would count
+PARTIAL="${DUMP}.partial"
+trap 'rm -f -- "${PARTIAL}"' EXIT
+
+echo "Dumping {{ postfixadmin_db_name }} to ${DUMP}"
+{% if postfixadmin_db_type == 'postgresql' %}
+# pg_dump runs as the postgres user through the socket of the server
+# (peer authentication); the socket file is named after the port. The
+# redirect keeps the dump owned by root.
+runuser -u postgres -- pg_dump \
+{% if __postfixadmin_pg_socket_dir | length > 0 %}
+    --host={{ __postfixadmin_pg_socket_dir | quote }} \
+{% endif %}
+    --port={{ postfixadmin_db_port | int }} \
+    --dbname={{ postfixadmin_db_name | quote }} \
+    | gzip > "${PARTIAL}"
+{% else %}
+# root logs in through the socket (unix_socket authentication)
+mariadb-dump --protocol=socket --socket={{ __postfixadmin_mariadb_login_socket | quote }} \
+    --single-transaction --routines --triggers --events \
+    {{ postfixadmin_db_name | quote }} \
+    | gzip > "${PARTIAL}"
+{% endif %}
+mv -f -- "${PARTIAL}" "${DUMP}"
+
+# Rotation: dumps newest first, without the dump just written; everything
+# beyond the retention is removed
+find "${BACKUP_DIR}" -mindepth 1 -maxdepth 1 -type f -name 'postfixadmin-*.sql.gz' ! -path "${DUMP}" \
+        -printf '%T@ %p\n' \
+    | sort -rn \
+    | tail -n +$((KEEP > 1 ? KEEP : 1)) \
+    | cut -d' ' -f2- \
+    | while IFS= read -r OLD_DUMP; do
+        echo "Removing ${OLD_DUMP} beyond the retention of ${KEEP}"
+        rm -f -- "${OLD_DUMP}"
+    done
+
+echo "Dump ${DUMP} completed: $(date)"

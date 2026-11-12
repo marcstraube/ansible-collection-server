@@ -1,0 +1,140 @@
+---
+# Rollback after the update, as the README describes it: restore the
+# pre-update dump, remove the installation directory and run the role with
+# the previous release. The run installs the previous release without a
+# dump and without a schema upgrade, the restored schema matches the
+# release, the accounts still log in and a second run changes nothing.
+- name: Side Effect
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - ../shared/vars/accounts.yml
+
+  vars:
+    __side_effect_dir: '/var/www/postfixadmin'
+    __side_effect_helper: '/usr/local/lib/postfixadmin-ansible/postfixadmin-ansible.php'
+
+  tasks:
+    - name: Side Effect | Read the state before the update
+      ansible.builtin.slurp:
+        src: /root/molecule-before-update.json
+      register: __side_effect_before_raw
+
+    - name: Side Effect | Find the pre-update dump of the previous release
+      ansible.builtin.find:
+        paths: /var/backups/postfixadmin
+        patterns: 'postfixadmin-{{ __molecule_previous_version }}-*.sql.gz'
+      register: __side_effect_dumps
+
+    - name: Side Effect | Assert there is exactly one pre-update dump
+      ansible.builtin.assert:
+        that:
+          - __side_effect_dumps.files | length == 1
+        fail_msg: '{{ __side_effect_dumps.files | map(attribute="path") | list }}'
+
+    # The commands of the README (Backup)
+    - name: Side Effect | Restore the pre-update dump
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail &&
+          runuser -u postgres -- dropdb postfixadmin &&
+          runuser -u postgres -- createdb -O postfixadmin -T template0 -E UTF8 postfixadmin &&
+          gunzip -c {{ (__side_effect_dumps.files | first).path | quote }}
+          | runuser -u postgres -- psql -q -v ON_ERROR_STOP=1 -d postfixadmin
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Side Effect | Remove the installation directory
+      ansible.builtin.file:
+        path: '{{ __side_effect_dir }}'
+        state: absent
+
+    - name: Side Effect | Include postfixadmin role with the previous release  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        postfixadmin_version: '{{ __molecule_previous_version }}'
+        postfixadmin_checksum: '{{ __molecule_previous_checksum }}'
+
+    - name: Side Effect | Assert the rollback run
+      ansible.builtin.assert:
+        that:
+          # Installed like a first install: no dump, no warning about one
+          - __postfixadmin_release_changed | bool
+          - not __postfixadmin_release_installed | bool
+          - __postfixadmin_backup is skipped
+          # The restored schema is the one of the previous release
+          - __postfixadmin_schema_upgrade is skipped
+          # The accounts of the dump are the ones of accounts.yml
+          - >-
+            __postfixadmin_accounts.results | selectattr('changed', 'defined') | selectattr('changed')
+            | list | length == 0
+        fail_msg: >-
+          {{ __postfixadmin_accounts.results | selectattr('changed', 'defined') | selectattr('changed')
+             | map(attribute='stdout') | list }}
+
+    - name: Side Effect | Read the release marker
+      ansible.builtin.slurp:
+        src: '{{ __side_effect_dir }}/.ansible-release'
+      register: __side_effect_marker
+
+    - name: Side Effect | Read the schema version
+      ansible.builtin.command:
+        argv: [php, '{{ __side_effect_helper }}', '{{ __side_effect_dir }}']
+        stdin: '{"action": "status"}'
+      register: __side_effect_status
+      changed_when: false
+
+    - name: Side Effect | List the pre-update dumps
+      ansible.builtin.find:
+        paths: /var/backups/postfixadmin
+        patterns: 'postfixadmin-*'
+      register: __side_effect_all_dumps
+
+    - name: Side Effect | Assert release and schema are consistent
+      ansible.builtin.assert:
+        that:
+          - (__side_effect_marker.content | b64decode | trim) == __molecule_previous_version
+          - __side_effect_now.release == __molecule_previous_version
+          - __side_effect_now.db_version == __side_effect_before.status.db_version
+          - __side_effect_now.db_version == __side_effect_now.target_version
+          # The rollback took no dump of its own
+          - __side_effect_all_dumps.files | length == 2
+        fail_msg: 'Before the update: {{ __side_effect_before.status }}, now: {{ __side_effect_now }}'
+      vars:
+        __side_effect_before: '{{ __side_effect_before_raw.content | b64decode | from_json }}'
+        __side_effect_now: '{{ __side_effect_status.stdout | from_json }}'
+
+    - name: Side Effect | Check a mailbox password with the previous release
+      ansible.builtin.command:
+        argv: [php, '{{ __side_effect_helper }}', '{{ __side_effect_dir }}']
+        stdin: >-
+          {{ {'action': 'accounts', 'type': 'mailbox', 'check': true,
+              'entries': [{'id': 'alice@example.com', 'mode': 'managed',
+                           'values': {'name': 'Alice'}, 'password': 'alice-Secret-42'}]} | to_json }}
+      register: __side_effect_alice
+      changed_when: false
+      no_log: true
+
+    - name: Side Effect | Assert the mailbox is unchanged
+      ansible.builtin.assert:
+        that:
+          - (__side_effect_alice.stdout | from_json).results[0].action == 'unchanged'
+        fail_msg: '{{ __side_effect_alice.stdout }}'
+
+    - name: Side Effect | Include postfixadmin role with the previous release again  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        postfixadmin_version: '{{ __molecule_previous_version }}'
+        postfixadmin_checksum: '{{ __molecule_previous_checksum }}'
+
+    - name: Side Effect | Assert the second run changed nothing
+      ansible.builtin.assert:
+        that:
+          - not __postfixadmin_release_changed | bool
+          - __postfixadmin_schema_upgrade is skipped
+          - >-
+            __postfixadmin_accounts.results | selectattr('changed', 'defined') | selectattr('changed')
+            | list | length == 0
