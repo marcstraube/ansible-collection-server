@@ -1,13 +1,13 @@
 ---
-# PostgreSQL scenario: PHP-FPM (marcstraube.common.php) and the
-# postgresql role of this collection run on the instance; the role creates
-# the database, its owner and the read-only users there. A check run on
-# the fresh instance precedes converge, another one on the configured
-# instance follows idempotence. side_effect changes accounts behind the
-# role's back, applies changed accounts and ends with the helper's check
-# mode; verify checks both account modes, the hashes, the grants, the SOGo
-# view and the failure cases. The playbooks are shared with the mariadb
-# scenario.
+# PostgreSQL scenario: PHP-FPM (marcstraube.common.php, with a dedicated
+# pool for PostfixAdmin) and the postgresql role of this collection run on
+# the instance; the role creates the database, its owner and the read-only
+# users there. A check run on the fresh instance precedes converge, another
+# one on the configured instance follows idempotence. side_effect changes
+# accounts behind the role's back, applies changed accounts and ends with
+# the helper's check mode; verify checks the pool, both account modes, the
+# hashes, the grants, the SOGo view and the failure cases. The playbooks
+# are shared with the mariadb scenario.
 driver:
   name: podman
 platforms:
@@ -73,6 +73,10 @@ provisioner:
             password: 'sogo-Reader-42'
             tables: ['sogo_users']
         postfixadmin_sogo_view_enabled: true
+        # A dedicated PHP-FPM pool with a user of its own (prepare creates
+        # both); verify requests PostfixAdmin through its socket
+        postfixadmin_php_fpm_user: 'postfixadmin'
+        postfixadmin_php_fpm_group: 'postfixadmin'
         # The test domains under .example have no DNS records, which
         # PostfixAdmin checks for every domain and address by default
         postfixadmin_extra_config:

@@ -18,7 +18,8 @@ database users for the mail services and a view for the SOGo user source.
 - ansible-core >= 2.19
 - PHP with PHP-FPM, the PDO driver of the database, `iconv` and `mbstring`
   (`marcstraube.common.php`, see [PHP](#php)); PHP 8.1 or newer, with
-  Argon2 for the default password scheme
+  Argon2 for the default password scheme. A PHP-FPM pool of its own is
+  recommended (see [PHP-FPM Pool](#php-fpm-pool))
 - A web server that serves `postfixadmin_install_dir/public` through
   PHP-FPM (`marcstraube.server.nginx` or `marcstraube.server.apache`, see
   [Web Server](#web-server))
@@ -114,9 +115,11 @@ not work offline). Alternatively set an HTTP proxy for the play with
 The release is owned by `root` and read-only for PHP-FPM. Only
 `templates_c` (compiled templates) is writable for the PHP-FPM user;
 `config.local.php` lives in `/etc/postfixadmin` (mode `0640`, group of the
-PHP-FPM pool) and the release links to it. The role refuses an existing
-`postfixadmin_install_dir` it did not install (no `.ansible-release`
-marker).
+PHP-FPM pool) and the release links to it. Set the PHP-FPM user and group
+to the ones of a dedicated pool (see [PHP-FPM Pool](#php-fpm-pool)); empty,
+they are the user and group of the platform's `www` pool. The role refuses
+an existing `postfixadmin_install_dir` it did not install (no
+`.ansible-release` marker).
 
 ### Updates
 
@@ -500,15 +503,22 @@ whole role).
       vars:
         postgresql_enabled: true
 
+    # The pool user and group exist already (see PHP-FPM Pool)
     - role: marcstraube.common.php
       vars:
         php_versions:
           - version: 'auto'
-            extensions: ['pdo_pgsql', 'mbstring']   # Debian, see PHP
+            extensions: ['pdo_pgsql', 'mbstring']   # Debian and EL, see PHP
+            fpm_pools:
+              - name: 'postfixadmin'
+                user: 'postfixadmin'
+                group: 'postfixadmin'
 
     - role: marcstraube.server.postfixadmin
       vars:
         postfixadmin_enabled: true
+        postfixadmin_php_fpm_user: 'postfixadmin'
+        postfixadmin_php_fpm_group: 'postfixadmin'
         postfixadmin_db_password: '{{ vault_postfixadmin_db_password }}'
         postfixadmin_db_create: true
         postfixadmin_admins:
@@ -541,8 +551,8 @@ molecule test -s split-mariadb
 
 The `postgresql` and `mariadb` scenarios share their playbooks
 (`molecule/shared`): prepare installs PHP-FPM with `marcstraube.common.php`
-(the php:8.3 stream on EL 9) and the database server with the role of this
-collection; converge creates the database, the read-only users, the SOGo
+(the php:8.3 stream on EL 9) with a dedicated `postfixadmin` pool and the
+database server with the role of this collection; converge creates the database, the read-only users, the SOGo
 view and accounts in both modes; check runs (`--check`) on the fresh
 instance and on the converged one come before and after. Side effect
 changes accounts in the database behind the role's back (including a hash
@@ -552,7 +562,10 @@ of another scheme, which the role rehashes), applies changed accounts
 view, restores them and runs the role once more without changes; the
 helper's check mode with changed accounts then reports the changes and
 leaves the database as it is. Verify checks the release, the file
-permissions, the schema version, every account type in both modes, the
+permissions, that the dedicated pool serves PostfixAdmin (its own socket,
+workers running as the pool user, the login page through a FastCGI request
+to the socket, the compiled templates owned by the pool user), the schema
+version, every account type in both modes, the
 stored hashes with the `{ARGON2ID}` prefix, the passwords against them, the
 read-only grants, the SOGo view, the password rules and `totp` in
 `config.local.php` (on in the `mariadb` scenario, off in `postgresql`), and
@@ -589,18 +602,15 @@ certificate does not name is refused.
 `marcstraube.common.php` installs PHP-FPM and the extensions PostfixAdmin
 needs; the extension names differ per platform:
 
-| Platform   | PostgreSQL                                  | MariaDB                 |
-| ---------- | ------------------------------------------- | ----------------------- |
-| Arch Linux | `pgsql`, `iconv` (+ `pdo_pgsql`, see below) | `pdo_mysql`, `iconv`    |
-| Debian     | `pdo_pgsql`, `mbstring`                     | `pdo_mysql`, `mbstring` |
-| EL         | `pgsql`, `mbstring`                         | `pdo_mysql`, `mbstring` |
+| Platform   | PostgreSQL              | MariaDB                 |
+| ---------- | ----------------------- | ----------------------- |
+| Arch Linux | `pdo_pgsql`, `iconv`    | `pdo_mysql`, `iconv`    |
+| Debian     | `pdo_pgsql`, `mbstring` | `pdo_mysql`, `mbstring` |
+| EL         | `pdo_pgsql`, `mbstring` | `pdo_mysql`, `mbstring` |
 
-- EL ships `pdo_pgsql` in `php-pgsql` (`pgsql`) and `pdo_mysql` in
-  `php-mysqlnd`; Debian and EL compile `iconv` in, Arch Linux builds
-  `mbstring` in.
-- Arch Linux: `php-pgsql` carries `pdo_pgsql`, but the php role only loads
-  `pgsql`; load the PDO driver as well:
-  `php_ini_extra_settings: {extension: 'pdo_pgsql'}`.
+- PostfixAdmin talks to the database through PDO only (also with its
+  database type `mysqli`), so the PDO driver is the extension it needs.
+- Debian and EL compile `iconv` in, Arch Linux builds `mbstring` in.
 - EL 9: the default PHP 8.0 is too old for the release, and Argon2
   (`PASSWORD_ARGON2ID`) comes with the php:8.3 module stream only (the
   php:8.1 and php:8.2 streams lack it):
@@ -613,6 +623,65 @@ needs; the extension names differ per platform:
 The role checks PHP 8.1, the PDO driver, `iconv`, `mbstring` and, for
 `ARGON2ID`, `PASSWORD_ARGON2ID` with `postfixadmin_php_cli` before it changes
 anything.
+
+### PHP-FPM Pool
+
+Run PostfixAdmin in a PHP-FPM pool of its own. Its workers then run under a
+user that alone may write `templates_c` and read `config.local.php` (the
+database password and the setup password hash); the `www` pool and the
+pools of other PHP applications on the host cannot read them.
+`marcstraube.common.php` adds the pool through `php_versions[].fpm_pools`;
+`postfixadmin_php_fpm_user` and `postfixadmin_php_fpm_group` name its user
+and group, and the web server connects to its socket:
+
+```yaml
+# marcstraube.common.php
+php_versions:
+  - version: 'auto'
+    extensions: ['pdo_pgsql', 'mbstring']
+    fpm_pools:
+      - name: 'postfixadmin'
+        user: 'postfixadmin'
+        group: 'postfixadmin'
+        # The web server user connects to the socket (Debian 'www-data',
+        # Arch Linux 'http', EL 'nginx' or 'apache')
+        listen_owner: 'www-data'
+        listen_group: 'www-data'
+
+# marcstraube.server.postfixadmin
+postfixadmin_php_fpm_user: 'postfixadmin'
+postfixadmin_php_fpm_group: 'postfixadmin'
+```
+
+- The pool user and group have to exist before `marcstraube.common.php`
+  writes the pool; neither role creates them. Create them as system
+  accounts without a login shell, e.g. with `marcstraube.common.users`
+  (`users_groups` and `users_list` entries with `system: true`).
+- The pool listens on a socket of its own next to the one of the `www`
+  pool (`listen` in the entry chooses another address):
+
+  | Platform       | Socket of the `postfixadmin` pool                     |
+  | -------------- | ----------------------------------------------------- |
+  | Arch Linux     | `/run/php-fpm/php-fpm-postfixadmin.sock`              |
+  | Debian         | `/run/php/php<X.Y>-fpm-postfixadmin.sock`             |
+  | EL (AppStream) | `/run/php-fpm/postfixadmin.sock`                      |
+  | EL (Remi)      | `/var/opt/remi/php<XX>/run/php-fpm/postfixadmin.sock` |
+
+  See the `marcstraube.common.php` README for the AUR builds on Arch Linux.
+- All pools of a PHP version share one OPcache. For a version with named
+  pools `marcstraube.common.php` turns on `opcache.validate_permission` and
+  `opcache.validate_root`, so another pool cannot run cached scripts its
+  user may not read (see "Pool isolation" in its README).
+- The role runs the PostfixAdmin command line code (schema upgrade,
+  accounts) as root with `postfixadmin_php_cli`, not in the pool.
+- Moving an installation from the `www` pool to a dedicated one: add the
+  pool, set both variables and run the role; it hands `templates_c` and
+  `config.local.php` to the pool user and group. Then point the web server
+  at the new socket.
+
+Without a dedicated pool (both variables empty) PostfixAdmin runs in the
+`www` pool of the platform (Arch Linux `http`, Debian `www-data`, EL
+`apache`), shared with every other PHP application served through it.
 
 ### Web Server
 
@@ -631,9 +700,10 @@ nginx_sites:
     index: 'index.php'
     php:
       enabled: true
-      # Debian 13; EL: unix:/run/php-fpm/www.sock,
-      # Arch Linux: unix:/run/php-fpm/php-fpm.sock
-      socket: 'unix:/run/php/php8.4-fpm.sock'
+      # The postfixadmin pool on Debian 13 (PHP 8.4); EL:
+      # unix:/run/php-fpm/postfixadmin.sock, Arch Linux:
+      # unix:/run/php-fpm/php-fpm-postfixadmin.sock (see PHP-FPM Pool)
+      socket: 'unix:/run/php/php8.4-fpm-postfixadmin.sock'
     allow_ips:
       - '192.0.2.0/24'
       - '2001:db8::/32'
@@ -642,6 +712,31 @@ nginx_sites:
       certificate: '/etc/letsencrypt/live/postfixadmin.example.com/fullchain.pem'
       certificate_key: '/etc/letsencrypt/live/postfixadmin.example.com/privkey.pem'
     http_redirect: true
+```
+
+The same with `marcstraube.server.apache`; a vhost's `php_fpm_socket`
+overrides the global handler, so the PostfixAdmin vhost reaches its own pool
+while other vhosts keep `apache_php_fpm_socket`:
+
+```yaml
+apache_php_fpm_enabled: true
+apache_vhosts:
+  - server_name: 'postfixadmin.example.com'
+    redirect_to_https: true
+apache_vhosts_ssl:
+  - server_name: 'postfixadmin.example.com'
+    document_root: '/var/www/postfixadmin/public'
+    # The postfixadmin pool on EL; Debian 13 (PHP 8.4):
+    # unix:/run/php/php8.4-fpm-postfixadmin.sock, Arch Linux:
+    # unix:/run/php-fpm/php-fpm-postfixadmin.sock (see PHP-FPM Pool)
+    php_fpm_socket: 'unix:/run/php-fpm/postfixadmin.sock'
+    certificate_file: '/etc/letsencrypt/live/postfixadmin.example.com/fullchain.pem'
+    certificate_key_file: '/etc/letsencrypt/live/postfixadmin.example.com/privkey.pem'
+    # Access limited to the admin networks
+    custom_config: |
+      <Location "/">
+          Require ip 192.0.2.0/24 2001:db8::/32
+      </Location>
 ```
 
 For forward authentication (e.g. Authentik) put the PostfixAdmin site
