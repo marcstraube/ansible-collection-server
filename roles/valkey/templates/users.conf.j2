@@ -1,0 +1,20 @@
+{{ ansible_managed | comment }}
+# Valkey ACL users, included from {{ __valkey_config_file }}. Passwords are
+# stored as SHA-256 hashes.
+{% if valkey_users | length > 0 %}
+
+# The default user is disabled; every client authenticates as one of the
+# users below.
+user default reset
+{% for user in valkey_users %}
+user {{ user.name }} reset on #{{ user.password | hash('sha256') }}
+{%- for pattern in (user['keys'] if 'keys' in user else ['*']) %} {{ pattern if pattern is match('^%') else '~' ~ pattern }}{% endfor %}
+{%- for pattern in user.channels | default([]) %} &{{ pattern }}{% endfor %}
+{%- for rule in user.permissions | default(['+@all', '-@dangerous']) %} {{ rule }}{% endfor %}
+
+{% endfor %}
+{% else %}
+#
+# No valkey_users: the default user keeps the package behavior (no
+# password, all commands), limited to local clients by protected-mode.
+{% endif %}

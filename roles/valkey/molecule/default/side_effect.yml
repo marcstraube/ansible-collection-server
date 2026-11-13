@@ -1,0 +1,664 @@
+---
+# Validation: every invalid setting must fail the run with its own message
+# before the configuration changes.
+#
+# Certificate renewal: a certificate change together with a configuration
+# change restarts the server exactly once.
+#
+# Backup: a marker key that verify.yml expects back after the restore,
+# older snapshots for the rotation (keep 2), then one run of the backup
+# service.
+#
+# Targeted update: the next plays roll the Valkey packages back to an older
+# build. A minimum the repository does not offer must fail before any
+# change and a mapping without a key for the host must fail. The converge
+# playbook then runs with valkey_packages_state: latest and the full
+# distribution version as minimum, and the server must run the new binary
+# after exactly one restart. Arch Linux ignores the state; nothing is
+# rolled back there.
+- name: Side Effect — Validation
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - vars/converge.yml
+
+  vars:
+    __side_effect_cases:
+      - key: 'packages_state'
+        expect: "valkey_packages_state must be 'present' or 'latest'"
+        vars:
+          valkey_packages_state: 'newest'
+      - key: 'packages_minimum_type'
+        expect: 'valkey_packages_minimum must be a version string'
+        vars:
+          valkey_packages_minimum: [8]
+      - key: 'packages_minimum_chars'
+        expect: 'is not a package version'
+        vars:
+          valkey_packages_minimum: '8.1; true'
+      - key: 'bind'
+        expect: 'valkey_bind must name at least one address'
+        vars:
+          valkey_bind: ' '
+      - key: 'port'
+        expect: 'valkey_port must be 0-65535'
+        vars:
+          valkey_port: 70000
+      - key: 'listener'
+        expect: 'No listener'
+        vars:
+          valkey_port: 0
+      - key: 'socket_dir'
+        expect: 'valkey_unix_socket must be a path in /run/valkey'
+        vars:
+          valkey_unix_socket: '/tmp/valkey.sock'
+      # The integer an unquoted 0770 becomes in YAML
+      - key: 'socket_perm_integer'
+        expect: 'valkey_unix_socket_perm must be a quoted string'
+        vars:
+          valkey_unix_socket: '/run/valkey/valkey.sock'
+          valkey_unix_socket_perm: 504
+      - key: 'socket_perm_octal'
+        expect: 'valkey_unix_socket_perm must be an octal mode'
+        vars:
+          valkey_unix_socket: '/run/valkey/valkey.sock'
+          valkey_unix_socket_perm: '980'
+      - key: 'socket_group'
+        expect: 'valkey_unix_socket_group must be a group name'
+        vars:
+          valkey_unix_socket: '/run/valkey/valkey.sock'
+          valkey_unix_socket_group: "clients\nevil"
+      - key: 'tls_files'
+        expect: 'valkey_tls_enabled needs valkey_tls_cert_file and valkey_tls_key_file'
+        vars:
+          valkey_tls_enabled: true
+      - key: 'tls_port'
+        expect: 'valkey_tls_port must be 1-65535'
+        vars:
+          valkey_tls_enabled: true
+          valkey_tls_cert_file: '/etc/molecule-tls/server.crt'
+          valkey_tls_key_file: '/etc/molecule-tls/server.key'
+          valkey_tls_port: 0
+      - key: 'tls_port_same'
+        expect: 'valkey_tls_port must differ from valkey_port'
+        vars:
+          valkey_tls_enabled: true
+          valkey_tls_cert_file: '/etc/molecule-tls/server.crt'
+          valkey_tls_key_file: '/etc/molecule-tls/server.key'
+          valkey_tls_port: 6379
+      - key: 'tls_auth_clients'
+        expect: "valkey_tls_auth_clients must be 'no', 'optional' or 'yes'"
+        vars:
+          valkey_tls_enabled: true
+          valkey_tls_cert_file: '/etc/molecule-tls/server.crt'
+          valkey_tls_key_file: '/etc/molecule-tls/server.key'
+          valkey_tls_auth_clients: 'maybe'
+      - key: 'tls_ca'
+        expect: 'needs valkey_tls_ca_file'
+        vars:
+          valkey_tls_enabled: true
+          valkey_tls_cert_file: '/etc/molecule-tls/server.crt'
+          valkey_tls_key_file: '/etc/molecule-tls/server.key'
+          valkey_tls_auth_clients: 'yes'
+      - key: 'user_mapping'
+        expect: 'is not a mapping with name and password'
+        vars:
+          valkey_users:
+            - 'app'
+      - key: 'user_name_missing'
+        expect: 'needs a name.'
+        vars:
+          valkey_users:
+            - password: 'secret'
+      # A line break in the name would add a second user line
+      - key: 'user_name_injection'
+        expect: 'The name must not contain whitespace, line breaks or quotes'
+        vars:
+          valkey_users:
+            - name: "app\nuser evil on nopass ~* +@all"
+              password: 'secret'
+      - key: 'user_name_default'
+        expect: "The name 'default' is reserved"
+        vars:
+          valkey_users:
+            - name: 'default'
+              password: 'secret'
+      - key: 'user_password'
+        expect: 'needs a password'
+        vars:
+          valkey_users:
+            - name: 'nopass'
+      - key: 'user_rules_type'
+        expect: 'permissions, keys and channels must be lists'
+        vars:
+          valkey_users:
+            - name: 'app'
+              password: 'secret'
+              permissions: '+@all'
+      # Whitespace in a pattern would add a key pattern of its own
+      - key: 'user_rule_injection'
+        expect: 'ACL rules and patterns must not contain whitespace, line breaks or quotes'
+        vars:
+          valkey_users:
+            - name: 'app'
+              password: 'secret'
+              keys:
+                - 'app:* ~*'
+      - key: 'user_rule_quote'
+        expect: 'ACL rules and patterns must not contain whitespace, line breaks or quotes'
+        vars:
+          valkey_users:
+            - name: 'app'
+              password: 'secret'
+              permissions:
+                - '+@all"'
+      - key: 'user_duplicate'
+        expect: 'valkey_users names must be unique'
+        vars:
+          valkey_users:
+            - name: 'twice'
+              password: 'one'
+            - name: 'twice'
+              password: 'two'
+      - key: 'backup_dir'
+        expect: 'valkey_backup_dir must be an absolute path'
+        vars:
+          valkey_backup_dir: 'backups'
+      - key: 'backup_keep'
+        expect: 'valkey_backup_keep must be a number of at least 1'
+        vars:
+          valkey_backup_keep: 0
+      - key: 'backup_on_calendar'
+        expect: 'valkey_backup_on_calendar must be a systemd OnCalendar expression'
+        vars:
+          valkey_backup_on_calendar: "daily\nExecStart=/bin/true"
+      - key: 'backup_user_unknown'
+        expect: "valkey_backup_user 'other' is not a name in valkey_users"
+        vars:
+          valkey_users:
+            - name: 'app'
+              password: 'secret'
+          valkey_backup_user: 'other'
+      - key: 'backup_user_missing'
+        expect: 'valkey_backup_user must name an entry of valkey_users'
+        vars:
+          valkey_users:
+            - name: 'app'
+              password: 'secret'
+          valkey_backup_enabled: true
+      - key: 'backup_tls_client_certificate'
+        expect: 'with only TLS and valkey_tls_auth_clients yes'
+        vars:
+          valkey_port: 0
+          valkey_tls_enabled: true
+          valkey_tls_cert_file: '/etc/molecule-tls/server.crt'
+          valkey_tls_key_file: '/etc/molecule-tls/server.key'
+          valkey_tls_ca_file: '/etc/molecule-tls/ca.crt'
+          valkey_tls_auth_clients: 'yes'
+          valkey_backup_enabled: true
+      - key: 'restore_name'
+        expect: 'valkey_restore must name a snapshot in valkey_backup_dir'
+        vars:
+          valkey_restore: '../../etc/shadow'
+      - key: 'restore_service'
+        expect: 'valkey_restore needs valkey_service_enabled'
+        vars:
+          valkey_restore: 'valkey-20260101T000000.rdb'
+          valkey_service_enabled: false
+
+  tasks:
+    - name: Side Effect | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Side Effect | Stat the configuration before the invalid runs
+      ansible.builtin.stat:
+        path: '{{ __valkey_config_file }}'
+        checksum_algorithm: sha256
+      register: __side_effect_config_before
+
+    - name: Side Effect | Run every validation case
+      ansible.builtin.include_tasks:
+        file: tasks/validation_case.yml
+      loop: '{{ __side_effect_cases }}'
+      loop_control:
+        loop_var: __case
+        label: '{{ __case.key }}'
+
+    # The TLS files are checked first in configure.yml, after the install
+    # tasks: the settings of converge.yml keep every earlier task unchanged.
+    - name: Side Effect | Run with a missing TLS file
+      block:
+        - name: Side Effect | Include valkey role with a missing TLS file  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            valkey_tls_cert_file: '/nonexistent/valkey.crt'
+      rescue:
+        - name: Side Effect | Record the failure with a missing TLS file
+          ansible.builtin.set_fact:
+            __side_effect_failures: >-
+              {{ __side_effect_failures | default({})
+                 | combine({'tls_file_missing': ansible_failed_result | to_json}) }}
+
+    # Debian: a key readable only through a supplementary group of the
+    # service user. Without the socket group (no drop-in, PrivateUsers=true)
+    # the service could not read it; the run fails before the drop-in is
+    # removed, which verify.yml still expects.
+    - name: Side Effect | Copy the key with a supplementary group (Debian)
+      ansible.builtin.copy:
+        src: '/etc/molecule-tls/server.key'
+        dest: '/etc/molecule-tls/group.key'
+        remote_src: true
+        owner: root
+        group: '{{ valkey_unix_socket_group }}'
+        mode: '0640'
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Side Effect | Run with a key of another group and no socket group (Debian)
+      when: ansible_facts['os_family'] == 'Debian'
+      block:
+        - name: Side Effect | Include valkey role with a key of another group  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            valkey_unix_socket_group: ''
+            valkey_tls_key_file: '/etc/molecule-tls/group.key'
+      rescue:
+        - name: Side Effect | Record the failure with a key of another group
+          ansible.builtin.set_fact:
+            __side_effect_failures: >-
+              {{ __side_effect_failures | default({})
+                 | combine({'tls_key_group': ansible_failed_result | to_json}) }}
+
+    - name: Side Effect | Assert every invalid run failed with its own message
+      ansible.builtin.assert:
+        that:
+          - item.expect in (__side_effect_failures | default({}))[item.key] | default('')
+        fail_msg: >-
+          {{ item.key }}: expected a failure containing '{{ item.expect }}', got
+          {{ (__side_effect_failures | default({}))[item.key] | default('no failure') }}
+        success_msg: '{{ item.key }} fails the run'
+      loop: >-
+        {{ __side_effect_cases
+           + [{'key': 'tls_file_missing', 'expect': 'TLS file(s) not found: /nonexistent/valkey.crt'}]
+           + ([{'key': 'tls_key_group',
+                'expect': '/etc/molecule-tls/group.key (root:valkey-clients 0640) is not readable by the service user'}]
+              if ansible_facts['os_family'] == 'Debian' else []) }}
+      loop_control:
+        label: '{{ item.key }}'
+
+    - name: Side Effect | Stat the configuration after the invalid runs
+      ansible.builtin.stat:
+        path: '{{ __valkey_config_file }}'
+        checksum_algorithm: sha256
+      register: __side_effect_config_after
+
+    - name: Side Effect | Assert the invalid runs left the configuration alone
+      ansible.builtin.assert:
+        that:
+          - __side_effect_config_after.stat.checksum == __side_effect_config_before.stat.checksum
+        fail_msg: 'An invalid run changed {{ __valkey_config_file }}'
+        success_msg: 'Invalid settings fail before the configuration changes'
+
+# The certificate is signed again, which notifies the 'Reload cert services'
+# topic as marcstraube.common.pki does, and a configuration change is
+# notified in the same play. The restart handler subscribes to both and
+# runs once.
+- name: Side Effect — Certificate renewal
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - vars/converge.yml
+
+  vars:
+    __side_effect_tls_dir: '/etc/molecule-tls'
+
+  tasks:
+    - name: Side Effect | Record the time before the renewal
+      ansible.builtin.command:
+        argv:
+          - date
+          - '+%s'
+      register: __side_effect_renewal_since
+      changed_when: false
+
+    - name: Side Effect | Include valkey role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+
+    - name: Side Effect | Sign the server certificate again
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -req
+          - -in
+          - '{{ __side_effect_tls_dir }}/server.csr'
+          - -CA
+          - '{{ __side_effect_tls_dir }}/ca.crt'
+          - -CAkey
+          - '{{ __side_effect_tls_dir }}/ca.key'
+          - -CAcreateserial
+          - -days
+          - '30'
+          - -extfile
+          - '{{ __side_effect_tls_dir }}/server.ext'
+          - -out
+          - '{{ __side_effect_tls_dir }}/server.crt'
+      changed_when: true
+      notify: Reload cert services
+
+    - name: Side Effect | Notify a configuration change
+      ansible.builtin.debug:
+        msg: 'valkey.conf changed'
+      changed_when: true
+      notify: Restart Valkey
+
+    - name: Side Effect | Run the handlers
+      ansible.builtin.meta: flush_handlers
+
+    - name: Side Effect | Read the server starts since the renewal
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - '--unit={{ __valkey_service_name }}'
+          - '--since=@{{ __side_effect_renewal_since.stdout | trim }}'
+          - '--output=cat'
+          - '--no-pager'
+      register: __side_effect_renewal_journal
+      changed_when: false
+
+    - name: Side Effect | Assert the renewal restarted the server exactly once
+      ansible.builtin.assert:
+        that:
+          - __side_effect_renewal_starts | length == 1
+        fail_msg: >-
+          The server started {{ __side_effect_renewal_starts | length }} times for
+          one certificate and one configuration change, expected once:
+          {{ __side_effect_renewal_starts }}
+        success_msg: 'Certificate and configuration change restarted the server once'
+      vars:
+        __side_effect_renewal_starts: >-
+          {{ __side_effect_renewal_journal.stdout_lines | select('match', '^Started ') | list }}
+
+- name: Side Effect — Backup
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __side_effect_backup_dir: '/var/backups/valkey'
+    __side_effect_admin:
+      - 'valkey-cli'
+      - '-h'
+      - '127.0.0.1'
+      - '-p'
+      - '6379'
+      - '--user'
+      - 'admin'
+      - '--pass'
+      - 'admin-secret'
+      - '--no-auth-warning'
+
+  tasks:
+    - name: Side Effect | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Side Effect | Load OS-specific variables
+      ansible.builtin.include_vars: '{{ item }}'
+      with_first_found:
+        - files:
+            - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["distribution"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}.yml'
+          paths:
+            - '../../vars'
+
+    - name: Side Effect | Write the marker key of the backup
+      ansible.builtin.command:
+        argv: "{{ __side_effect_admin + ['SET', 'backup:marker', 'before the backup'] }}"
+      register: __side_effect_marker
+      changed_when: true
+
+    - name: Side Effect | Assert the marker key was written
+      ansible.builtin.assert:
+        that:
+          - __side_effect_marker.stdout == 'OK'
+        fail_msg: 'SET backup:marker: {{ __side_effect_marker.stdout }} {{ __side_effect_marker.stderr }}'
+
+    # Older than the snapshot of the service run by the timestamp in the
+    # name; valkey-manual.rdb does not match the name of a snapshot and must
+    # stay.
+    - name: Side Effect | Create older snapshots
+      ansible.builtin.copy:
+        content: ''
+        dest: '{{ __side_effect_backup_dir }}/{{ item }}'
+        owner: root
+        group: root
+        mode: '0600'
+      loop:
+        - 'valkey-20250101T000000.rdb'
+        - 'valkey-20250102T000000.rdb'
+        - 'valkey-manual.rdb'
+
+    - name: Side Effect | Run the backup service
+      ansible.builtin.systemd_service:
+        name: '{{ __valkey_backup_service_name }}'
+        state: started
+
+    # verify.yml restores the snapshot and expects the marker of the backup
+    # and no key written after it
+    - name: Side Effect | Change the data after the backup
+      ansible.builtin.command:
+        argv: '{{ __side_effect_admin + item }}'
+      loop:
+        - ['SET', 'backup:marker', 'after the backup']
+        - ['SET', 'backup:after', 'gone after the restore']
+      register: __side_effect_after_backup
+      changed_when: true
+
+    - name: Side Effect | Assert the data changed after the backup
+      ansible.builtin.assert:
+        that:
+          - __side_effect_after_backup.results | map(attribute='stdout') | list == ['OK', 'OK']
+        fail_msg: '{{ __side_effect_after_backup.results | map(attribute="stdout") | list }}'
+
+- name: Side Effect — Roll back
+  hosts: all
+  gather_facts: true
+
+  vars:
+    # [epoch:]version-release of the server package from the latest package
+    # facts (Debian has no separate release field)
+    __side_effect_version: >-
+      {{ ((__side_effect_pkg.epoch ~ ':')
+          if ((__side_effect_pkg.epoch | default('', true) | string) not in ['', 'None', '0']) else '')
+         ~ (__side_effect_pkg.version | default(''))
+         ~ (('-' ~ __side_effect_pkg.release) if (__side_effect_pkg.release | default('', true)) else '') }}
+    __side_effect_pkg: "{{ ansible_facts['packages'][__valkey_packages | first] | default([{}]) | first }}"
+
+  tasks:
+    - name: Side Effect | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Side Effect | Load OS-specific variables
+      ansible.builtin.include_vars: '{{ item }}'
+      with_first_found:
+        - files:
+            - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["distribution"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}.yml'
+          paths:
+            - '../../vars'
+
+    - name: Side Effect | Gather package facts before the rollback
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Record the current server package version
+      ansible.builtin.set_fact:
+        __side_effect_version_current: '{{ __side_effect_version }}'
+
+    # Debian: policy-rc.d keeps the maintainer scripts from restarting the
+    # server, so only the role can restart it. Where the packages restart it
+    # themselves, the role must not restart it a second time.
+    - name: Side Effect | Block service restarts by packages (Debian)
+      ansible.builtin.copy:
+        content: "#!/bin/sh\nexit 101\n"
+        dest: /usr/sbin/policy-rc.d
+        owner: root
+        group: root
+        mode: '0755'
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # The EL AppStream keeps the older builds of a release. When the
+    # repository holds only one build, dnf reports that the lowest version
+    # is installed and exits with 0, nothing is rolled back and verify.yml
+    # skips the version comparison. Every installed package of the family
+    # moves back together.
+    - name: Side Effect | Roll the Valkey packages back (RedHat)
+      ansible.builtin.command:
+        argv: >-
+          {{ ['dnf', 'downgrade', '-y']
+             + (ansible_facts['packages'] | list | select('match', __valkey_update_pattern) | list) }}
+      changed_when: true
+      retries: 5
+      delay: 10
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    # Every installed package built from the valkey source (valkey-server,
+    # valkey-tools) carries the server version and moves back with it.
+    - name: Side Effect | Roll the Valkey packages back (Debian)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          server='{{ __valkey_packages | first }}'
+          installed=$(dpkg-query -W -f '${Version}' "${server}")
+          # madison lists the newest build first; take the first older one
+          old=$(apt-cache madison "${server}" \
+            | awk -F' [|] ' -v cur="${installed}" '$2 != cur { print $2; exit }')
+          [ -n "${old}" ] || exit 0
+          pkgs=$(dpkg-query -W -f '${Package} ${Version} ${db:Status-Abbrev}\n' 'valkey*' \
+            | awk -v cur="${installed}" '$2 == cur && $3 == "ii" { print $1 }')
+          args=''
+          for pkg in ${pkgs}; do args="${args} ${pkg}=${old}"; done
+          # shellcheck disable=SC2086
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades \
+            -o Dpkg::Options::=--force-confold ${args}
+        executable: /bin/bash
+      changed_when: true
+      retries: 5
+      delay: 10
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Side Effect | Gather package facts after the rollback
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Record the rolled back server package version
+      ansible.builtin.set_fact:
+        __side_effect_version_rolled_back: '{{ __side_effect_version }}'
+
+    # verify.yml runs as a separate playbook; the versions before and after
+    # the rollback and the time of the update reach it through this file.
+    - name: Side Effect | Record the server package versions around the rollback
+      ansible.builtin.copy:
+        content: |
+          {{ __side_effect_version_current }}
+          {{ __side_effect_version_rolled_back }}
+        dest: /root/valkey-update-versions
+        owner: root
+        group: root
+        mode: '0600'
+
+- name: Side Effect — Minimum
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __side_effect_version: >-
+      {{ ((__side_effect_pkg.epoch ~ ':')
+          if ((__side_effect_pkg.epoch | default('', true) | string) not in ['', 'None', '0']) else '')
+         ~ (__side_effect_pkg.version | default(''))
+         ~ (('-' ~ __side_effect_pkg.release) if (__side_effect_pkg.release | default('', true)) else '') }}
+    __side_effect_pkg: "{{ ansible_facts['packages'][__valkey_packages | first] | default([{}]) | first }}"
+
+  tasks:
+    # The pre-check runs before the package task, so a minimum the
+    # repository does not offer leaves the rolled back packages in place.
+    - name: Side Effect | Run with a minimum the repository does not offer
+      block:
+        - name: Side Effect | Include valkey role with an unmet minimum  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            valkey_enabled: true
+            valkey_packages_state: 'latest'
+            valkey_packages_minimum: "{{ {ansible_facts['os_family']: '99.0'} }}"
+      rescue:
+        - name: Side Effect | Record the minimum check failure
+          ansible.builtin.set_fact:
+            __side_effect_minimum_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Gather package facts after the unmet minimum
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Assert the unmet minimum failed without a change
+      ansible.builtin.assert:
+        that:
+          - __side_effect_minimum_error is defined
+          - "'requires 99.0' in __side_effect_minimum_error"
+          - "'nothing was changed' in __side_effect_minimum_error"
+          - __side_effect_version == __side_effect_version_rolled_back
+        fail_msg: >-
+          A minimum of 99.0 did not fail before the update (error:
+          {{ __side_effect_minimum_error | default('none') }},
+          {{ __valkey_packages | first }} {{ __side_effect_version_rolled_back }}
+          -> {{ __side_effect_version }})
+        success_msg: 'The pre-check rejects a minimum the repository does not offer'
+
+    - name: Side Effect | Run with a mapping without a key for the host
+      block:
+        - name: Side Effect | Include valkey role with a mapping for another platform  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            valkey_enabled: true
+            valkey_packages_state: 'latest'
+            valkey_packages_minimum:
+              Solaris: '1.0'
+      rescue:
+        - name: Side Effect | Record the mapping failure
+          ansible.builtin.set_fact:
+            __side_effect_mapping_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Assert the mapping without a key failed
+      ansible.builtin.assert:
+        that:
+          - __side_effect_mapping_error is defined
+          - "'has no key for this host' in __side_effect_mapping_error"
+        fail_msg: 'A mapping without a key for the host did not fail the run'
+        success_msg: 'A mapping without a key for the host fails the run'
+
+# On Debian the packages are already updated; the role restarts the server
+# that still runs the replaced binary.
+- name: Side Effect — Update
+  ansible.builtin.import_playbook: converge.yml
+  vars:
+    valkey_packages_state: 'latest'
+    valkey_packages_minimum: '{{ __side_effect_version_current }}'
+
+- name: Side Effect — Clean up
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Allow service restarts by packages again (Debian)
+      ansible.builtin.file:
+        path: /usr/sbin/policy-rc.d
+        state: absent
+      when: ansible_facts['os_family'] == 'Debian'

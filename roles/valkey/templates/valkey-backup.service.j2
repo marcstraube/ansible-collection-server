@@ -1,0 +1,13 @@
+{{ ansible_managed | comment }}
+
+[Unit]
+Description=Valkey backup (RDB snapshot of the whole instance)
+Documentation=https://valkey.io/topics/persistence/
+After={{ __valkey_service_name }}.service
+
+[Service]
+Type=oneshot
+ExecStart={{ __valkey_backup_script }}
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=valkey-backup
