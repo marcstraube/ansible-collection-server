@@ -2,6 +2,17 @@
 
 All notable changes to this collection will be documented in this file.
 
+## 1.1.3 (2026-11-12)
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+## What's Changed
+### Bug Fixes
+* fix(n8n,activepieces): delegate the cgroup to rootless podman by @marcstraube in https://github.com/marcstraube/ansible-collection-server/pull/155
+
+
+**Full Changelog**: https://github.com/marcstraube/ansible-collection-server/compare/v1.1.2...v1.1.3
+
 ## 1.1.2 (2026-11-12)
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
