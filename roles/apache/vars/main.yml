@@ -105,3 +105,11 @@ __apache_php_fpm_handler: >-
 __apache_mpm_prefork_module: 'modules/mod_mpm_prefork.so'
 __apache_mpm_worker_module: 'modules/mod_mpm_worker.so'
 __apache_mpm_event_module: 'modules/mod_mpm_event.so'
+
+# SELinux types an entry of apache_writable_paths may carry: content httpd
+# reads and writes, append-only content, log files and the mod_cache store.
+__apache_writable_path_types:
+  - 'httpd_sys_rw_content_t'
+  - 'httpd_sys_ra_content_t'
+  - 'httpd_log_t'
+  - 'httpd_cache_t'

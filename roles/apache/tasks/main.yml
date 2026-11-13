@@ -66,6 +66,41 @@
   tags:
     - always
 
+# The path becomes part of a file context regex and of a restorecon call, so
+# only plain path characters are accepted; the dots are escaped in the regex.
+# Fails before any change.
+- name: Main | Validate the writable paths
+  ansible.builtin.assert:
+    that:
+      - __apache_writable_path_error | length == 0
+    fail_msg: 'apache_writable_paths: {{ __apache_writable_path_error }}'
+    quiet: true
+  loop: '{{ apache_writable_paths }}'
+  loop_control:
+    label: '{{ item.path | default(item) }}'
+  vars:
+    __apache_writable_path_error: >-
+      {{
+        ('entry ' ~ (item | string) ~ ' needs a path')
+        if item is not mapping or item.path is not defined or item.path is not string
+        else ("path '" ~ item.path ~ "' must be absolute, without a trailing slash"
+              ~ " or '.' and '..' components, and contain only letters, digits"
+              ~ " and '.', '_', '@', '-'")
+        if item.path is not match('^(/(?!\.\.?(/|$))[A-Za-z0-9._@-]+)+$')
+        else ("type '" ~ item.type ~ "' of " ~ item.path ~ " must be one of "
+              ~ __apache_writable_path_types | join(', '))
+        if item.type | default('httpd_sys_rw_content_t') not in __apache_writable_path_types
+        else ('owner and group of ' ~ item.path ~ ' must be non-empty strings')
+        if (item.owner is defined and (item.owner is not string or item.owner | length == 0))
+           or (item.group is defined and (item.group is not string or item.group | length == 0))
+        else ('mode of ' ~ item.path ~ " must be a quoted octal string such as '0750'")
+        if item.mode is defined and (item.mode is not string or item.mode is not match('^[0-7]{3,4}$'))
+        else ''
+      }}
+  when: apache_enabled | bool
+  tags:
+    - always
+
 - name: Main | Import install tasks
   ansible.builtin.import_tasks: install.yml
   when: apache_enabled | bool
@@ -86,6 +121,14 @@
   tags:
     - apache
     - apache:vhosts
+
+- name: Main | Import writable paths tasks
+  ansible.builtin.import_tasks: writable_paths.yml
+  when: apache_enabled | bool
+  tags:
+    - apache
+    - apache:vhosts
+    - apache:writable-paths
 
 - name: Main | Include vhosts exclusive tasks
   ansible.builtin.include_tasks:

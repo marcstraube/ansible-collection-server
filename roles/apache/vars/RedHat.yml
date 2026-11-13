@@ -47,3 +47,8 @@ __apache_pid_file: '/run/httpd/httpd.pid'
 # Installed packages a targeted update moves along (httpd, httpd-core,
 # httpd-filesystem, httpd-tools, mod_ssl)
 __apache_update_pattern: '^(httpd(-.+)?|mod_ssl)$'
+
+# SELinux management tools: semanage for the port labels (seport) and the
+# file contexts of apache_writable_paths (sefcontext)
+__apache_selinux_packages:
+  - policycoreutils-python-utils

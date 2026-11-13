@@ -225,6 +225,161 @@
     nginx_packages_state: 'latest'
     nginx_packages_minimum: '{{ __side_effect_version_current }}'
 
+# Every invalid writable path entry must fail the validation in main.yml,
+# which runs before any change.
+- name: Side Effect | Writable path validation
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Run with a relative path
+      block:
+        - name: Side Effect | Include nginx role with a relative path  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_writable_paths:
+              - path: 'var/www/relative'
+      rescue:
+        - name: Side Effect | Record the error for a relative path
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'relative': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with a trailing slash
+      block:
+        - name: Side Effect | Include nginx role with a trailing slash  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_writable_paths:
+              - path: '/var/www/trailing/'
+      rescue:
+        - name: Side Effect | Record the error for a trailing slash
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'trailing': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with a '..' component
+      block:
+        - name: Side Effect | Include nginx role with a '..' component  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_writable_paths:
+              - path: '/var/www/../etc'
+      rescue:
+        - name: Side Effect | Record the error for a '..' component
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'dotdot': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with an entry without a path
+      block:
+        - name: Side Effect | Include nginx role with an entry without a path  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_writable_paths:
+              - type: 'httpd_log_t'
+      rescue:
+        - name: Side Effect | Record the error for an entry without a path
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'nopath': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with an unsupported type
+      block:
+        - name: Side Effect | Include nginx role with an unsupported type  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_writable_paths:
+              - path: '/var/www/type'
+                type: 'httpd_sys_content_t'
+      rescue:
+        - name: Side Effect | Record the error for an unsupported type
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'type': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with a numeric mode
+      block:
+        - name: Side Effect | Include nginx role with a numeric mode  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_writable_paths:
+              - path: '/var/www/mode'
+                mode: 750
+      rescue:
+        - name: Side Effect | Record the error for a numeric mode
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'mode': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Assert every invalid writable path failed the validation
+      ansible.builtin.assert:
+        that:
+          - __errors['relative'] | default('') is search('must be absolute')
+          - __errors['trailing'] | default('') is search('must be absolute')
+          - __errors['dotdot'] | default('') is search('must be absolute')
+          - __errors['nopath'] | default('') is search('needs a path')
+          - __errors['type'] | default('') is search('must be one of')
+          - __errors['mode'] | default('') is search('must be a quoted octal string')
+        fail_msg: 'Unexpected validation results: {{ __errors }}'
+        success_msg: 'The validation rejects every invalid writable path'
+      vars:
+        __errors: '{{ __side_effect_writable_errors | default({}) }}'
+
 - name: Side Effect | Clean up
   hosts: all
   gather_facts: true
