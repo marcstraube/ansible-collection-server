@@ -1,0 +1,325 @@
+---
+# PHP and its extensions come from marcstraube.common.php; the role only
+# checks what PostfixAdmin needs. The command line binary loads the same
+# extension packages as PHP-FPM.
+- name: Install | Read the PHP environment
+  ansible.builtin.command:
+    argv:
+      - '{{ postfixadmin_php_cli }}'
+      - '-r'
+      - >-
+        echo json_encode([
+        'version' => PHP_VERSION, 'version_id' => PHP_VERSION_ID,
+        'argon2id' => defined('PASSWORD_ARGON2ID'),
+        'pdo' => class_exists('PDO') ? PDO::getAvailableDrivers() : [],
+        'iconv' => extension_loaded('iconv'),
+        'mbstring' => extension_loaded('mbstring')]);
+  register: __postfixadmin_php_result
+  changed_when: false
+  check_mode: false
+
+- name: Install | Assert the PHP requirements of PostfixAdmin
+  ansible.builtin.assert:
+    that:
+      - __postfixadmin_php.version_id >= __postfixadmin_php_minimum_id
+      - __postfixadmin_pdo_drivers[postfixadmin_db_type] in __postfixadmin_php.pdo
+      - __postfixadmin_php.iconv
+      - __postfixadmin_php.mbstring
+      - postfixadmin_password_scheme != 'ARGON2ID' or __postfixadmin_php.argon2id
+    fail_msg: |
+      PHP {{ __postfixadmin_php.version }} ({{ postfixadmin_php_cli }}) does not meet the
+      requirements of PostfixAdmin with these settings:
+      - PHP 8.1 or newer: {{ __postfixadmin_php.version_id >= __postfixadmin_php_minimum_id }}
+      - PDO driver '{{ __postfixadmin_pdo_drivers[postfixadmin_db_type] }}' for
+        {{ postfixadmin_db_type }}: {{ __postfixadmin_pdo_drivers[postfixadmin_db_type] in __postfixadmin_php.pdo }}
+      - iconv extension: {{ __postfixadmin_php.iconv }}
+      - mbstring extension: {{ __postfixadmin_php.mbstring }}
+      {% if postfixadmin_password_scheme == 'ARGON2ID' %}
+      - Argon2 (PASSWORD_ARGON2ID) for the ARGON2ID scheme: {{ __postfixadmin_php.argon2id }}
+        EL 9 has it from the php:8.3 module stream on (php_versions version '8.3'),
+        or choose postfixadmin_password_scheme 'BLF-CRYPT' or 'SHA512-CRYPT'.
+      {% endif %}
+      Install the missing parts with marcstraube.common.php (see README).
+  vars:
+    __postfixadmin_php: '{{ __postfixadmin_php_result.stdout | from_json }}'
+
+# 'latest' resolves to the newest release; its archive checksum is the
+# digest GitHub publishes for the asset.
+- name: Install | Look up the latest PostfixAdmin release
+  ansible.builtin.uri:
+    url: '{{ __postfixadmin_latest_api_url }}'
+    headers:
+      Accept: 'application/vnd.github+json'
+    return_content: true
+  register: __postfixadmin_latest
+  check_mode: false
+  retries: 5
+  delay: 10
+  when: postfixadmin_version == 'latest'
+
+- name: Install | Set the release to install
+  ansible.builtin.set_fact:
+    __postfixadmin_release: >-
+      {{ (__postfixadmin_latest.json.tag_name | regex_replace('^v', ''))
+         if postfixadmin_version == 'latest' else postfixadmin_version }}
+    __postfixadmin_release_checksum: >-
+      {{ (__postfixadmin_latest.json.assets
+          | selectattr('name', 'eq', 'postfixadmin-' ~ __postfixadmin_latest.json.tag_name
+                                      ~ '-' ~ __postfixadmin_build ~ '.tar.gz')
+          | map(attribute='digest') | first | default(''))
+         if postfixadmin_version == 'latest' else postfixadmin_checksum }}
+
+- name: Install | Assert the release archive is known
+  ansible.builtin.assert:
+    that:
+      - __postfixadmin_release is match(__postfixadmin_version_pattern)
+      - __postfixadmin_release_checksum is match('^sha256:[0-9a-f]{64}$')
+    fail_msg: >-
+      The latest release '{{ __postfixadmin_release }}' has no
+      {{ __postfixadmin_build }} archive with a published checksum; pin
+      postfixadmin_version and postfixadmin_checksum instead.
+
+- name: Install | Stat the installation directory
+  ansible.builtin.stat:
+    path: '{{ postfixadmin_install_dir }}'
+  register: __postfixadmin_install_dir_stat
+
+- name: Install | Read the installed release
+  ansible.builtin.slurp:
+    src: '{{ __postfixadmin_release_marker }}'
+  register: __postfixadmin_marker
+  failed_when: false
+
+# The role replaces the directory on a version change; a directory it did
+# not install may hold files of their own (an old config.local.php).
+- name: Install | Assert the installation directory belongs to the role
+  ansible.builtin.assert:
+    that:
+      - not __postfixadmin_install_dir_stat.stat.exists or __postfixadmin_marker.content is defined
+    fail_msg: |
+      {{ postfixadmin_install_dir }} exists but was not installed by this role
+      ({{ __postfixadmin_release_marker | basename }} is missing). Move it away, or set
+      postfixadmin_install_dir to another directory. Settings of an earlier
+      config.local.php belong into the role variables.
+
+- name: Install | Set the release state
+  ansible.builtin.set_fact:
+    __postfixadmin_release_previous: >-
+      {{ (__postfixadmin_marker.content | default('') | b64decode).split() | first | default('') }}
+    __postfixadmin_release_changed: >-
+      {{ (__postfixadmin_marker.content | default('') | b64decode | trim) != __postfixadmin_release }}
+    __postfixadmin_release_installed: >-
+      {{ __postfixadmin_marker.content is defined }}
+
+# The schema of a newer release stays when an older release is installed,
+# and PostfixAdmin's upgrades only go forward. A rollback restores the
+# schema from the pre-update dump and starts from an empty installation
+# directory: without the marker there is no installed release to compare.
+- name: Install | Assert the release is not older than the installed one
+  ansible.builtin.assert:
+    that:
+      - >-
+        __postfixadmin_release_previous | length == 0
+        or __postfixadmin_release is version(__postfixadmin_release_previous, '>=')
+    fail_msg: |
+      PostfixAdmin {{ __postfixadmin_release_previous }} is installed; {{ __postfixadmin_release }} is older.
+      The schema is not downgraded. Keep postfixadmin_version at {{ __postfixadmin_release_previous }}, or roll back:
+      1. Restore the database dump taken before the update
+         (postfixadmin-<release>-<timestamp>.sql.gz in {{ postfixadmin_backup_dir }}, see README).
+      2. Remove {{ postfixadmin_install_dir }} completely.
+      3. Run the role with postfixadmin_version and postfixadmin_checksum of the release of the dump.
+
+# Dumps a database of this host before the new release replaces the
+# installed one and before its schema upgrade.
+- name: Install | Import backup tasks
+  ansible.builtin.import_tasks: backup.yml
+
+- name: Install | Unpack a new release
+  when: __postfixadmin_release_changed | bool
+  vars:
+    __postfixadmin_archive: >-
+      postfixadmin-v{{ __postfixadmin_release }}-{{ __postfixadmin_build }}.tar.gz
+  block:
+    - name: Install | Create the download cache directory
+      ansible.builtin.file:
+        path: '{{ __postfixadmin_cache_dir }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      register: __postfixadmin_cache_dir_result
+
+    # A check run on a fresh host has not created the cache directory
+    - name: Install | Download the release archive
+      ansible.builtin.get_url:
+        url: '{{ __postfixadmin_release_url }}/v{{ __postfixadmin_release }}/{{ __postfixadmin_archive }}'
+        dest: '{{ __postfixadmin_cache_dir }}/{{ __postfixadmin_archive }}'
+        checksum: '{{ __postfixadmin_release_checksum }}'
+        owner: root
+        group: root
+        mode: '0644'
+      retries: 5
+      delay: 10
+      when: not (__postfixadmin_check_mode and __postfixadmin_cache_dir_result is changed)
+
+    # Leftover of an interrupted run
+    - name: Install | Remove an incomplete staging directory
+      ansible.builtin.file:
+        path: '{{ __postfixadmin_staging_dir }}'
+        state: absent
+
+    - name: Install | Create the staging directory
+      ansible.builtin.file:
+        path: '{{ __postfixadmin_staging_dir }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # Every file belongs to root and is read-only for the PHP-FPM user;
+    # templates_c is set up below.
+    - name: Install | Unpack the release
+      ansible.builtin.unarchive:
+        src: '{{ __postfixadmin_cache_dir }}/{{ __postfixadmin_archive }}'
+        dest: '{{ __postfixadmin_staging_dir }}'
+        remote_src: true
+        extra_opts:
+          - '--strip-components=1'
+        owner: root
+        group: root
+        mode: 'u=rwX,go=rX'
+      when: not __postfixadmin_check_mode
+
+    # Also runs in check mode, where it reports the new release (copy
+    # reports a file in a missing directory as changed without writing it)
+    - name: Install | Write the release marker
+      ansible.builtin.copy:
+        content: "{{ __postfixadmin_release }}\n"
+        dest: '{{ __postfixadmin_staging_dir }}/{{ __postfixadmin_release_marker | basename }}'
+        owner: root
+        group: root
+        mode: '0644'
+
+    # A replaced release left by an interrupted run would make mv -T below
+    # fail (it does not replace a non-empty directory); the installed
+    # release is still in place at this point.
+    - name: Install | Remove a stale replaced release
+      ansible.builtin.file:
+        path: '{{ __postfixadmin_replaced_dir }}'
+        state: absent
+
+    # The new release replaces the installed one under the same path, so
+    # the web server and the realpath cache of PHP-FPM keep their paths.
+    - name: Install | Move the replaced release aside
+      ansible.builtin.command:
+        argv:
+          - mv
+          - '-T'
+          - '{{ postfixadmin_install_dir }}'
+          - '{{ __postfixadmin_replaced_dir }}'
+      changed_when: true
+      when:
+        - not __postfixadmin_check_mode
+        - __postfixadmin_install_dir_stat.stat.exists
+
+    - name: Install | Activate the new release
+      ansible.builtin.command:
+        argv:
+          - mv
+          - '-T'
+          - '{{ __postfixadmin_staging_dir }}'
+          - '{{ postfixadmin_install_dir }}'
+      changed_when: true
+      when: not __postfixadmin_check_mode
+
+    - name: Install | Remove the replaced release
+      ansible.builtin.file:
+        path: '{{ __postfixadmin_replaced_dir }}'
+        state: absent
+
+    - name: Install | Remove the release archive
+      ansible.builtin.file:
+        path: '{{ __postfixadmin_cache_dir }}/{{ __postfixadmin_archive }}'
+        state: absent
+
+# The only directory PHP-FPM writes to (compiled Smarty templates)
+- name: Install | Make templates_c writable for PHP-FPM
+  ansible.builtin.file:
+    path: '{{ postfixadmin_install_dir }}/templates_c'
+    state: directory
+    owner: '{{ __postfixadmin_fpm_user }}'
+    group: '{{ __postfixadmin_fpm_group }}'
+    mode: '0750'
+  when: not __postfixadmin_check_mode or not __postfixadmin_release_changed | bool
+
+# Without owner and group: the file module applies them to the link
+# target, which would hand config.local.php to root:root on every run
+# until configure.yml sets its group again.
+- name: Install | Link config.local.php into the release
+  ansible.builtin.file:
+    src: '{{ __postfixadmin_config_file }}'
+    dest: '{{ postfixadmin_install_dir }}/config.local.php'
+    state: link
+    force: true
+  when: not __postfixadmin_check_mode or not __postfixadmin_release_changed | bool
+
+- name: Install | Create the helper directory
+  ansible.builtin.file:
+    path: '{{ __postfixadmin_helper_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Install | Deploy the helper
+  ansible.builtin.copy:
+    src: postfixadmin-ansible.php
+    dest: '{{ __postfixadmin_helper }}'
+    owner: root
+    group: root
+    mode: '0644'
+
+# PHP-FPM runs in the httpd_t domain: it reads the release
+# (httpd_sys_content_t), writes templates_c (httpd_sys_rw_content_t) and
+# connects to a database server over TCP (httpd_can_network_connect_db).
+- name: Install | Label the release for PHP-FPM (SELinux)
+  community.general.sefcontext:
+    target: '{{ item.target }}'
+    setype: '{{ item.setype }}'
+    state: present
+  loop:
+    - target: '{{ postfixadmin_install_dir }}(/.*)?'
+      setype: 'httpd_sys_content_t'
+    - target: '{{ postfixadmin_install_dir }}/templates_c(/.*)?'
+      setype: 'httpd_sys_rw_content_t'
+  loop_control:
+    label: '{{ item.setype }}'
+  register: __postfixadmin_sefcontext
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+- name: Install | Apply the SELinux labels to the release
+  ansible.builtin.command:
+    argv:
+      - restorecon
+      - '-R'
+      - '-v'
+      - '{{ postfixadmin_install_dir }}'
+  register: __postfixadmin_restorecon
+  changed_when: __postfixadmin_restorecon.stdout | length > 0
+  when:
+    - not __postfixadmin_check_mode
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+    - __postfixadmin_sefcontext is changed or __postfixadmin_release_changed | bool
+
+- name: Install | Allow PHP-FPM database connections (SELinux)
+  ansible.posix.seboolean:
+    name: httpd_can_network_connect_db
+    state: true
+    persistent: true
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+    - __postfixadmin_db_socket | length == 0

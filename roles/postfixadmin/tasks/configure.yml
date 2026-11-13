@@ -1,0 +1,23 @@
+---
+# config.local.php holds the database password: root writes it, the
+# PHP-FPM group reads it. It stays in place when a new release replaces
+# the installation directory, which links to it.
+
+- name: Configure | Create the configuration directory
+  ansible.builtin.file:
+    path: '{{ __postfixadmin_config_dir }}'
+    state: directory
+    owner: root
+    group: '{{ __postfixadmin_fpm_group }}'
+    mode: '0750'
+
+- name: Configure | Deploy config.local.php
+  ansible.builtin.template:
+    src: config.local.php.j2
+    dest: '{{ __postfixadmin_config_file }}'
+    owner: root
+    group: '{{ __postfixadmin_fpm_group }}'
+    mode: '0640'
+    validate: '{{ postfixadmin_php_cli }} -l %s'
+  no_log: true
+  diff: false

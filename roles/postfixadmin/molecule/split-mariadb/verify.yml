@@ -1,0 +1,158 @@
+---
+- name: Verify — Database server
+  hosts: database
+  gather_facts: true
+
+  vars:
+    __verify_socket: '/run/mysqld/mysqld.sock'
+
+  tasks:
+    - name: Verify | Read the TLS settings of the server
+      ansible.mariadb.mariadb_query:
+        login_unix_socket: '{{ __verify_socket }}'
+        query: "SHOW GLOBAL VARIABLES WHERE Variable_name IN ('have_ssl', 'require_secure_transport')"
+      register: __verify_server_tls
+
+    - name: Verify | Read the schema version on the database server
+      ansible.mariadb.mariadb_query:
+        login_unix_socket: '{{ __verify_socket }}'
+        login_db: 'postfixadmin'
+        query: "SELECT value FROM config WHERE name = 'version'"
+      register: __verify_schema
+
+    - name: Verify | Read the accounts on the database server
+      ansible.mariadb.mariadb_query:
+        login_unix_socket: '{{ __verify_socket }}'
+        login_db: 'postfixadmin'
+        query: 'SELECT c_uid, c_password FROM sogo_users'
+      register: __verify_view
+
+    - name: Verify | Assert TLS, schema, accounts and SOGo view
+      ansible.builtin.assert:
+        that:
+          - __verify_tls_settings.have_ssl == 'YES'
+          - __verify_tls_settings.require_secure_transport == 'ON'
+          - (__verify_schema.query_result | first)[0].value | int > 0
+          - (__verify_view.query_result | first) | map(attribute='c_uid') | list == ['alice@example.com']
+          - (__verify_view.query_result | first)[0].c_password is match('^\{ARGON2ID\}\$argon2id\$')
+        fail_msg: >-
+          {{ {'tls': __verify_tls_settings, 'schema': __verify_schema.query_result,
+              'view': __verify_view.query_result} | to_json }}
+      vars:
+        __verify_tls_settings: >-
+          {{ __verify_server_tls.query_result | first
+             | items2dict(key_name='Variable_name', value_name='Value') }}
+
+- name: Verify — PostfixAdmin host
+  hosts: web
+  gather_facts: false
+
+  vars:
+    __verify_dir: '/var/www/postfixadmin'
+    __verify_helper: '/usr/local/lib/postfixadmin-ansible/postfixadmin-ansible.php'
+    __verify_query: '/root/molecule-query.php'
+    __verify_db_host: 'postfixadmin-split-mariadb-db'
+    __verify_db_address: "{{ hostvars['postfixadmin-split-mariadb-db']['ansible_facts']['default_ipv4']['address'] }}"
+
+  tasks:
+    - name: Verify | Read config.local.php
+      ansible.builtin.slurp:
+        src: /etc/postfixadmin/config.local.php
+      register: __verify_config
+
+    - name: Verify | Assert the TLS settings of PostfixAdmin
+      ansible.builtin.assert:
+        that:
+          - "\"$CONF['database_host'] = '\" ~ __verify_db_host ~ \"';\" in __verify_lines"
+          - "\"$CONF['database_socket'] = '';\" in __verify_lines"
+          - "\"$CONF['database_use_ssl'] = true;\" in __verify_lines"
+          - "\"$CONF['database_ssl_ca'] = '\" ~ __molecule_ca_file ~ \"';\" in __verify_lines"
+          - "\"$CONF['database_ssl_verify_server_cert'] = true;\" in __verify_lines"
+        fail_msg: "{{ __verify_lines | select('search', 'database_') | reject('search', 'password') | list }}"
+      vars:
+        __verify_lines: '{{ (__verify_config.content | b64decode).splitlines() }}'
+
+    - name: Verify | Read the schema status through the TLS connection
+      ansible.builtin.command:
+        argv: [php, '{{ __verify_helper }}', '{{ __verify_dir }}']
+        stdin: '{"action": "status"}'
+      register: __verify_status
+      changed_when: false
+
+    - name: Verify | Assert the schema is up to date
+      ansible.builtin.assert:
+        that:
+          - (__verify_status.stdout | from_json).db_version == (__verify_status.stdout | from_json).target_version
+
+    - name: Verify | Deploy the query helper
+      ansible.builtin.copy:
+        src: ../shared/files/query.php
+        dest: '{{ __verify_query }}'
+        owner: root
+        group: root
+        mode: '0644'
+
+    # The connection PostfixAdmin opens with its own configuration
+    - name: Verify | Read the TLS cipher of PostfixAdmin's connection
+      ansible.builtin.command:
+        argv:
+          - php
+          - '{{ __verify_query }}'
+          - sql
+          - '{{ __verify_dir }}'
+          - "SHOW SESSION STATUS LIKE 'Ssl_cipher'"
+      register: __verify_cipher
+      changed_when: false
+
+    - name: Verify | Assert PostfixAdmin connects with TLS
+      ansible.builtin.assert:
+        that:
+          - (__verify_cipher.stdout | from_json | first).Value | length > 0
+        fail_msg: '{{ __verify_cipher.stdout }}'
+
+    # The server refuses the user without TLS; with TLS, the certificate
+    # check refuses an address the certificate does not name.
+    - name: Verify | Connect with and without TLS
+      ansible.builtin.command:
+        argv:
+          - php
+          - '-d'
+          - 'display_errors=stderr'
+          - '-r'
+          - >-
+            $o = [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION];
+            if ($argv[3] !== 'plain') { $o[PDO::MYSQL_ATTR_SSL_CA] = $argv[4];
+            $o[PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT] = $argv[3] === 'verify'; }
+            try { $l = new PDO($argv[1], 'postfixadmin', $argv[2], $o);
+            $r = $l->query("SHOW SESSION STATUS LIKE 'Ssl_cipher'")->fetch(PDO::FETCH_NUM);
+            echo json_encode(($r[1] ?? '') !== ''); }
+            catch (PDOException $e) { echo json_encode('refused'); }
+          - 'mysql:dbname=postfixadmin;host={{ item.host }}'
+          - '{{ __molecule_db_password }}'
+          - '{{ item.mode }}'
+          - '{{ __molecule_ca_file }}'
+      loop:
+        - name: 'host name with verification'
+          host: '{{ __verify_db_host }}'
+          mode: 'verify'
+          expected: true
+        - name: 'without TLS'
+          host: '{{ __verify_db_host }}'
+          mode: 'plain'
+          expected: 'refused'
+        # The address is not in the certificate: TLS works, the host name
+        # check refuses it
+        - name: 'address without verification'
+          host: '{{ __verify_db_address }}'
+          mode: 'noverify'
+          expected: true
+        - name: 'address with verification'
+          host: '{{ __verify_db_address }}'
+          mode: 'verify'
+          expected: 'refused'
+      loop_control:
+        label: '{{ item.name }}'
+      register: __verify_tls
+      changed_when: false
+      failed_when: (__verify_tls.stdout | from_json) != item.expected
+      no_log: true

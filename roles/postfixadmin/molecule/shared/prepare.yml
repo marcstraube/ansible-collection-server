@@ -1,0 +1,164 @@
+---
+# Test environment: PHP-FPM through marcstraube.common.php and the database
+# server of postfixadmin_db_type through the role of this collection, as on
+# a real host. Shared by the postgresql, mariadb and update scenarios.
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __prepare_packages:
+      Archlinux:
+        - systemd
+        - dbus
+        - procps-ng
+      Debian:
+        - systemd
+        - dbus
+        - procps
+        - locales
+      RedHat:
+        - systemd
+        - dbus
+        - procps-ng
+        - glibc-langpack-en
+    # PHP extensions as marcstraube.common.php names them per platform:
+    # EL ships pdo_pgsql in php-pgsql ('pgsql') and pdo_mysql in
+    # php-mysqlnd; Debian and EL compile iconv in; Arch Linux builds
+    # mbstring in and loads iconv and the PDO drivers from extension= lines.
+    __prepare_php_extensions:
+      postgresql:
+        Archlinux: ['pgsql', 'iconv']
+        Debian: ['pdo_pgsql', 'mbstring']
+        RedHat: ['pgsql', 'mbstring']
+      mariadb:
+        Archlinux: ['pdo_mysql', 'iconv']
+        Debian: ['pdo_mysql', 'mbstring']
+        RedHat: ['pdo_mysql', 'mbstring']
+    # EL 9: the php:8.3 module stream, the first with Argon2
+    __prepare_php_version: >-
+      {{ '8.3' if ansible_facts['os_family'] == 'RedHat'
+                 and ansible_facts['distribution_major_version'] == '9' else 'auto' }}
+
+  tasks:
+    # Sudo PAM bypass — required for tasks using `become_user` on
+    # geerlingguy Rocky containers under GitHub-hosted runners
+    # (test container only).
+
+    - name: Prepare | Bypass sudo PAM stack (RedHat container)
+      ansible.builtin.copy:
+        content: |
+          #%PAM-1.0
+          auth       sufficient   pam_permit.so
+          account    sufficient   pam_permit.so
+          password   sufficient   pam_permit.so
+          session    sufficient   pam_permit.so
+        dest: /etc/pam.d/sudo
+        owner: root
+        group: root
+        mode: '0644'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Disable sudoers authentication (RedHat container)
+      ansible.builtin.copy:
+        content: 'Defaults !authenticate'
+        dest: /etc/sudoers.d/molecule-no-auth
+        owner: root
+        group: root
+        mode: '0440'
+        validate: 'visudo -cf %s'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Update package cache (Arch)
+      community.general.pacman:
+        update_cache: true
+        upgrade: true
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    # The pacman ignore drop-in setup of marcstraube.common.package_management
+    # that the database roles expect; pacman fails on an Include glob
+    # without a match, so a file is in place before the Include line
+    - name: Prepare | Create pacman ignore drop-in directory (Arch)
+      ansible.builtin.file:
+        path: /etc/pacman.d/ignore.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Create pacman ignore drop-in (Arch)
+      ansible.builtin.copy:
+        content: "# molecule\n"
+        dest: /etc/pacman.d/ignore.d/00-molecule.conf
+        owner: root
+        group: root
+        mode: '0644'
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Include pacman ignore drop-ins (Arch)
+      ansible.builtin.lineinfile:
+        path: /etc/pacman.conf
+        line: 'Include = /etc/pacman.d/ignore.d/*.conf'
+        insertafter: '^\[options\]'
+        firstmatch: true
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Update package cache (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Update package cache (RedHat)
+      ansible.builtin.dnf:
+        update_cache: true
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name: '{{ __prepare_packages[ansible_facts["os_family"]] }}'
+        state: present
+      retries: 3
+      delay: 5
+
+    # The PostgreSQL role sets the en_US.UTF-8 locale in the molecule vars
+    - name: Prepare | Generate en_US.UTF-8 locale (Debian)
+      community.general.locale_gen:
+        name: en_US.UTF-8
+        state: present
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Enable PostgreSQL 16 module stream (EL9)
+      ansible.builtin.dnf:
+        name: '@postgresql:16'
+        state: present
+      when:
+        - postfixadmin_db_type == 'postgresql'
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['distribution_major_version'] == '9'
+
+    - name: Prepare | Include php role
+      ansible.builtin.include_role:
+        name: marcstraube.common.php
+      vars:
+        php_versions:
+          - version: '{{ __prepare_php_version }}'
+            extensions: '{{ __prepare_php_extensions[postfixadmin_db_type][ansible_facts["os_family"]] }}'
+            fpm: true
+        php_default_version: '{{ __prepare_php_version }}'
+        # marcstraube.common.php maps no package for pdo_pgsql on Arch
+        # Linux: php-pgsql ('pgsql') carries the module, this line loads it
+        php_ini_extra_settings: >-
+          {{ {'extension': 'pdo_pgsql'}
+             if ansible_facts['os_family'] == 'Archlinux' and postfixadmin_db_type == 'postgresql'
+             else {} }}
+
+    - name: Prepare | Include postgresql role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postgresql'
+      when: postfixadmin_db_type == 'postgresql'
+
+    - name: Prepare | Include mariadb role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../mariadb'
+      when: postfixadmin_db_type == 'mariadb'
