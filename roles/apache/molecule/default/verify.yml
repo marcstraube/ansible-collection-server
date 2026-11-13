@@ -151,6 +151,108 @@
                   | zip(__apache_docroot_stat.results | map(attribute='stat'))) }}
 
     #
+    # Writable Paths
+    #
+    # Owner and mode on every platform. The SELinux part needs a host with
+    # SELinux enabled; in containers it is disabled and the role skips it.
+    #
+
+    - name: Verify | Stat the writable paths
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+        - '/var/www/writable.example.local/var/cache'
+        - '/var/log/molecule-writable'
+        - '/var/www/writable.example.local/uploads'
+      register: __verify_writable_stat
+
+    - name: Verify | Assert the writable path directories
+      ansible.builtin.assert:
+        that:
+          # mode only: owner and group default to the web server user
+          - __writable['/var/www/writable.example.local/var/cache'].pw_name == __apache_user
+          - __writable['/var/www/writable.example.local/var/cache'].gr_name == __apache_group
+          - __writable['/var/www/writable.example.local/var/cache'].mode == '0750'
+          - __writable['/var/log/molecule-writable'].isdir
+          - __writable['/var/log/molecule-writable'].pw_name == 'root'
+          - __writable['/var/log/molecule-writable'].gr_name == 'root'
+          - __writable['/var/log/molecule-writable'].mode == '0770'
+          # label only: left as prepare.yml planted it
+          - __writable['/var/www/writable.example.local/uploads'].pw_name == 'root'
+          - __writable['/var/www/writable.example.local/uploads'].mode == '0755'
+        fail_msg: 'The writable paths do not have the expected state: {{ __writable }}'
+        success_msg: 'Writable paths are created and corrected, label-only paths are left alone'
+      vars:
+        __writable: >-
+          {{ dict(__verify_writable_stat.results | map(attribute='item')
+                  | zip(__verify_writable_stat.results | map(attribute='stat'))) }}
+
+    # Installed on RedHat whether SELinux is enabled or not
+    - name: Verify | Check the SELinux management tools are installed (RedHat)
+      ansible.builtin.package:
+        name: '{{ __apache_selinux_packages }}'
+        state: present
+      check_mode: true
+      register: __verify_selinux_packages
+      failed_when: __verify_selinux_packages is changed
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Verify | Read the local SELinux file contexts
+      ansible.builtin.command:
+        cmd: semanage fcontext -l -C
+      register: __verify_writable_fcontexts
+      changed_when: false
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    - name: Verify | Read the SELinux labels of the writable paths
+      ansible.builtin.command:
+        argv:
+          - stat
+          - '--format=%n %C'
+          - '/var/www/writable.example.local/var/cache'
+          - '/var/www/writable.example.local/var/cache/existing.txt'
+          - '/var/log/molecule-writable'
+          - '/var/www/writable.example.local/uploads'
+          - '/var/www/writable.example.local/uploads/existing.txt'
+      register: __verify_writable_labels
+      changed_when: false
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    # Each line is "<regex> <file type> <context>": first and last field
+    - name: Verify | Assert the SELinux file contexts and labels
+      ansible.builtin.assert:
+        that:
+          - __fcontexts[__fc_cache] | default('') is search(':httpd_sys_rw_content_t:')
+          - __fcontexts[__fc_log] | default('') is search(':httpd_log_t:')
+          - __fcontexts[__fc_uploads] | default('') is search(':httpd_sys_rw_content_t:')
+          - __labels['/var/www/writable.example.local/var/cache'] is search(':httpd_sys_rw_content_t:')
+          - __labels['/var/www/writable.example.local/var/cache/existing.txt'] is search(':httpd_sys_rw_content_t:')
+          - __labels['/var/log/molecule-writable'] is search(':httpd_log_t:')
+          - __labels['/var/www/writable.example.local/uploads'] is search(':httpd_sys_rw_content_t:')
+          - __labels['/var/www/writable.example.local/uploads/existing.txt'] is search(':httpd_sys_rw_content_t:')
+        fail_msg: >-
+          Unexpected SELinux state. File contexts: {{ __fcontexts }}, labels: {{ __labels }}
+        success_msg: 'The writable paths, and the files in them, carry the type of their entry'
+      vars:
+        # The role escapes the dots of a path in the file context regex
+        __fc_cache: '/var/www/writable\.example\.local/var/cache(/.*)?'
+        __fc_log: '/var/log/molecule-writable(/.*)?'
+        __fc_uploads: '/var/www/writable\.example\.local/uploads(/.*)?'
+        __fcontexts: >-
+          {{ dict(__verify_writable_fcontexts.stdout_lines | map('split') | map('first')
+                  | zip(__verify_writable_fcontexts.stdout_lines | map('split') | map('last'))) }}
+        __labels: >-
+          {{ dict(__verify_writable_labels.stdout_lines | map('split') | map('first')
+                  | zip(__verify_writable_labels.stdout_lines | map('split') | map('last'))) }}
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    #
     # ACME Challenge Verification
     #
 

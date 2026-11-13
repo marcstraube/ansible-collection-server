@@ -250,6 +250,82 @@ are covered under [SELinux](#selinux).
 The default site listens on 80 and on `443 ssl http2`, the same options as
 the SSL sites, so the sites can share port 443 with it.
 
+### Writable Paths
+
+| Variable               | Default | Description                               |
+| ---------------------- | ------- | ----------------------------------------- |
+| `nginx_writable_paths` | `[]`    | Directories the web applications write to |
+
+Under SELinux, the web server and its PHP-FPM workers may only write to paths
+labeled `httpd_sys_rw_content_t`, or `httpd_log_t` for log files. A cache or
+storage directory below the document root inherits the read-only
+`httpd_sys_content_t`, and a log directory below `/var/log` gets `var_log_t`;
+the application then fails with a bare permission error. Each entry of
+`nginx_writable_paths` gets a persistent file context for `<path>(/.*)?` on
+RedHat with SELinux enabled. The role restores the labels of the directory
+and everything below it when the context is new or changed, and on every run
+it compares the label of the directory itself with the context and restores
+the labels when they differ. Other platforms and hosts with SELinux disabled
+get no labels. On RedHat the role installs `policycoreutils-python-utils`,
+which provides `semanage`.
+
+| Key     | Default                  | Description                                   |
+| ------- | ------------------------ | --------------------------------------------- |
+| `path`  | (required)               | Absolute path, no trailing slash              |
+| `type`  | `httpd_sys_rw_content_t` | SELinux type of the directory and its content |
+| `owner` | nginx user               | Owner of the directory the role creates       |
+| `group` | nginx group              | Group of the directory the role creates       |
+| `mode`  | `'0755'`                 | Mode of the directory the role creates        |
+
+`type` accepts `httpd_sys_rw_content_t`, `httpd_sys_ra_content_t` (append
+only), `httpd_log_t` and `httpd_cache_t`. A `path` consists of letters,
+digits and `.`, `_`, `@`, `-`; it becomes part of the file context regex,
+with the dots escaped.
+
+With `owner`, `group` or `mode` set, the role creates the directory on every
+platform and enforces all three on every run. Missing parent directories are
+created with the same settings, so let the document root exist first or list
+the parent as an entry of its own before. Without any of the three, the path
+is only labeled. A path that does not exist yet is skipped; when the
+application creates the directory later, it inherits the type of its parent
+until the next run of the role restores its labels. Only the directory itself
+is compared on every run, not its content: a file below it that got a wrong
+label some other way (e.g. moved with `mv` from another directory) stays as
+it is until the context changes or `restorecon -R <path>` runs.
+
+The default owner and group are the nginx user and group. PHP-FPM does not
+run as nginx: on EL its pools run as `apache`, or as the pool's own user with
+`fpm_pools`. A directory PHP writes to therefore sets `owner` and `group`
+explicitly:
+
+```yaml
+nginx_writable_paths:
+  - path: '/var/log/myapp'
+    type: 'httpd_log_t'
+    owner: 'root'
+    group: 'apache'
+    mode: '2770'
+```
+
+Removing an entry leaves the directory and its file context in place. Remove
+the context by hand with `semanage fcontext -d '<path>(/.*)?'` (dots escaped
+as `\.`) and run `restorecon -R <path>`.
+
+```yaml
+nginx_writable_paths:
+  # Cache below the document root, written by the PHP-FPM pool user
+  - path: '/var/www/app.example.com/var/cache'
+    owner: 'nginx'
+    group: 'nginx'
+    mode: '0750'
+  # Log directory below /var/log
+  - path: '/var/log/app'
+    type: 'httpd_log_t'
+    owner: 'nginx'
+    group: 'nginx'
+    mode: '0750'
+```
+
 ### Upstreams
 
 | Variable          | Default | Description                  |
@@ -260,13 +336,14 @@ Strategies: `round_robin` (default), `least_conn`, `ip_hash`, `hash`.
 
 ## Tags
 
-| Tag               | Scope                     |
-| ----------------- | ------------------------- |
-| `nginx`           | All role tasks            |
-| `nginx:install`   | Package installation      |
-| `nginx:configure` | Configuration deployment  |
-| `nginx:service`   | Service management        |
-| `nginx:firewall`  | Firewalld rule management |
+| Tag                    | Scope                             |
+| ---------------------- | --------------------------------- |
+| `nginx`                | All role tasks                    |
+| `nginx:install`        | Package installation              |
+| `nginx:configure`      | Configuration deployment          |
+| `nginx:writable-paths` | Writable paths and SELinux labels |
+| `nginx:service`        | Service management                |
+| `nginx:firewall`       | Firewalld rule management         |
 
 ## Example Playbook
 

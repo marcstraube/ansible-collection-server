@@ -196,6 +196,16 @@
     - apache_ssl_enabled | bool
     - __apache_ssl_packages is defined
 
+- name: Install | SELinux management tools (RedHat)
+  ansible.builtin.package:
+    name: '{{ __apache_selinux_packages }}'
+    state: present
+  retries: 3
+  delay: 5
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - __apache_selinux_packages is defined
+
 # Re-read the installed packages, the facts gathered before the update show
 # the old versions.
 - name: Install | Gather package facts after the update
