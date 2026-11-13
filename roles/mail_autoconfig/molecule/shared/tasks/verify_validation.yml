@@ -1,0 +1,290 @@
+---
+# Every assert of the role rejects a bad value with its own message. The
+# role is run once per case; the assert stops it before any file changes.
+
+- name: Verify | Run role with an empty domain list
+  block:
+    - name: Verify | Include mail_autoconfig role with an empty domain list  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_autoconfig_domains: []
+  rescue:
+    - name: Verify | Record the failure with an empty domain list
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'domains_empty': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with a single domain instead of a list
+  block:
+    - name: Verify | Include mail_autoconfig role with a single domain instead of a list  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_autoconfig_domains: 'example.com'
+  rescue:
+    - name: Verify | Record the failure with a single domain instead of a list
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'domains_string': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with an invalid domain name
+  block:
+    - name: Verify | Include mail_autoconfig role with an invalid domain name  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_autoconfig_domains:
+          - 'example.com'
+          - 'example_com'
+  rescue:
+    - name: Verify | Record the failure with an invalid domain name
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'domains_invalid': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with a bare IMAP host name
+  block:
+    - name: Verify | Include mail_autoconfig role with a bare IMAP host name  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_autoconfig_imap_host: 'mail'
+        mail_autoconfig_submission_host: 'mail.example.com'
+  rescue:
+    - name: Verify | Record the failure with a bare IMAP host name
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'imap_host': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with POP3 without a host
+  block:
+    - name: Verify | Include mail_autoconfig role with POP3 without a host  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_autoconfig_pop3_enabled: true
+        mail_autoconfig_pop3_host: ''
+  rescue:
+    - name: Verify | Record the failure with POP3 without a host
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'pop3_host': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with no submission mode
+  block:
+    - name: Verify | Include mail_autoconfig role with no submission mode  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_autoconfig_submission_implicit_tls_enabled: false
+        mail_autoconfig_submission_starttls_enabled: false
+  rescue:
+    - name: Verify | Record the failure with no submission mode
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'submission': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with a port out of range
+  block:
+    - name: Verify | Include mail_autoconfig role with a port out of range  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_autoconfig_imap_port: 65536
+  rescue:
+    - name: Verify | Record the failure with a port out of range
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'port_range': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with a port that is not an integer
+  block:
+    - name: Verify | Include mail_autoconfig role with a port that is not an integer  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_autoconfig_submission_starttls_enabled: true
+        mail_autoconfig_submission_starttls_port: 'submission'
+  rescue:
+    - name: Verify | Record the failure with a port that is not an integer
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'port_type': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with a relative web root
+  block:
+    - name: Verify | Include mail_autoconfig role with a relative web root  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_autoconfig_web_root: 'var/www/mail-autoconfig'
+  rescue:
+    - name: Verify | Record the failure with a relative web root
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'web_root': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with a bare web host name
+  block:
+    - name: Verify | Include mail_autoconfig role with a bare web host name  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_autoconfig_web_host: 'web'
+  rescue:
+    - name: Verify | Record the failure with a bare web host name
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'web_host': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+# Existing web roots the role must refuse without touching them: writable by
+# the group, and owned by another user than root
+- name: Verify | Create web roots writable by others than root
+  ansible.builtin.file:
+    path: '{{ item.path }}'
+    state: directory
+    owner: '{{ item.owner }}'
+    group: root
+    mode: '{{ item.mode }}'
+  loop: &verify_foreign_roots
+    - path: /var/www/mail-autoconfig-group-writable
+      owner: root
+      mode: '0775'
+    - path: /var/www/mail-autoconfig-foreign-owner
+      owner: nobody
+      mode: '0755'
+  loop_control:
+    label: '{{ item.path }}'
+
+- name: Verify | Run role with a group-writable web root
+  block:
+    - name: Verify | Include mail_autoconfig role with a group-writable web root  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_autoconfig_web_root: /var/www/mail-autoconfig-group-writable
+  rescue:
+    - name: Verify | Record the failure with a group-writable web root
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'web_root_group_writable': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with a web root of another owner
+  block:
+    - name: Verify | Include mail_autoconfig role with a web root of another owner  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_autoconfig_web_root: /var/www/mail-autoconfig-foreign-owner
+  rescue:
+    - name: Verify | Record the failure with a web root of another owner
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'web_root_foreign_owner': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Check the refused web roots after the runs
+  ansible.builtin.find:
+    paths: '{{ item.path }}'
+    file_type: any
+    hidden: true
+  loop: *verify_foreign_roots
+  loop_control:
+    label: '{{ item.path }}'
+  register: __verify_foreign_contents
+
+- name: Verify | Check owner and mode of the refused web roots
+  ansible.builtin.stat:
+    path: '{{ item.path }}'
+  loop: *verify_foreign_roots
+  loop_control:
+    label: '{{ item.path }}'
+  register: __verify_foreign_stats
+
+# The assert stops the role before the first change: no files, owner and
+# mode as they were
+- name: Verify | Assert the refused web roots are unchanged
+  ansible.builtin.assert:
+    that:
+      - item.0.matched == 0
+      - item.1.stat.pw_name == item.1.item.owner
+      - item.1.stat.mode == item.1.item.mode
+    fail_msg: >-
+      {{ item.1.item.path }}: {{ item.0.matched }} entries, owner {{ item.1.stat.pw_name }},
+      mode {{ item.1.stat.mode }}
+  loop: '{{ __verify_foreign_contents.results | zip(__verify_foreign_stats.results) | list }}'
+  loop_control:
+    label: '{{ item.1.item.path }}'
+
+- name: Verify | Assert every bad value failed its own assert
+  ansible.builtin.assert:
+    that:
+      - __verify_validation[item.key] is defined
+      - __verify_validation[item.key].task == item.value.task
+      - item.value.msg in __verify_validation[item.key].msg
+    fail_msg: '{{ item.key }}: {{ __verify_validation[item.key] | default("role run succeeded") }}'
+  loop: '{{ __verify_validation_expected | dict2items }}'
+  loop_control:
+    label: '{{ item.key }}'
+  vars:
+    __verify_validation_expected:
+      domains_empty:
+        task: 'Main | Assert mail domains'
+        msg: 'mail_autoconfig_domains must be a non-empty list of domain names'
+      domains_string:
+        task: 'Main | Assert mail domains'
+        msg: 'mail_autoconfig_domains must be a non-empty list of domain names'
+      domains_invalid:
+        task: 'Main | Assert mail domains'
+        msg: 'mail_autoconfig_domains must be a non-empty list of domain names'
+      imap_host:
+        task: 'Main | Assert server host names'
+        msg: 'must be fully qualified host names'
+      pop3_host:
+        task: 'Main | Assert server host names'
+        msg: 'must be fully qualified host names'
+      submission:
+        task: 'Main | Assert submission mode'
+        msg: 'At least one of mail_autoconfig_submission_implicit_tls_enabled'
+      port_range:
+        task: 'Main | Assert ports'
+        msg: 'must be integers from 1 to 65535'
+      port_type:
+        task: 'Main | Assert ports'
+        msg: 'must be integers from 1 to 65535'
+      web_root:
+        task: 'Main | Assert web root'
+        msg: 'mail_autoconfig_web_root must be an absolute path'
+      web_host:
+        task: 'Main | Assert web host'
+        msg: 'mail_autoconfig_web_host must be the fully qualified name'
+      web_root_group_writable:
+        task: 'Main | Assert web root permissions'
+        msg: 'must be a directory owned by root and not writable by group or others'
+      web_root_foreign_owner:
+        task: 'Main | Assert web root permissions'
+        msg: 'must be a directory owned by root and not writable by group or others'

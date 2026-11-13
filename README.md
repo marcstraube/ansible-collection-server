@@ -47,9 +47,10 @@ for the base system (podman, pki, firewalld, fail2ban).
 
 ### Mail
 
-| Role             | Description                                                      |
-| ---------------- | ---------------------------------------------------------------- |
-| **postfixadmin** | PostfixAdmin with its schema, read-only users and mail accounts  |
+| Role                | Description                                                     |
+| ------------------- | --------------------------------------------------------------- |
+| **postfixadmin**    | PostfixAdmin with its schema, read-only users and mail accounts |
+| **mail_autoconfig** | Mail client autoconfiguration (Autoconfig, Autodiscover, Apple) |
 
 ### Applications
 
