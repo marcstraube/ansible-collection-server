@@ -249,6 +249,35 @@ nginx_deny_patterns:
   # Database dumps
   - '[^/]+\.sql(\.(gz|bz2|xz|zst))?'
 
+# SELinux
+
+# SELinux booleans (RedHat). Each takes one of three values:
+#   null  - leave the boolean as it is on the host (default)
+#   true  - switch it on
+#   false - switch it off
+# The booleans apply to the whole httpd_t domain, which Apache and PHP-FPM
+# share, so the role only switches one off when told to explicitly.
+
+# Allow PHP-FPM workers to reach a database over the network. Not derived from
+# php sites, because the role cannot tell whether an application talks to a
+# database at all, and the boolean should not be widened on hosts that never
+# need it.
+nginx_selinux_connect_db: null
+
+# Allow nginx and its PHP-FPM workers to open outbound network connections.
+# Proxy sites, enabled sites with authentik.enabled and stream servers need
+# this boolean and switch it on automatically; false is rejected while any are
+# configured. An upstream alone does not switch it on, because only a site or
+# a location that proxies to it opens the connection. Set it when the
+# application itself calls out to a remote service, or when a location or
+# extra_config of a site that is not of type proxy proxies to a backend.
+nginx_selinux_network_connect: null
+
+# Allow nginx and its PHP-FPM workers to submit mail through the local MTA.
+# Needed by applications that send mail through PHP's mail() or a sendmail
+# binary; without it submission fails with a bare permission error.
+nginx_selinux_sendmail: null
+
 #
 # Rate Limiting
 #
