@@ -1,0 +1,12 @@
+---
+- name: Converge
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - ../shared/vars/main.yml
+
+  tasks:
+    - name: Converge | Include mail_autoconfig role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'

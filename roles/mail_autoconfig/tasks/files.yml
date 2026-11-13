@@ -1,0 +1,65 @@
+---
+# Only a missing web root is created: an existing one keeps its owner and
+# mode, main.yml has already refused one that others than root can write to.
+# Missing parent directories are created with the same owner and mode.
+- name: Files | Create web root
+  ansible.builtin.file:
+    path: '{{ mail_autoconfig_web_root }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: not __mail_autoconfig_web_root_stat.stat.exists
+
+- name: Files | Create directories
+  ansible.builtin.file:
+    path: '{{ mail_autoconfig_web_root }}/{{ item }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop: '{{ __mail_autoconfig_directories }}'
+
+- name: Files | Deploy Mozilla Autoconfig file
+  ansible.builtin.template:
+    src: config-v1.1.xml.j2
+    dest: '{{ mail_autoconfig_web_root }}/{{ item }}'
+    owner: root
+    group: root
+    mode: '0644'
+  loop: '{{ __mail_autoconfig_mozilla_files }}'
+
+- name: Files | Deploy Microsoft Autodiscover file
+  ansible.builtin.template:
+    src: autodiscover.xml.j2
+    dest: '{{ mail_autoconfig_web_root }}/{{ __mail_autoconfig_autodiscover_file }}'
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Files | Create Apple configuration profile directory
+  ansible.builtin.file:
+    path: '{{ mail_autoconfig_web_root }}/{{ __mail_autoconfig_apple_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: mail_autoconfig_apple_profile_enabled | bool
+
+- name: Files | Deploy Apple configuration profiles
+  ansible.builtin.template:
+    src: mobileconfig.j2
+    dest: '{{ mail_autoconfig_web_root }}/{{ __mail_autoconfig_apple_dir }}/{{ item }}.mobileconfig'
+    owner: root
+    group: root
+    mode: '0644'
+  loop: '{{ mail_autoconfig_domains }}'
+  when: mail_autoconfig_apple_profile_enabled | bool
+
+# Own state: the directory holds only the profiles the role renders, so it
+# goes away with the toggle, together with the profiles of every domain
+- name: Files | Remove Apple configuration profile directory
+  ansible.builtin.file:
+    path: '{{ mail_autoconfig_web_root }}/{{ __mail_autoconfig_apple_dir }}'
+    state: absent
+  when: not mail_autoconfig_apple_profile_enabled | bool

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+{{ ansible_managed | comment('xml') }}
+<clientConfig version="1.1">
+  <emailProvider id="{{ mail_autoconfig_domains | first | e }}">
+{% for domain in mail_autoconfig_domains %}
+    <domain>{{ domain | e }}</domain>
+{% endfor %}
+    <displayName>{{ __mail_autoconfig_display_name | e }}</displayName>
+    <displayShortName>{{ __mail_autoconfig_display_short_name | e }}</displayShortName>
+    <incomingServer type="imap">
+      <hostname>{{ mail_autoconfig_imap_host | e }}</hostname>
+      <port>{{ mail_autoconfig_imap_port | int }}</port>
+      <socketType>SSL</socketType>
+      <authentication>password-cleartext</authentication>
+      <username>%EMAILADDRESS%</username>
+    </incomingServer>
+{% if mail_autoconfig_pop3_enabled | bool %}
+    <incomingServer type="pop3">
+      <hostname>{{ mail_autoconfig_pop3_host | e }}</hostname>
+      <port>{{ mail_autoconfig_pop3_port | int }}</port>
+      <socketType>SSL</socketType>
+      <authentication>password-cleartext</authentication>
+      <username>%EMAILADDRESS%</username>
+    </incomingServer>
+{% endif %}
+{% for submission in __mail_autoconfig_submission %}
+    <outgoingServer type="smtp">
+      <hostname>{{ mail_autoconfig_submission_host | e }}</hostname>
+      <port>{{ submission.port }}</port>
+      <socketType>{{ submission.socket }}</socketType>
+      <authentication>password-cleartext</authentication>
+      <username>%EMAILADDRESS%</username>
+    </outgoingServer>
+{% endfor %}
+  </emailProvider>
+</clientConfig>

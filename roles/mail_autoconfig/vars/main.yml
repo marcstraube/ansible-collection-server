@@ -1,0 +1,124 @@
+---
+# Paths below mail_autoconfig_web_root, fixed by the clients
+__mail_autoconfig_mozilla_files:
+  - 'mail/config-v1.1.xml'
+  - '.well-known/autoconfig/mail/config-v1.1.xml'
+__mail_autoconfig_autodiscover_file: 'autodiscover/autodiscover.xml'
+__mail_autoconfig_apple_dir: 'apple'
+
+# Directories below mail_autoconfig_web_root; the Apple profile directory is
+# handled on its own, it exists only while the profile is enabled
+__mail_autoconfig_directories:
+  - 'mail'
+  - '.well-known'
+  - '.well-known/autoconfig'
+  - '.well-known/autoconfig/mail'
+  - 'autodiscover'
+
+# Fully qualified host name: at least two labels of letters, digits and
+# hyphens (no leading or trailing hyphen, at most 63 characters each, 253 in
+# total), the last one starting with a letter. Internationalized names are
+# expected in their ACE form (xn--...).
+__mail_autoconfig_hostname_regex: >-
+  (?i)^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])$
+
+# Display names with their fallbacks
+__mail_autoconfig_display_name: >-
+  {{ mail_autoconfig_display_name if mail_autoconfig_display_name | length > 0
+     else mail_autoconfig_domains | first }}
+__mail_autoconfig_display_short_name: >-
+  {{ mail_autoconfig_display_short_name if mail_autoconfig_display_short_name | length > 0
+     else __mail_autoconfig_display_name }}
+
+# Submission in client order: implicit TLS first (RFC 8314), then STARTTLS
+__mail_autoconfig_submission: >-
+  {{
+    ([{'port': mail_autoconfig_submission_implicit_tls_port | int, 'socket': 'SSL',
+       'prefix': '_submissions._tcp'}]
+     if mail_autoconfig_submission_implicit_tls_enabled | bool else [])
+    + ([{'port': mail_autoconfig_submission_starttls_port | int, 'socket': 'STARTTLS',
+         'prefix': '_submission._tcp'}]
+       if mail_autoconfig_submission_starttls_enabled | bool else [])
+  }}
+
+# Records the clients look up, per mail domain: the prefix is joined with the
+# domain. The Autodiscover SRV record points at the web host itself: an SRV
+# target must have address records and must not be an alias (RFC 2782), so
+# autodiscover.<domain>, often a CNAME, cannot be the target.
+__mail_autoconfig_dns_services: >-
+  {{
+    [{'prefix': 'autoconfig', 'type': 'host', 'port': 0, 'target': mail_autoconfig_web_host},
+     {'prefix': 'autodiscover', 'type': 'host', 'port': 0, 'target': mail_autoconfig_web_host},
+     {'prefix': '_imaps._tcp', 'type': 'srv', 'port': mail_autoconfig_imap_port | int,
+      'target': mail_autoconfig_imap_host}]
+    + (__mail_autoconfig_submission
+       | map('combine', {'type': 'srv', 'target': mail_autoconfig_submission_host}) | list)
+    + ([{'prefix': '_pop3s._tcp', 'type': 'srv', 'port': mail_autoconfig_pop3_port | int,
+         'target': mail_autoconfig_pop3_host}]
+       if mail_autoconfig_pop3_enabled | bool else [])
+    + [{'prefix': '_autodiscover._tcp', 'type': 'srv', 'port': 443, 'target': mail_autoconfig_web_host}]
+  }}
+
+# Expected records of all mail domains with their zone file line. Computed
+# without any lookup, so they are printed even when the check is off or fails.
+__mail_autoconfig_dns_records: >-
+  {%- set ns = namespace(records=[]) -%}
+  {%- for domain in mail_autoconfig_domains -%}
+  {%- for service in __mail_autoconfig_dns_services -%}
+  {%- set name = service.prefix ~ '.' ~ domain -%}
+  {%- set ns.records = ns.records + [{
+        'name': name, 'type': service.type, 'port': service.port, 'target': service.target,
+        'record': name ~ '. IN ' ~ ('CNAME ' ~ service.target ~ '.' if service.type == 'host'
+                                     else 'SRV 0 1 ' ~ service.port ~ ' ' ~ service.target ~ '.')}] -%}
+  {%- endfor -%}
+  {%- endfor -%}
+  {{ ns.records }}
+
+# Arguments of the community.general.dig lookup. Missing records, empty
+# answers and a resolver that does not answer come back as values
+# ('NXDOMAIN', ''), never as a failure; the lookup only fails on its own
+# errors (dnspython missing, a resolver name that does not resolve). The port
+# option is only passed when it differs from 53, so community.general
+# releases older than 9.5.0 keep working with the default.
+__mail_autoconfig_dns_servers: >-
+  {{ ['@' ~ mail_autoconfig_dns_resolver] if mail_autoconfig_dns_resolver | length > 0 else [] }}
+__mail_autoconfig_dns_options: >-
+  {{
+    {'fail_on_error': false, 'real_empty': false}
+    | combine({'port': mail_autoconfig_dns_resolver_port | int}
+              if mail_autoconfig_dns_resolver_port | int != 53 else {})
+  }}
+
+# Requests of the HTTP check per mail domain, the way the clients send them:
+# GET on the Mozilla files of autoconfig.<domain>, POST on the Autodiscover
+# file of autodiscover.<domain> and, when enabled, GET on the Apple profile.
+# The type is the expected content type: any XML type, or the exact type of
+# the Apple profile, which the devices need to install it.
+__mail_autoconfig_http_requests: >-
+  {%- set ns = namespace(requests=[]) -%}
+  {%- for domain in mail_autoconfig_domains -%}
+  {%- for file in __mail_autoconfig_mozilla_files -%}
+  {%- set ns.requests = ns.requests + [{
+        'method': 'GET', 'url': 'https://autoconfig.' ~ domain ~ '/' ~ file, 'type': 'xml'}] -%}
+  {%- endfor -%}
+  {%- set ns.requests = ns.requests + [{
+        'method': 'POST', 'url': 'https://autodiscover.' ~ domain ~ '/' ~ __mail_autoconfig_autodiscover_file,
+        'type': 'xml', 'email': 'autoconfig-check@' ~ domain}] -%}
+  {%- if mail_autoconfig_apple_profile_enabled | bool -%}
+  {%- set ns.requests = ns.requests + [{
+        'method': 'GET',
+        'url': 'https://autoconfig.' ~ domain ~ '/' ~ __mail_autoconfig_apple_dir ~ '/' ~ domain ~ '.mobileconfig',
+        'type': 'application/x-apple-aspen-config'}] -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {{ ns.requests }}
+
+# Minimal POX Autodiscover request as Outlook sends it
+__mail_autoconfig_http_autodiscover_request: |
+  <?xml version="1.0" encoding="utf-8"?>
+  <Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/requestschema/2006">
+    <Request>
+      <EMailAddress>{{ __mail_autoconfig_http_email }}</EMailAddress>
+      <AcceptableResponseSchema>http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a</AcceptableResponseSchema>
+    </Request>
+  </Autodiscover>

@@ -1,0 +1,13 @@
+---
+# Apache answers the Autodiscover POST on the static file with 200 without
+# extra configuration; the shared tasks assert that through the README vhost.
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - ../shared/vars/main.yml
+
+  tasks:
+    - name: Verify | Import shared assertions
+      ansible.builtin.import_tasks: ../shared/tasks/verify.yml
