@@ -1,5 +1,5 @@
 ---
-# Checks the installation, the schema, the accounts after converge and
+# Checks the installation, the dedicated PHP-FPM pool, the schema, the accounts after converge and
 # side_effect (both account modes, updates, removals, the password check),
 # the read-only users, the SOGo view, the password rules, the TOTP setting
 # and the input validation of the role.
@@ -11,11 +11,10 @@
     __verify_dir: '/var/www/postfixadmin'
     __verify_config: '/etc/postfixadmin/config.local.php'
     __verify_query: '/root/molecule-query.php'
-    __verify_fpm_users:
-      Archlinux: 'http'
-      Debian: 'www-data'
-      RedHat: 'apache'
-    __verify_fpm_user: '{{ __verify_fpm_users[ansible_facts["os_family"]] }}'
+    __verify_fcgi: '/root/molecule-fcgi-request.py'
+    # User and group of the dedicated PHP-FPM pool (scenario inventory)
+    __verify_fpm_user: '{{ postfixadmin_php_fpm_user }}'
+    __verify_fpm_group: '{{ postfixadmin_php_fpm_group }}'
     __verify_mariadb_sockets:
       Archlinux: '/run/mysqld/mysqld.sock'
       Debian: '/run/mysqld/mysqld.sock'
@@ -73,9 +72,9 @@
         that:
           - __verify_stat.results[0].stat.mode == '0640'
           - __verify_stat.results[0].stat.pw_name == 'root'
-          - __verify_stat.results[0].stat.gr_name == __verify_fpm_user
+          - __verify_stat.results[0].stat.gr_name == __verify_fpm_group
           - __verify_stat.results[1].stat.mode == '0750'
-          - __verify_stat.results[1].stat.gr_name == __verify_fpm_user
+          - __verify_stat.results[1].stat.gr_name == __verify_fpm_group
           - __verify_stat.results[2].stat.isdir
           - __verify_stat.results[2].stat.pw_name == __verify_fpm_user
           - __verify_stat.results[2].stat.mode == '0750'
@@ -119,6 +118,84 @@
       loop:
         - '/var/www/.postfixadmin.new'
         - '/var/www/.postfixadmin.old'
+
+    #
+    # PHP-FPM: PostfixAdmin runs in its dedicated pool. The FastCGI client
+    # sends the request a web server would send to the pool's socket.
+    #
+
+    # The socket of a named pool, per platform: php-fpm-<name>.sock (Arch
+    # Linux), php<X.Y>-fpm-<name>.sock (Debian), <name>.sock (EL)
+    - name: Verify | Find the socket of the PostfixAdmin pool
+      ansible.builtin.find:
+        paths: "{{ (ansible_facts['os_family'] == 'Debian') | ternary('/run/php', '/run/php-fpm') }}"
+        patterns: ['*-postfixadmin.sock', 'postfixadmin.sock']
+        file_type: any
+      register: __verify_fpm_socket
+
+    - name: Verify | Assert the pool has a socket of its own
+      ansible.builtin.assert:
+        that:
+          - __verify_fpm_socket.files | length == 1
+        fail_msg: "{{ __verify_fpm_socket.files | map(attribute='path') | list | to_json }}"
+
+    - name: Verify | Look up the workers of the PostfixAdmin pool
+      ansible.builtin.command:
+        argv: ['pgrep', '-u', '{{ __verify_fpm_user }}', '-f', '^php-fpm: pool postfixadmin']
+      register: __verify_fpm_workers
+      changed_when: false
+      failed_when: false
+
+    - name: Verify | Assert the pool workers run as the pool user
+      ansible.builtin.assert:
+        that:
+          - __verify_fpm_workers.rc == 0
+        fail_msg: 'No php-fpm worker of the postfixadmin pool runs as {{ __verify_fpm_user }}'
+
+    - name: Verify | Deploy the FastCGI client
+      ansible.builtin.copy:
+        src: fcgi_request.py
+        dest: '{{ __verify_fcgi }}'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Verify | Request the login page through the pool
+      ansible.builtin.command:
+        argv:
+          - '{{ ansible_facts["python"]["executable"] }}'
+          - '-I'
+          - '{{ __verify_fcgi }}'
+          - '{{ __verify_fpm_socket.files[0].path }}'
+          - '{{ __verify_dir }}/public/login.php'
+          - '/login.php'
+      register: __verify_fcgi_result
+      changed_when: false
+
+    - name: Verify | Assert PostfixAdmin answered with its login form
+      ansible.builtin.assert:
+        that:
+          - __verify_response.stdout is not search('^Status: (?!200)', multiline=true)
+          - __verify_response.stdout is search('fUsername')
+        fail_msg: '{{ __verify_response | to_json }}'
+      vars:
+        __verify_response: '{{ __verify_fcgi_result.stdout | from_json }}'
+
+    # The pool user compiled the templates of the request into templates_c
+    - name: Verify | List the compiled templates
+      ansible.builtin.find:
+        paths: '{{ __verify_dir }}/templates_c'
+        recurse: true
+      register: __verify_compiled
+
+    - name: Verify | Assert the pool user wrote the compiled templates
+      ansible.builtin.assert:
+        that:
+          - __verify_compiled.files | length > 0
+          - __verify_compiled.files | rejectattr('pw_name', 'eq', __verify_fpm_user) | list | length == 0
+        fail_msg: >-
+          {{ __verify_compiled.files | map(attribute='path')
+             | zip(__verify_compiled.files | map(attribute='pw_name')) | list | to_json }}
 
     - name: Verify | Read config.local.php
       ansible.builtin.slurp:

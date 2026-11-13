@@ -22,15 +22,13 @@
         - dbus
         - procps-ng
         - glibc-langpack-en
-    # PHP extensions as marcstraube.common.php names them per platform:
-    # EL ships pdo_pgsql in php-pgsql ('pgsql') and pdo_mysql in
-    # php-mysqlnd; Debian and EL compile iconv in; Arch Linux builds
-    # mbstring in and loads iconv and the PDO drivers from extension= lines.
+    # PHP extensions PostfixAdmin needs besides the PDO driver: Debian and
+    # EL compile iconv in, Arch Linux builds mbstring in
     __prepare_php_extensions:
       postgresql:
-        Archlinux: ['pgsql', 'iconv']
+        Archlinux: ['pdo_pgsql', 'iconv']
         Debian: ['pdo_pgsql', 'mbstring']
-        RedHat: ['pgsql', 'mbstring']
+        RedHat: ['pdo_pgsql', 'mbstring']
       mariadb:
         Archlinux: ['pdo_mysql', 'iconv']
         Debian: ['pdo_mysql', 'mbstring']
@@ -39,6 +37,13 @@
     __prepare_php_version: >-
       {{ '8.3' if ansible_facts['os_family'] == 'RedHat'
                  and ansible_facts['distribution_major_version'] == '9' else 'auto' }}
+    # A dedicated PHP-FPM pool for PostfixAdmin when the scenario sets its
+    # user (postgresql, mariadb); the update scenario keeps the www pool
+    __prepare_fpm_pool_enabled: "{{ postfixadmin_php_fpm_user | default('') | length > 0 }}"
+    __prepare_fpm_pools:
+      - name: 'postfixadmin'
+        user: "{{ postfixadmin_php_fpm_user | default('') }}"
+        group: "{{ postfixadmin_php_fpm_group | default('') }}"
 
   tasks:
     # Sudo PAM bypass — required for tasks using `become_user` on
@@ -137,6 +142,25 @@
         - ansible_facts['os_family'] == 'RedHat'
         - ansible_facts['distribution_major_version'] == '9'
 
+    # The pool user has to exist before marcstraube.common.php writes the
+    # pool; on a real host it comes from marcstraube.common.users
+    - name: Prepare | Create the PHP-FPM pool group
+      ansible.builtin.group:
+        name: '{{ postfixadmin_php_fpm_group }}'
+        system: true
+        state: present
+      when: __prepare_fpm_pool_enabled | bool
+
+    - name: Prepare | Create the PHP-FPM pool user
+      ansible.builtin.user:
+        name: '{{ postfixadmin_php_fpm_user }}'
+        group: '{{ postfixadmin_php_fpm_group }}'
+        system: true
+        shell: '/usr/sbin/nologin'
+        create_home: false
+        state: present
+      when: __prepare_fpm_pool_enabled | bool
+
     - name: Prepare | Include php role
       ansible.builtin.include_role:
         name: marcstraube.common.php
@@ -145,13 +169,8 @@
           - version: '{{ __prepare_php_version }}'
             extensions: '{{ __prepare_php_extensions[postfixadmin_db_type][ansible_facts["os_family"]] }}'
             fpm: true
+            fpm_pools: '{{ __prepare_fpm_pools if __prepare_fpm_pool_enabled | bool else [] }}'
         php_default_version: '{{ __prepare_php_version }}'
-        # marcstraube.common.php maps no package for pdo_pgsql on Arch
-        # Linux: php-pgsql ('pgsql') carries the module, this line loads it
-        php_ini_extra_settings: >-
-          {{ {'extension': 'pdo_pgsql'}
-             if ansible_facts['os_family'] == 'Archlinux' and postfixadmin_db_type == 'postgresql'
-             else {} }}
 
     - name: Prepare | Include postgresql role  # noqa: role-name[path]
       ansible.builtin.include_role:

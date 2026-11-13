@@ -35,8 +35,9 @@ postfixadmin_php_cli: 'php'
 
 # User and group of the PHP-FPM pool that runs PostfixAdmin: templates_c
 # is writable for the user, config.local.php readable for the group.
-# Empty uses the pool default of the platform (Arch Linux 'http', Debian
-# 'www-data', EL 'apache').
+# Recommended: the user and group of a dedicated pool (fpm_pools of
+# marcstraube.common.php, see README). Empty uses the www pool default of
+# the platform (Arch Linux 'http', Debian 'www-data', EL 'apache').
 postfixadmin_php_fpm_user: ''
 postfixadmin_php_fpm_group: ''
 

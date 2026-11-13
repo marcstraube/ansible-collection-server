@@ -67,6 +67,10 @@ provisioner:
             password: 'sogo-Reader-42'
             tables: ['sogo_users']
         postfixadmin_sogo_view_enabled: true
+        # A dedicated PHP-FPM pool with a user of its own (prepare creates
+        # both); verify requests PostfixAdmin through its socket
+        postfixadmin_php_fpm_user: 'postfixadmin'
+        postfixadmin_php_fpm_group: 'postfixadmin'
         # TOTP on here, the default (off) in the postgresql scenario
         postfixadmin_totp: true
         # The test domains under .example have no DNS records, which
