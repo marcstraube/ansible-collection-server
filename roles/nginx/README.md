@@ -169,6 +169,58 @@ Keep the patterns explicit. A generic `/\.` would also match
 `/.well-known/acme-challenge/`, and an nginx regex location takes precedence over
 a plain prefix location, so certificate renewal would break.
 
+### SELinux
+
+| Variable                         | Default | Description                      |
+| -------------------------------- | ------- | -------------------------------- |
+| `nginx_selinux_connect_db`       | `null`  | Let PHP-FPM reach a database     |
+| `nginx_selinux_network_connect`  | `null`  | Let nginx call out to a service  |
+| `nginx_selinux_sendmail`         | `null`  | Let nginx submit mail via an MTA |
+
+On SELinux systems, nginx and the PHP-FPM workers behind it run in the
+`httpd_t` domain and cannot open outbound network connections or submit mail
+unless the matching boolean is set. In every case the failure surfaces as a
+bare permission error, or a 502 from nginx, with nothing in the nginx or PHP
+logs pointing at SELinux.
+
+Set `nginx_selinux_connect_db` when an application served by this role
+connects to a database on another host, `nginx_selinux_network_connect` when
+it calls out to a remote service such as an API endpoint, and
+`nginx_selinux_sendmail` when it sends mail through PHP's `mail()` or a
+sendmail binary. Proxies are handled automatically: `httpd_can_network_connect`
+is also enabled whenever a site of type `proxy`, an enabled site with
+`authentik.enabled` or, with `nginx_stream_enabled`, a stream server exists;
+setting `nginx_selinux_network_connect` to `false` alongside any of them fails
+the run. An entry in `nginx_upstreams` alone does not count, because only a
+site or location that proxies to it opens the connection: a `locations` or
+`extra_config` entry that proxies from a site of another type needs
+`nginx_selinux_network_connect: true`.
+
+Each variable takes three values: `true` switches the boolean on, `false`
+switches it off, and `null` (the default) leaves it as it is on the host. The
+booleans apply to the whole `httpd_t` domain, which Apache and PHP-FPM share,
+so the role switches one off only when the variable is explicitly `false`.
+Returning a variable to `null` therefore does not revert a boolean the role set
+earlier; set it to `false` for that.
+
+A PHP application that talks to a remote database, calls an external API and
+sends mail through the local MTA:
+
+```yaml
+nginx_selinux_connect_db: true
+nginx_selinux_network_connect: true
+nginx_selinux_sendmail: true
+nginx_sites:
+  - name: 'php-app'
+    server_names:
+      - 'php.example.com'
+    root: '/var/www/php-app'
+    index: 'index.php index.html'
+    type: 'php'
+    php:
+      socket: 'unix:/run/php-fpm/www.sock'
+```
+
 ### Sites
 
 | Variable      | Default | Description              |
@@ -192,14 +244,87 @@ On SELinux systems nginx may only bind TCP ports labeled `http_port_t` (80,
 with `udp: true`) gets that label from the role;
 without it nginx cannot bind the port. A port of another type, such as 3306
 (`mysqld_port_t`), is relabeled `http_port_t`. Labels the role added stay in
-place when a port is removed from the configuration. The role also enables
-the `httpd_can_network_connect` boolean when an upstream, a site of type
-`proxy`, an enabled site with `authentik.enabled` or a stream server exists,
-so nginx can reach backends, the Authentik outpost and stream upstreams on
-any port.
+place when a port is removed from the configuration. Outbound connections
+are covered under [SELinux](#selinux).
 
 The default site listens on 80 and on `443 ssl http2`, the same options as
 the SSL sites, so the sites can share port 443 with it.
+
+### Writable Paths
+
+| Variable               | Default | Description                               |
+| ---------------------- | ------- | ----------------------------------------- |
+| `nginx_writable_paths` | `[]`    | Directories the web applications write to |
+
+Under SELinux, the web server and its PHP-FPM workers may only write to paths
+labeled `httpd_sys_rw_content_t`, or `httpd_log_t` for log files. A cache or
+storage directory below the document root inherits the read-only
+`httpd_sys_content_t`, and a log directory below `/var/log` gets `var_log_t`;
+the application then fails with a bare permission error. Each entry of
+`nginx_writable_paths` gets a persistent file context for `<path>(/.*)?` on
+RedHat with SELinux enabled. The role restores the labels of the directory
+and everything below it when the context is new or changed, and on every run
+it compares the label of the directory itself with the context and restores
+the labels when they differ. Other platforms and hosts with SELinux disabled
+get no labels. On RedHat the role installs `policycoreutils-python-utils`,
+which provides `semanage`.
+
+| Key     | Default                  | Description                                   |
+| ------- | ------------------------ | --------------------------------------------- |
+| `path`  | (required)               | Absolute path, no trailing slash              |
+| `type`  | `httpd_sys_rw_content_t` | SELinux type of the directory and its content |
+| `owner` | nginx user               | Owner of the directory the role creates       |
+| `group` | nginx group              | Group of the directory the role creates       |
+| `mode`  | `'0755'`                 | Mode of the directory the role creates        |
+
+`type` accepts `httpd_sys_rw_content_t`, `httpd_sys_ra_content_t` (append
+only), `httpd_log_t` and `httpd_cache_t`. A `path` consists of letters,
+digits and `.`, `_`, `@`, `-`; it becomes part of the file context regex,
+with the dots escaped.
+
+With `owner`, `group` or `mode` set, the role creates the directory on every
+platform and enforces all three on every run. Missing parent directories are
+created with the same settings, so let the document root exist first or list
+the parent as an entry of its own before. Without any of the three, the path
+is only labeled. A path that does not exist yet is skipped; when the
+application creates the directory later, it inherits the type of its parent
+until the next run of the role restores its labels. Only the directory itself
+is compared on every run, not its content: a file below it that got a wrong
+label some other way (e.g. moved with `mv` from another directory) stays as
+it is until the context changes or `restorecon -R <path>` runs.
+
+The default owner and group are the nginx user and group. PHP-FPM does not
+run as nginx: on EL its pools run as `apache`, or as the pool's own user with
+`fpm_pools`. A directory PHP writes to therefore sets `owner` and `group`
+explicitly:
+
+```yaml
+nginx_writable_paths:
+  - path: '/var/log/myapp'
+    type: 'httpd_log_t'
+    owner: 'root'
+    group: 'apache'
+    mode: '2770'
+```
+
+Removing an entry leaves the directory and its file context in place. Remove
+the context by hand with `semanage fcontext -d '<path>(/.*)?'` (dots escaped
+as `\.`) and run `restorecon -R <path>`.
+
+```yaml
+nginx_writable_paths:
+  # Cache below the document root, written by the PHP-FPM pool user
+  - path: '/var/www/app.example.com/var/cache'
+    owner: 'nginx'
+    group: 'nginx'
+    mode: '0750'
+  # Log directory below /var/log
+  - path: '/var/log/app'
+    type: 'httpd_log_t'
+    owner: 'nginx'
+    group: 'nginx'
+    mode: '0750'
+```
 
 ### Upstreams
 
@@ -211,13 +336,14 @@ Strategies: `round_robin` (default), `least_conn`, `ip_hash`, `hash`.
 
 ## Tags
 
-| Tag               | Scope                     |
-| ----------------- | ------------------------- |
-| `nginx`           | All role tasks            |
-| `nginx:install`   | Package installation      |
-| `nginx:configure` | Configuration deployment  |
-| `nginx:service`   | Service management        |
-| `nginx:firewall`  | Firewalld rule management |
+| Tag                    | Scope                             |
+| ---------------------- | --------------------------------- |
+| `nginx`                | All role tasks                    |
+| `nginx:install`        | Package installation              |
+| `nginx:configure`      | Configuration deployment          |
+| `nginx:writable-paths` | Writable paths and SELinux labels |
+| `nginx:service`        | Service management                |
+| `nginx:firewall`       | Firewalld rule management         |
 
 ## Example Playbook
 

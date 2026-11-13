@@ -1,0 +1,60 @@
+---
+# Pre-update backup: before a version change replaces the release and
+# upgrades the schema, postfixadmin-backup dumps the database of a server
+# on this host (postfixadmin-<installed release>-<timestamp>.sql.gz) and
+# keeps the newest postfixadmin_backup_update_keep dumps. The schema
+# upgrade is forward-only, so the dump with the replaced release is the
+# way back. A database on another host is backed up by its operator.
+
+- name: Backup | Create the backup directory
+  ansible.builtin.file:
+    path: '{{ postfixadmin_backup_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  when: __postfixadmin_backup_active | bool
+
+- name: Backup | Deploy the backup script
+  ansible.builtin.template:
+    src: postfixadmin-backup.sh.j2
+    dest: '{{ __postfixadmin_backup_script }}'
+    owner: root
+    group: root
+    mode: '0750'
+  when: __postfixadmin_backup_active | bool
+
+# The dumps already written stay; only the script goes
+- name: Backup | Remove the backup script
+  ansible.builtin.file:
+    path: '{{ __postfixadmin_backup_script }}'
+    state: absent
+  when: not __postfixadmin_backup_active | bool
+
+- name: Backup | Dump the database before the update
+  ansible.builtin.command:
+    argv:
+      - '{{ __postfixadmin_backup_script }}'
+  register: __postfixadmin_backup
+  changed_when: true
+  when:
+    - __postfixadmin_backup_active | bool
+    - __postfixadmin_release_installed | bool
+    - __postfixadmin_release_changed | bool
+
+# The update goes on: the role cannot dump a database on another host, and
+# postfixadmin_backup_enabled: false is a choice of the inventory.
+- name: Backup | Warn about an update without a pre-update dump
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: PostfixAdmin is updated from {{ __postfixadmin_release_previous }} to
+      {{ __postfixadmin_release }} and the schema upgraded without a pre-update dump
+      ({{ 'postfixadmin_backup_enabled is false' if not postfixadmin_backup_enabled | bool
+          else 'the database server ' ~ postfixadmin_db_host ~ ' is not on this host' }}).
+      The schema upgrade cannot be undone; a rollback needs a backup of the database
+      {{ postfixadmin_db_name }} taken before this run. Pin postfixadmin_version and
+      postfixadmin_checksum in the inventory to update only when the backup is in place.
+  when:
+    - not __postfixadmin_backup_active | bool
+    - __postfixadmin_release_installed | bool
+    - __postfixadmin_release_changed | bool

@@ -105,3 +105,29 @@
         - '.github/workflow.yml'
         - '.envrc'
         - 'allowed.txt'
+
+    # Writable path fixtures, each holding a file. The cache directory has
+    # the wrong owner and mode, which the role must correct; uploads is a
+    # label-only entry the role must leave as planted. With SELinux enabled
+    # both files must get the type of their entry.
+    - name: Prepare | Create writable path fixture directories
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - '/var/www/writable.example.local/var/cache'
+        - '/var/www/writable.example.local/uploads'
+
+    - name: Prepare | Create writable path fixture files
+      ansible.builtin.copy:
+        content: "fixture\n"
+        dest: '{{ item }}/existing.txt'
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - '/var/www/writable.example.local/var/cache'
+        - '/var/www/writable.example.local/uploads'

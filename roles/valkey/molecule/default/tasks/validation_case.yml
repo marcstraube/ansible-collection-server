@@ -1,0 +1,40 @@
+---
+# Runs the role with the settings of one validation case (__case.vars over
+# the role defaults) and records the failure under __case.key. Every setting
+# a case may change is passed through here; the defaults are those of
+# defaults/main.yml.
+- name: Side Effect | Run the role with invalid settings
+  block:
+    - name: Side Effect | Include valkey role with invalid settings  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        valkey_enabled: true
+        valkey_service_enabled: "{{ __case.vars.valkey_service_enabled | default(true) }}"
+        valkey_packages_state: "{{ __case.vars.valkey_packages_state | default('present') }}"
+        valkey_packages_minimum: "{{ __case.vars.valkey_packages_minimum | default('') }}"
+        valkey_bind: "{{ __case.vars.valkey_bind | default('127.0.0.1') }}"
+        valkey_port: "{{ __case.vars.valkey_port | default(6379) }}"
+        valkey_unix_socket: "{{ __case.vars.valkey_unix_socket | default('') }}"
+        valkey_unix_socket_perm: "{{ __case.vars.valkey_unix_socket_perm | default('770') }}"
+        valkey_unix_socket_group: "{{ __case.vars.valkey_unix_socket_group | default('') }}"
+        valkey_tls_enabled: "{{ __case.vars.valkey_tls_enabled | default(false) }}"
+        valkey_tls_port: "{{ __case.vars.valkey_tls_port | default(6380) }}"
+        valkey_tls_cert_file: "{{ __case.vars.valkey_tls_cert_file | default('') }}"
+        valkey_tls_key_file: "{{ __case.vars.valkey_tls_key_file | default('') }}"
+        valkey_tls_ca_file: "{{ __case.vars.valkey_tls_ca_file | default('') }}"
+        valkey_tls_auth_clients: "{{ __case.vars.valkey_tls_auth_clients | default('no') }}"
+        valkey_users: "{{ __case.vars.valkey_users | default([]) }}"
+        valkey_backup_enabled: "{{ __case.vars.valkey_backup_enabled | default(false) }}"
+        valkey_backup_dir: "{{ __case.vars.valkey_backup_dir | default('/var/backups/valkey') }}"
+        valkey_backup_keep: "{{ __case.vars.valkey_backup_keep | default(7) }}"
+        valkey_backup_user: "{{ __case.vars.valkey_backup_user | default('') }}"
+        valkey_backup_on_calendar: "{{ __case.vars.valkey_backup_on_calendar | default('daily') }}"
+        valkey_restore: "{{ __case.vars.valkey_restore | default('') }}"
+  rescue:
+    # Recorded as JSON: the ACL user check loops, and its messages are in
+    # the item results
+    - name: Side Effect | Record the failure of the case
+      ansible.builtin.set_fact:
+        __side_effect_failures: >-
+          {{ __side_effect_failures | default({}) | combine({__case.key: ansible_failed_result | to_json}) }}

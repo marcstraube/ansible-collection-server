@@ -426,6 +426,35 @@ apache_vhosts: []
 apache_vhosts_ssl: []
 
 #
+# Writable Paths
+#
+# Directories the applications write to (cache, uploads, logs). On RedHat with
+# SELinux enabled each path gets a persistent file context for '<path>(/.*)?'
+# and its labels are restored; elsewhere only the directory is created.
+
+# Directories the web server and its PHP-FPM workers write to. Keys:
+#   path:  absolute path without a trailing slash; letters, digits and
+#          '.', '_', '@', '-' only
+#   type:  SELinux type, 'httpd_sys_rw_content_t' (default), 'httpd_log_t'
+#          for log directories, 'httpd_sys_ra_content_t' for append-only
+#          directories or 'httpd_cache_t'
+#   owner, group, mode: when any of them is set, the role creates the
+#          directory and enforces all three on every run; unset ones default
+#          to the Apache user, the Apache group and '0755'. Without them the
+#          path is only labeled.
+# Example:
+#   - path: '/var/www/app.example.com/var/cache'
+#     owner: 'apache'
+#     group: 'apache'
+#     mode: '0750'
+#   - path: '/var/log/app'
+#     type: 'httpd_log_t'
+#     owner: 'apache'
+#     group: 'apache'
+#     mode: '0750'
+apache_writable_paths: []
+
+#
 # Reverse Proxy
 #
 

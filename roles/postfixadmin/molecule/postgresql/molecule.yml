@@ -1,0 +1,115 @@
+---
+# PostgreSQL scenario: PHP-FPM (marcstraube.common.php) and the
+# postgresql role of this collection run on the instance; the role creates
+# the database, its owner and the read-only users there. A check run on
+# the fresh instance precedes converge, another one on the configured
+# instance follows idempotence. side_effect changes accounts behind the
+# role's back, applies changed accounts and ends with the helper's check
+# mode; verify checks both account modes, the hashes, the grants, the SOGo
+# view and the failure cases. The playbooks are shared with the mariadb
+# scenario.
+driver:
+  name: podman
+platforms:
+  - name: postfixadmin-postgresql-archlinux
+    image: docker.io/marcstraube/archlinux-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: postfixadmin-postgresql-debian-trixie
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: postfixadmin-postgresql-rocky-9
+    image: docker.io/geerlingguy/docker-rockylinux9-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: postfixadmin-postgresql-rocky-10
+    image: docker.io/geerlingguy/docker-rockylinux10-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: ../shared/prepare.yml
+    converge: ../shared/converge.yml
+    side_effect: ../shared/side_effect.yml
+    verify: ../shared/verify.yml
+  inventory:
+    group_vars:
+      all:
+        # Shared by prepare, converge, side_effect and verify
+        postfixadmin_db_type: 'postgresql'
+        postfixadmin_enabled: true
+        postfixadmin_db_password: 'test-db-Password-42'
+        postfixadmin_db_create: true
+        postfixadmin_db_readers:
+          - name: 'postfix_ro'
+            password: 'postfix-Reader-42'
+          - name: 'sogo_ro'
+            password: 'sogo-Reader-42'
+            tables: ['sogo_users']
+        postfixadmin_sogo_view_enabled: true
+        # The test domains under .example have no DNS records, which
+        # PostfixAdmin checks for every domain and address by default
+        postfixadmin_extra_config:
+          emailcheck_resolve_domain: 'NO'
+        # PostgreSQL on the instance, listening on localhost only
+        postgresql_enabled: true
+        postgresql_ssl_enabled: false
+        postgresql_firewalld_enabled: false
+        postgresql_shared_buffers: '64MB'
+        postgresql_effective_cache_size: '128MB'
+        postgresql_lc_messages: 'en_US.UTF-8'
+        postgresql_lc_monetary: 'en_US.UTF-8'
+        postgresql_lc_numeric: 'en_US.UTF-8'
+        postgresql_lc_time: 'en_US.UTF-8'
+    host_vars:
+      postfixadmin-postgresql-archlinux:
+        ansible_python_interpreter: /usr/bin/python
+      postfixadmin-postgresql-debian-trixie:
+        ansible_python_interpreter: /usr/bin/python3
+      postfixadmin-postgresql-rocky-9:
+        ansible_python_interpreter: /usr/bin/python3
+      postfixadmin-postgresql-rocky-10:
+        ansible_python_interpreter: /usr/bin/python3
+  config_options:
+    defaults:
+      allow_broken_conditionals: true
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - check
+    - converge
+    - idempotence
+    - check
+    - side_effect
+    - verify
+    - destroy

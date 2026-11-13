@@ -1,0 +1,52 @@
+---
+# Creates the PostfixAdmin database and its owner on a database server of
+# this host. Requires the marcstraube.server.postgresql or
+# marcstraube.server.mariadb role to run first. PostfixAdmin creates and
+# upgrades its tables itself (schema.yml).
+
+- name: Database | Create the PostfixAdmin PostgreSQL user
+  community.postgresql.postgresql_user:
+    name: '{{ postfixadmin_db_user }}'
+    password: '{{ postfixadmin_db_password }}'
+    login_unix_socket: '{{ __postfixadmin_pg_socket_dir | default(omit, true) }}'
+    login_port: '{{ postfixadmin_db_port | int }}'
+    state: present
+  become: true
+  become_user: postgres
+  no_log: true
+  when: postfixadmin_db_type == 'postgresql'
+
+# The owner may create tables in the public schema of its database, also
+# on PostgreSQL 15 and newer.
+- name: Database | Create the PostfixAdmin PostgreSQL database
+  community.postgresql.postgresql_db:
+    name: '{{ postfixadmin_db_name }}'
+    login_unix_socket: '{{ __postfixadmin_pg_socket_dir | default(omit, true) }}'
+    login_port: '{{ postfixadmin_db_port | int }}'
+    owner: '{{ postfixadmin_db_user }}'
+    encoding: UTF8
+    template: template0
+    state: present
+  become: true
+  become_user: postgres
+  when: postfixadmin_db_type == 'postgresql'
+
+- name: Database | Create the PostfixAdmin MariaDB database
+  ansible.mariadb.mariadb_db:
+    name: '{{ postfixadmin_db_name }}'
+    encoding: utf8mb4
+    collation: utf8mb4_unicode_ci
+    login_unix_socket: '{{ __postfixadmin_mariadb_login_socket }}'
+    state: present
+  when: postfixadmin_db_type == 'mariadb'
+
+- name: Database | Create the PostfixAdmin MariaDB user
+  ansible.mariadb.mariadb_user:
+    name: '{{ postfixadmin_db_user }}'
+    host: '{{ __postfixadmin_db_owner_host }}'
+    password: '{{ postfixadmin_db_password }}'
+    priv: '{{ postfixadmin_db_name }}.*:ALL'
+    login_unix_socket: '{{ __postfixadmin_mariadb_login_socket }}'
+    state: present
+  no_log: true
+  when: postfixadmin_db_type == 'mariadb'

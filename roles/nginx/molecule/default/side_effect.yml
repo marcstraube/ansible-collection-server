@@ -225,6 +225,161 @@
     nginx_packages_state: 'latest'
     nginx_packages_minimum: '{{ __side_effect_version_current }}'
 
+# Every invalid writable path entry must fail the validation in main.yml,
+# which runs before any change.
+- name: Side Effect | Writable path validation
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Run with a relative path
+      block:
+        - name: Side Effect | Include nginx role with a relative path  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_writable_paths:
+              - path: 'var/www/relative'
+      rescue:
+        - name: Side Effect | Record the error for a relative path
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'relative': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with a trailing slash
+      block:
+        - name: Side Effect | Include nginx role with a trailing slash  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_writable_paths:
+              - path: '/var/www/trailing/'
+      rescue:
+        - name: Side Effect | Record the error for a trailing slash
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'trailing': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with a '..' component
+      block:
+        - name: Side Effect | Include nginx role with a '..' component  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_writable_paths:
+              - path: '/var/www/../etc'
+      rescue:
+        - name: Side Effect | Record the error for a '..' component
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'dotdot': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with an entry without a path
+      block:
+        - name: Side Effect | Include nginx role with an entry without a path  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_writable_paths:
+              - type: 'httpd_log_t'
+      rescue:
+        - name: Side Effect | Record the error for an entry without a path
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'nopath': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with an unsupported type
+      block:
+        - name: Side Effect | Include nginx role with an unsupported type  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_writable_paths:
+              - path: '/var/www/type'
+                type: 'httpd_sys_content_t'
+      rescue:
+        - name: Side Effect | Record the error for an unsupported type
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'type': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with a numeric mode
+      block:
+        - name: Side Effect | Include nginx role with a numeric mode  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_writable_paths:
+              - path: '/var/www/mode'
+                mode: 750
+      rescue:
+        - name: Side Effect | Record the error for a numeric mode
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'mode': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Assert every invalid writable path failed the validation
+      ansible.builtin.assert:
+        that:
+          - __errors['relative'] | default('') is search('must be absolute')
+          - __errors['trailing'] | default('') is search('must be absolute')
+          - __errors['dotdot'] | default('') is search('must be absolute')
+          - __errors['nopath'] | default('') is search('needs a path')
+          - __errors['type'] | default('') is search('must be one of')
+          - __errors['mode'] | default('') is search('must be a quoted octal string')
+        fail_msg: 'Unexpected validation results: {{ __errors }}'
+        success_msg: 'The validation rejects every invalid writable path'
+      vars:
+        __errors: '{{ __side_effect_writable_errors | default({}) }}'
+
 - name: Side Effect | Clean up
   hosts: all
   gather_facts: true
@@ -235,3 +390,139 @@
         path: /usr/sbin/policy-rc.d
         state: absent
       when: ansible_facts['os_family'] == 'Debian'
+
+# nginx_selinux_network_connect: false cannot be combined with a proxy site.
+# The assert runs before any configuration change, on every platform.
+- name: Side Effect | SELinux validation
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Run with network connections denied next to a proxy site
+      block:
+        - name: Side Effect | Include nginx role with a proxy site and no network connect  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_selinux_network_connect: false
+            nginx_sites:
+              - name: 'test-proxy'
+                server_names:
+                  - 'proxy.example.com'
+                type: 'proxy'
+                proxy_pass: 'http://127.0.0.1:8080'
+      rescue:
+        - name: Side Effect | Record the SELinux validation failure
+          ansible.builtin.set_fact:
+            __side_effect_selinux_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Assert network connections denied next to a proxy site failed
+      ansible.builtin.assert:
+        that:
+          - __side_effect_selinux_error is defined
+          - "'nginx_selinux_network_connect is false' in __side_effect_selinux_error"
+        fail_msg: >-
+          nginx_selinux_network_connect: false next to a proxy site did not fail
+          the run (error: {{ __side_effect_selinux_error | default('none') }})
+        success_msg: 'nginx_selinux_network_connect: false next to a proxy site fails the run'
+
+# Each boolean follows true, null, false and null again; null must leave the
+# value of the run before untouched. The PHP site has no upstream and no proxy
+# type, so only nginx_selinux_network_connect decides whether its location
+# reaches the backend on an unlabeled port (httpd_t, shared with PHP-FPM).
+# The false case defines an upstream nothing uses: it does not count as a
+# proxy and must not fail the run. Needs SELinux, so RedHat only and skipped
+# where the container runs without it.
+- name: Side Effect | SELinux booleans
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __side_effect_selinux_enabled: >-
+      {{ ansible_facts['os_family'] == 'RedHat'
+         and ansible_facts['selinux']['status'] | default('disabled') == 'enabled' }}
+    __side_effect_selinux_sites:
+      - name: 'test-selinux-php'
+        server_names:
+          - 'selinux-php.example.com'
+        type: 'php'
+        root: '/var/www/html'
+        php:
+          socket: 'unix:/run/php-fpm/www.sock'
+        locations:
+          - path: '/backend/'
+            config: 'proxy_pass http://127.0.0.1:15555/;'
+
+  tasks:
+    - name: Side Effect | Create the backend document root
+      ansible.builtin.file:
+        path: /var/www/selinux-backend
+        state: directory
+        mode: '0755'
+      when: __side_effect_selinux_enabled | bool
+
+    - name: Side Effect | Create the backend index
+      ansible.builtin.copy:
+        content: "backend\n"
+        dest: /var/www/selinux-backend/index.html
+        mode: '0644'
+      when: __side_effect_selinux_enabled | bool
+
+    - name: Side Effect | Start the backend on an unlabeled port
+      ansible.builtin.command:
+        argv:
+          - systemd-run
+          - '--unit=nginx-selinux-backend'
+          - python3
+          - '-m'
+          - http.server
+          - '15555'
+          - '--bind'
+          - '127.0.0.1'
+          - '--directory'
+          - /var/www/selinux-backend
+      changed_when: true
+      when: __side_effect_selinux_enabled | bool
+
+    - name: Side Effect | Wait for the backend
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 15555
+        timeout: 30
+      when: __side_effect_selinux_enabled | bool
+
+    - name: Side Effect | Run the SELinux boolean cases
+      ansible.builtin.include_tasks: tasks/selinux_booleans.yml
+      loop:
+        - name: 'true'
+          value: true
+          expected: 'on'
+        - name: 'null after true'
+          value: null
+          expected: 'on'
+        - name: 'false'
+          value: false
+          expected: 'off'
+          upstreams:
+            - name: 'selinux_unused'
+              servers:
+                - address: '127.0.0.1:15555'
+        - name: 'null after false'
+          value: null
+          expected: 'off'
+      loop_control:
+        loop_var: __side_effect_case
+        label: '{{ __side_effect_case.name }}'
+      when: __side_effect_selinux_enabled | bool
+
+    - name: Side Effect | Stop the backend
+      ansible.builtin.systemd_service:
+        name: nginx-selinux-backend
+        state: stopped
+      when: __side_effect_selinux_enabled | bool
+
+# The SELinux plays ran the role with its defaults; restore the configuration
+# verify.yml expects.
+- name: Side Effect | Restore
+  ansible.builtin.import_playbook: converge.yml

@@ -91,6 +91,17 @@
       - server_name: 'docroot-legacy.local'
         document_root: '/var/www/docroot-legacy'
         create_document_root: true
+    # Cache below a document root (owner and group default to the web server
+    # user), a log directory created below /var/log and a label-only path.
+    apache_writable_paths:
+      - path: '/var/www/writable.example.local/var/cache'
+        mode: '0750'
+      - path: '/var/log/molecule-writable'
+        type: 'httpd_log_t'
+        owner: 'root'
+        group: 'root'
+        mode: '0770'
+      - path: '/var/www/writable.example.local/uploads'
     # The client address from X-Forwarded-For replaces the peer address only for
     # requests from 127.0.0.1; verify.yml also sends one from 127.0.0.2, whose
     # header must be ignored.

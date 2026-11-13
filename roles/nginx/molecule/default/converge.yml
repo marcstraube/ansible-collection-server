@@ -69,6 +69,17 @@
           enabled: true
           certificate: '/etc/nginx/ssl/test.crt'
           certificate_key: '/etc/nginx/ssl/test.key'
+    # Cache below a document root (owner and group default to the web server
+    # user), a log directory created below /var/log and a label-only path.
+    nginx_writable_paths:
+      - path: '/var/www/writable.example.local/var/cache'
+        mode: '0750'
+      - path: '/var/log/molecule-writable'
+        type: 'httpd_log_t'
+        owner: 'root'
+        group: 'root'
+        mode: '0770'
+      - path: '/var/www/writable.example.local/uploads'
     nginx_stub_status_enabled: true
     nginx_stub_status_path: '/nginx_status'
 

@@ -1,0 +1,68 @@
+---
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - ../shared/vars/main.yml
+
+  vars:
+    # Web server example of the README, one site per mail domain; the web
+    # host name (target of the Autodiscover SRV records) in the first one
+    nginx_enabled: true
+    nginx_sites: >-
+      {{ __prepare_readme_sites + __prepare_control_sites }}
+    __prepare_readme_sites:
+      - name: 'mail-autoconfig-example.com'
+        server_names:
+          - 'autoconfig.example.com'
+          - 'autodiscover.example.com'
+          - '{{ mail_autoconfig_web_host }}'
+        root: '/var/www/mail-autoconfig'
+        ssl:
+          enabled: true
+          certificate: '/etc/letsencrypt/live/autoconfig.example.com/fullchain.pem'
+          certificate_key: '/etc/letsencrypt/live/autoconfig.example.com/privkey.pem'
+        http_redirect: true
+        locations:
+          - path: '/apple/'
+            config: |
+              types { application/x-apple-aspen-config mobileconfig; }
+        extra_config: |
+          # Outlook sends a POST to autodiscover.xml; nginx answers 405 on
+          # static files and serves the file with 200 instead
+          error_page 405 =200 $uri;
+      - name: 'mail-autoconfig-example.org'
+        server_names:
+          - 'autoconfig.example.org'
+          - 'autodiscover.example.org'
+        root: '/var/www/mail-autoconfig'
+        ssl:
+          enabled: true
+          certificate: '/etc/letsencrypt/live/autoconfig.example.org/fullchain.pem'
+          certificate_key: '/etc/letsencrypt/live/autoconfig.example.org/privkey.pem'
+        http_redirect: true
+        locations:
+          - path: '/apple/'
+            config: |
+              types { application/x-apple-aspen-config mobileconfig; }
+        extra_config: |
+          # Outlook sends a POST to autodiscover.xml; nginx answers 405 on
+          # static files and serves the file with 200 instead
+          error_page 405 =200 $uri;
+    # Not part of the README: the same web root without error_page, so
+    # verify.yml proves that nginx needs it
+    __prepare_control_sites:
+      - name: 'mail-autoconfig-control'
+        server_names:
+          - 'control.example.net'
+        listen: 8080
+        root: '/var/www/mail-autoconfig'
+
+  tasks:
+    - name: Prepare | Import shared environment tasks
+      ansible.builtin.import_tasks: ../shared/tasks/prepare.yml
+
+    - name: Prepare | Set up nginx  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../nginx'

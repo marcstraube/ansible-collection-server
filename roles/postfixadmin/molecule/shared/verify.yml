@@ -1,0 +1,703 @@
+---
+# Checks the installation, the schema, the accounts after converge and
+# side_effect (both account modes, updates, removals, the password check),
+# the read-only users, the SOGo view, the password rules, the TOTP setting
+# and the input validation of the role.
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __verify_dir: '/var/www/postfixadmin'
+    __verify_config: '/etc/postfixadmin/config.local.php'
+    __verify_query: '/root/molecule-query.php'
+    __verify_fpm_users:
+      Archlinux: 'http'
+      Debian: 'www-data'
+      RedHat: 'apache'
+    __verify_fpm_user: '{{ __verify_fpm_users[ansible_facts["os_family"]] }}'
+    __verify_mariadb_sockets:
+      Archlinux: '/run/mysqld/mysqld.sock'
+      Debian: '/run/mysqld/mysqld.sock'
+      RedHat: '/var/lib/mysql/mysql.sock'
+    # Readers of the scenario inventory: postfix_ro with the default tables,
+    # sogo_ro with the view only
+    __verify_reader_checks:
+      - {user: 'postfix_ro', query: 'SELECT count(*) AS n FROM mailbox', allowed: true}
+      - {user: 'postfix_ro', query: 'SELECT count(*) AS n FROM alias_domain', allowed: true}
+      - {user: 'postfix_ro', query: 'UPDATE mailbox SET name = name', allowed: false}
+      - {user: 'postfix_ro', query: 'SELECT count(*) AS n FROM admin', allowed: false}
+      - {user: 'sogo_ro', query: 'SELECT count(*) AS n FROM mailbox', allowed: false}
+      - {user: 'sogo_ro', query: "DELETE FROM sogo_users WHERE c_uid = 'x'", allowed: false}
+    __verify_reader_passwords:
+      postfix_ro: 'postfix-Reader-42'
+      sogo_ro: 'sogo-Reader-42'
+    # Message of a failed task, also of a failed loop item
+    __verify_failure: >-
+      {{ ansible_failed_result.msg | default('') }}
+      {{ ansible_failed_result.results | default([]) | map(attribute='msg', default='') | join(' ') }}
+
+  tasks:
+    - name: Verify | Load role defaults
+      ansible.builtin.include_vars:
+        file: '../../defaults/main.yml'
+        name: __verify_defaults
+
+    #
+    # Installation
+    #
+
+    - name: Verify | Read the release marker
+      ansible.builtin.slurp:
+        src: '{{ __verify_dir }}/.ansible-release'
+      register: __verify_marker
+
+    - name: Verify | Assert the pinned release is installed
+      ansible.builtin.assert:
+        that:
+          - (__verify_marker.content | b64decode | trim) == __verify_defaults.postfixadmin_version
+
+    - name: Verify | Stat the installation
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+        - '{{ __verify_config }}'
+        - '{{ __verify_config | dirname }}'
+        - '{{ __verify_dir }}/templates_c'
+        - '{{ __verify_dir }}/config.local.php'
+        - '{{ __verify_dir }}/public/index.php'
+      register: __verify_stat
+
+    - name: Verify | Assert ownership and modes
+      ansible.builtin.assert:
+        that:
+          - __verify_stat.results[0].stat.mode == '0640'
+          - __verify_stat.results[0].stat.pw_name == 'root'
+          - __verify_stat.results[0].stat.gr_name == __verify_fpm_user
+          - __verify_stat.results[1].stat.mode == '0750'
+          - __verify_stat.results[1].stat.gr_name == __verify_fpm_user
+          - __verify_stat.results[2].stat.isdir
+          - __verify_stat.results[2].stat.pw_name == __verify_fpm_user
+          - __verify_stat.results[2].stat.mode == '0750'
+          - __verify_stat.results[3].stat.islnk
+          - __verify_stat.results[3].stat.lnk_target == __verify_config
+          - __verify_stat.results[4].stat.pw_name == 'root'
+          - __verify_stat.results[4].stat.mode == '0644'
+
+    - name: Verify | List the files of the release
+      ansible.builtin.find:
+        paths: '{{ __verify_dir }}'
+        recurse: true
+        file_type: any
+        hidden: true
+      register: __verify_files
+
+    # Only templates_c is writable for PHP-FPM
+    - name: Verify | Assert the release is owned by root and not writable for others
+      ansible.builtin.assert:
+        that:
+          - __verify_foreign | length == 0
+          - __verify_writable | length == 0
+        fail_msg: 'Owned by others: {{ __verify_foreign[:10] }}; writable: {{ __verify_writable[:10] }}'
+        quiet: true
+      vars:
+        __verify_release_files: >-
+          {{ __verify_files.files | rejectattr('path', 'match', __verify_dir ~ '/templates_c(/|$)') | list }}
+        __verify_foreign: >-
+          {{ __verify_release_files | rejectattr('pw_name', 'eq', 'root') | map(attribute='path') | list }}
+        __verify_writable: >-
+          {{ __verify_release_files | rejectattr('islnk') | selectattr('wgrp')
+             | map(attribute='path') | list
+             + __verify_release_files | rejectattr('islnk') | selectattr('woth')
+             | map(attribute='path') | list }}
+
+    - name: Verify | Assert no staging or replaced release is left
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      register: __verify_leftover
+      failed_when: __verify_leftover.stat.exists
+      loop:
+        - '/var/www/.postfixadmin.new'
+        - '/var/www/.postfixadmin.old'
+
+    - name: Verify | Read config.local.php
+      ansible.builtin.slurp:
+        src: '{{ __verify_config }}'
+      register: __verify_config_content
+
+    - name: Verify | Assert the configuration
+      ansible.builtin.assert:
+        that:
+          - "\"$CONF['configured'] = true;\" in __verify_lines"
+          - "\"$CONF['encrypt'] = 'ARGON2ID';\" in __verify_lines"
+          - >-
+            "$CONF['database_type'] = '" ~ {'postgresql': 'pgsql', 'mariadb': 'mysqli'}[postfixadmin_db_type] ~ "';"
+            in __verify_lines
+          - "\"$CONF['default_aliases'] = array('abuse' => 'postmaster@example.com');\" in __verify_lines"
+          # The default password rules of the role: 12 characters, 3 letters, 2 digits
+          - >-
+            "$CONF['password_validation'] = array('/.{12}/' => 'password_too_short 12',
+            '/([a-zA-Z].*){3}/' => 'password_no_characters 3', '/([0-9].*){2}/' => 'password_no_digits 2');"
+            in __verify_lines
+          # TOTP: on in the mariadb scenario, the default (off) in postgresql
+          - >-
+            "$CONF['totp'] = '" ~ (postfixadmin_totp | default(false) | bool | ternary('YES', 'NO')) ~ "';"
+            in __verify_lines
+        fail_msg: "{{ __verify_lines | select('search', 'password_validation|totp') | list }}"
+      vars:
+        __verify_lines: '{{ (__verify_config_content.content | b64decode).splitlines() }}'
+
+    - name: Verify | Deploy the query helper
+      ansible.builtin.copy:
+        src: query.php
+        dest: '{{ __verify_query }}'
+        owner: root
+        group: root
+        mode: '0644'
+
+    #
+    # Schema: the version PostfixAdmin recorded equals the highest upgrade
+    # function of the release
+    #
+
+    - name: Verify | Read upgrade.php
+      ansible.builtin.slurp:
+        src: '{{ __verify_dir }}/public/upgrade.php'
+      register: __verify_upgrade
+
+    - name: Verify | Read the schema version
+      ansible.builtin.command:
+        argv:
+          - php
+          - '{{ __verify_query }}'
+          - sql
+          - '{{ __verify_dir }}'
+          - "SELECT value FROM config WHERE name = 'version'"
+      register: __verify_schema
+      changed_when: false
+
+    - name: Verify | Assert the schema is up to date
+      ansible.builtin.assert:
+        that:
+          - (__verify_schema.stdout | from_json)[0].value | int == __verify_target
+        fail_msg: 'Schema {{ (__verify_schema.stdout | from_json)[0].value }}, expected {{ __verify_target }}'
+      vars:
+        __verify_target: >-
+          {{ __verify_upgrade.content | b64decode
+             | regex_findall('(?m)^function upgrade_(\d+)') | map('int') | max }}
+
+    #
+    # Accounts
+    #
+
+    - name: Verify | Read the accounts
+      ansible.builtin.command:
+        argv: [php, '{{ __verify_query }}', sql, '{{ __verify_dir }}', '{{ item.value }}']
+      loop: '{{ __verify_queries | dict2items }}'
+      loop_control:
+        label: '{{ item.key }}'
+      register: __verify_rows
+      changed_when: false
+      vars:
+        __verify_queries:
+          domain: >-
+            SELECT domain, description, maxquota, CASE WHEN active THEN 1 ELSE 0 END AS active
+            FROM domain WHERE domain <> 'ALL' ORDER BY domain
+          admin: >-
+            SELECT username, password, CASE WHEN superadmin THEN 1 ELSE 0 END AS superadmin,
+            CASE WHEN active THEN 1 ELSE 0 END AS active FROM admin ORDER BY username
+          domain_admins: SELECT username, domain FROM domain_admins ORDER BY username, domain
+          mailbox: >-
+            SELECT username, password, name, quota, maildir, CASE WHEN active THEN 1 ELSE 0 END AS active
+            FROM mailbox ORDER BY username
+          alias: SELECT address, goto FROM alias ORDER BY address
+          alias_domain: SELECT alias_domain, target_domain FROM alias_domain ORDER BY alias_domain
+
+    - name: Verify | Index the accounts
+      ansible.builtin.set_fact:
+        __verify_accounts: >-
+          {{ dict(__verify_rows.results | map(attribute='item.key')
+                  | zip(__verify_rows.results | map(attribute='stdout') | map('from_json'))) }}
+
+    - name: Verify | Index the rows by name
+      ansible.builtin.set_fact:
+        __verify_domain: >-
+          {{ __verify_accounts.domain | items2dict(key_name='domain', value_name='description') }}
+        __verify_admin: >-
+          {{ dict(__verify_accounts.admin | map(attribute='username') | zip(__verify_accounts.admin)) }}
+        __verify_mailbox: >-
+          {{ dict(__verify_accounts.mailbox | map(attribute='username') | zip(__verify_accounts.mailbox)) }}
+        __verify_alias: >-
+          {{ __verify_accounts.alias | items2dict(key_name='address', value_name='goto') }}
+        __verify_alias_domain: >-
+          {{ __verify_accounts.alias_domain | items2dict(key_name='alias_domain', value_name='target_domain') }}
+
+    - name: Verify | Assert the domains
+      ansible.builtin.assert:
+        that:
+          # managed: reset after side_effect, maxquota updated
+          - __verify_domain['example.com'] == 'Example'
+          - (__verify_accounts.domain | selectattr('domain', 'eq', 'example.com') | first).maxquota | int == 4096
+          # initial: the change of side_effect stays
+          - __verify_domain['example.net'] == 'Tampered'
+          - "'example.org' in __verify_domain"
+          # state: absent
+          - "'remove.example' not in __verify_domain"
+        fail_msg: '{{ __verify_accounts.domain | to_json }}'
+
+    - name: Verify | Assert the admins
+      ansible.builtin.assert:
+        that:
+          - __verify_admin['admin@example.com'].superadmin | int == 1
+          - __verify_admin['admin@example.com'].active | int == 1
+          # initial: deactivated by side_effect, stays inactive
+          - __verify_admin['helpdesk@example.com'].active | int == 0
+          - "'remove-admin@example.com' not in __verify_admin"
+          - >-
+            __verify_accounts.domain_admins | selectattr('username', 'eq', 'helpdesk@example.com')
+            | map(attribute='domain') | list == ['example.com']
+          - >-
+            __verify_accounts.domain_admins | selectattr('username', 'eq', 'admin@example.com')
+            | map(attribute='domain') | list == ['ALL']
+          - >-
+            __verify_accounts.domain_admins | selectattr('username', 'eq', 'remove-admin@example.com')
+            | list | length == 0
+          # managed: made a superadmin by accounts_changed.yml, keeps its domain
+          - __verify_admin['ops@example.com'].superadmin | int == 1
+          - >-
+            __verify_accounts.domain_admins | selectattr('username', 'eq', 'ops@example.com')
+            | map(attribute='domain') | sort == ['ALL', 'example.com']
+        fail_msg: >-
+          {{ __verify_accounts.admin | map(attribute='username') | list }}
+          {{ __verify_accounts.domain_admins }}
+
+    - name: Verify | Assert the mailboxes
+      ansible.builtin.assert:
+        that:
+          # managed: name reset, quota updated (MB times the quota multiplier)
+          - __verify_mailbox['alice@example.com'].name == 'Alice'
+          - __verify_mailbox['alice@example.com'].quota | int == 2048 * 1024000
+          - __verify_mailbox['alice@example.com'].maildir == 'example.com/alice/'
+          # initial: the change of side_effect stays
+          # disabled with state: absent in accounts_changed.yml: untouched
+          - "'bob@example.com' in __verify_mailbox"
+          - __verify_mailbox['bob@example.com'].name == 'Tampered'
+          - __verify_mailbox['inactive@example.com'].active | int == 0
+          - "'carol@example.com' not in __verify_mailbox"
+          # disabled: never created
+          - "'dave@example.com' not in __verify_mailbox"
+        fail_msg: '{{ __verify_accounts.mailbox | map(attribute="username") | list }}'
+
+    - name: Verify | Assert the aliases
+      ansible.builtin.assert:
+        that:
+          # managed: targets reset after side_effect
+          - __verify_alias['info@example.com'].split(',') | sort == ['alice@example.com', 'bob@example.com']
+          # initial: the change of side_effect stays
+          - __verify_alias['sales@example.com'] == 'x@example.net'
+          - "'remove@example.com' not in __verify_alias"
+          # the default alias of example.com and the aliases of the mailboxes
+          - __verify_alias['abuse@example.com'] == 'postmaster@example.com'
+          - __verify_alias['alice@example.com'] == 'alice@example.com'
+          - "'carol@example.com' not in __verify_alias"
+          # no default aliases for domains created with default_aliases: false
+          - "'abuse@example.org' not in __verify_alias"
+        fail_msg: '{{ __verify_alias | to_json }}'
+
+    # managed: the target changed with accounts_changed.yml
+    - name: Verify | Assert the alias domains
+      ansible.builtin.assert:
+        that:
+          - "__verify_alias_domain == {'example.org': 'example.net'}"
+
+    # Every hash carries the scheme prefix that Dovecot, SOGo and Roundcube
+    # read
+    - name: Verify | Assert the hashes are stored with the ARGON2ID prefix
+      ansible.builtin.assert:
+        that:
+          - __verify_hashes | reject('match', '^\{ARGON2ID\}\$argon2id\$') | list | length == 0
+        fail_msg: '{{ __verify_hashes | map("truncate", 20) | list }}'
+        quiet: true
+      vars:
+        __verify_hashes: >-
+          {{ __verify_accounts.admin | map(attribute='password') | list
+             + __verify_accounts.mailbox | map(attribute='password') | list }}
+
+    # alice (managed) has the new password of accounts_changed.yml, bob
+    # (initial) keeps the hash side_effect wrote, inactive the same password
+    # rehashed from SHA512-CRYPT, the admins theirs (ops the new one).
+    - name: Verify | Check the passwords against the stored hashes
+      ansible.builtin.command:
+        argv: [php, '{{ __verify_query }}', password, '{{ item.hash }}']
+        stdin: '{{ item.password }}'
+      loop:
+        - name: 'alice new'
+          hash: "{{ __verify_mailbox['alice@example.com'].password }}"
+          password: 'alice-Changed-42'
+          match: true
+        - name: 'alice old'
+          hash: "{{ __verify_mailbox['alice@example.com'].password }}"
+          password: 'alice-Secret-42'
+          match: false
+        - name: 'bob'
+          hash: "{{ __verify_mailbox['bob@example.com'].password }}"
+          password: 'tampered-Secret-42'
+          match: true
+        - name: 'admin'
+          hash: "{{ __verify_admin['admin@example.com'].password }}"
+          password: 'admin-Secret-42'
+          match: true
+        - name: 'helpdesk'
+          hash: "{{ __verify_admin['helpdesk@example.com'].password }}"
+          password: 'helpdesk-Secret-42'
+          match: true
+        - name: 'inactive rehashed'
+          hash: "{{ __verify_mailbox['inactive@example.com'].password }}"
+          password: 'inactive-Secret-42'
+          match: true
+        - name: 'ops new'
+          hash: "{{ __verify_admin['ops@example.com'].password }}"
+          password: 'ops-Changed-42'
+          match: true
+      loop_control:
+        label: '{{ item.name }}'
+      register: __verify_passwords
+      changed_when: false
+      failed_when: (__verify_passwords.stdout | from_json) != item.match
+      no_log: true
+
+    #
+    # Read-only users and the SOGo view
+    #
+
+    - name: Verify | Read the SOGo view as its read-only user (PostgreSQL)
+      community.postgresql.postgresql_query:
+        login_host: '127.0.0.1'
+        login_user: 'sogo_ro'
+        login_password: 'sogo-Reader-42'
+        login_db: 'postfixadmin'
+        query: 'SELECT c_uid, c_name, c_password, c_cn, mail, domain FROM sogo_users ORDER BY c_uid'
+      register: __verify_sogo_pg
+      when: postfixadmin_db_type == 'postgresql'
+
+    - name: Verify | Read the SOGo view as its read-only user (MariaDB)
+      ansible.mariadb.mariadb_query:
+        login_unix_socket: '{{ __verify_mariadb_sockets[ansible_facts["os_family"]] }}'
+        login_user: 'sogo_ro'
+        login_password: 'sogo-Reader-42'
+        login_db: 'postfixadmin'
+        query: 'SELECT c_uid, c_name, c_password, c_cn, mail, domain FROM sogo_users ORDER BY c_uid'
+      register: __verify_sogo_mariadb
+      when: postfixadmin_db_type == 'mariadb'
+
+    # Active mailboxes only, with the prefixed hash SOGo reads
+    - name: Verify | Assert the SOGo view
+      ansible.builtin.assert:
+        that:
+          - __verify_sogo | map(attribute='c_uid') | list == ['alice@example.com', 'bob@example.com']
+          - (__verify_sogo | first).c_name == 'alice@example.com'
+          - (__verify_sogo | first).c_cn == 'Alice'
+          - (__verify_sogo | first).mail == 'alice@example.com'
+          - (__verify_sogo | first).domain == 'example.com'
+          - (__verify_sogo | first).c_password == __verify_mailbox['alice@example.com'].password
+        fail_msg: '{{ __verify_sogo | map(attribute="c_uid") | list }}'
+      vars:
+        __verify_sogo: >-
+          {{ __verify_sogo_pg.query_result if postfixadmin_db_type == 'postgresql'
+             else __verify_sogo_mariadb.query_result | first }}
+
+    - name: Verify | Try reads and writes as the read-only users (PostgreSQL)
+      community.postgresql.postgresql_query:
+        login_host: '127.0.0.1'
+        login_user: '{{ item.user }}'
+        login_password: '{{ __verify_reader_passwords[item.user] }}'
+        login_db: 'postfixadmin'
+        query: '{{ item.query }}'
+      loop: '{{ __verify_reader_checks }}'
+      loop_control:
+        label: '{{ item.user }}: {{ item.query }}'
+      register: __verify_reader_pg
+      failed_when: (__verify_reader_pg is failed) == item.allowed
+      when: postfixadmin_db_type == 'postgresql'
+
+    - name: Verify | Try reads and writes as the read-only users (MariaDB)
+      ansible.mariadb.mariadb_query:
+        login_unix_socket: '{{ __verify_mariadb_sockets[ansible_facts["os_family"]] }}'
+        login_user: '{{ item.user }}'
+        login_password: '{{ __verify_reader_passwords[item.user] }}'
+        login_db: 'postfixadmin'
+        query: '{{ item.query }}'
+      loop: '{{ __verify_reader_checks }}'
+      loop_control:
+        label: '{{ item.user }}: {{ item.query }}'
+      register: __verify_reader_mariadb
+      failed_when: (__verify_reader_mariadb is failed) == item.allowed
+      when: postfixadmin_db_type == 'mariadb'
+
+    #
+    # Input validation: each run fails before it changes anything
+    #
+
+    - name: Verify | Run the role with a mailbox without password
+      block:
+        - name: Verify | Include postfixadmin role  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            postfixadmin_mailboxes:
+              - username: 'nopassword@example.com'
+                name: 'No Password'
+
+        - name: Verify | Fail when the entry was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a mailbox without password'
+      rescue:
+        - name: Verify | Assert the missing password was reported
+          ansible.builtin.assert:
+            that:
+              - __verify_failure is search('missing for: nopassword@example.com')
+            fail_msg: '{{ __verify_failure }}'
+
+    # A PHP binary that reports no Argon2, as the EL 9 default PHP 8.0 and
+    # the php:8.1 / 8.2 module streams do; the test platforms all have it
+    - name: Verify | Create a PHP stub without Argon2
+      ansible.builtin.copy:
+        content: |
+          #!/bin/sh
+          exec php -r 'echo json_encode(["version" => PHP_VERSION, "version_id" => PHP_VERSION_ID,
+            "argon2id" => false, "pdo" => PDO::getAvailableDrivers(),
+            "iconv" => extension_loaded("iconv"), "mbstring" => extension_loaded("mbstring")]);'
+        dest: /usr/local/bin/php-without-argon2
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Verify | Run the role with ARGON2ID on PHP without Argon2
+      block:
+        - name: Verify | Include postfixadmin role  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            postfixadmin_php_cli: /usr/local/bin/php-without-argon2
+
+        - name: Verify | Fail when the scheme was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted ARGON2ID without Argon2 support'
+      rescue:
+        - name: Verify | Assert the missing Argon2 support was reported
+          ansible.builtin.assert:
+            that:
+              - __verify_failure is search('PASSWORD_ARGON2ID')
+            fail_msg: '{{ __verify_failure }}'
+
+    - name: Verify | Run the role with a database to create on another host
+      block:
+        - name: Verify | Include postfixadmin role  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            postfixadmin_db_host: 'db.example.com'
+
+        - name: Verify | Fail when the setting was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted postfixadmin_db_create for a remote database server'
+      rescue:
+        - name: Verify | Assert the remote database server was reported
+          ansible.builtin.assert:
+            that:
+              - __verify_failure is search('need a\s+database\s+server\s+on\s+this\s+host')
+            fail_msg: '{{ __verify_failure }}'
+
+    # A unix socket takes no TLS
+    - name: Verify | Run the role with TLS through a unix socket
+      block:
+        - name: Verify | Include postfixadmin role  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            # MariaDB: 'localhost' is the socket of the platform
+            postfixadmin_db_host: "{{ '/run/postgresql' if postfixadmin_db_type == 'postgresql' else 'localhost' }}"
+            postfixadmin_db_tls: true
+            postfixadmin_db_tls_ca_file: '/etc/ssl/certs/ca-certificates.crt'
+
+        - name: Verify | Fail when the connection was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted TLS through a unix socket'
+      rescue:
+        - name: Verify | Assert the socket was reported
+          ansible.builtin.assert:
+            that:
+              - __verify_failure is search('needs a TCP connection')
+            fail_msg: '{{ __verify_failure }}'
+
+    # config.local.php is written after these checks: it stays as it is
+    - name: Verify | Stat config.local.php before the rejected settings
+      ansible.builtin.stat:
+        path: '{{ __verify_config }}'
+        checksum_algorithm: sha256
+      register: __verify_config_before
+
+    - name: Verify | Run the role with managed keys in postfixadmin_extra_config
+      block:
+        - name: Verify | Include postfixadmin role  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            postfixadmin_extra_config:
+              emailcheck_resolve_domain: 'NO'
+              encrypt: 'MD5'
+              database_host: 'db.example.com'
+              totp: 'YES'
+
+        - name: Verify | Fail when the keys were accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted managed keys in postfixadmin_extra_config'
+      rescue:
+        - name: Verify | Assert the managed keys were reported with their variables
+          ansible.builtin.assert:
+            that:
+              - >-
+                __verify_failure is search('encrypt: postfixadmin_password_scheme')
+              - >-
+                __verify_failure is search('database_host: the postfixadmin_db_\\* variables')
+              - >-
+                __verify_failure is search('totp: postfixadmin_totp')
+              - __verify_failure is not search('emailcheck_resolve_domain')
+            fail_msg: '{{ __verify_failure }}'
+
+    - name: Verify | Stat config.local.php after the rejected settings
+      ansible.builtin.stat:
+        path: '{{ __verify_config }}'
+        checksum_algorithm: sha256
+      register: __verify_config_after
+
+    - name: Verify | Assert config.local.php is unchanged
+      ansible.builtin.assert:
+        that:
+          - __verify_config_after.stat.checksum == __verify_config_before.stat.checksum
+
+    #
+    # Helper failures fail the run, with the message of PostfixAdmin and
+    # without the password of the entry
+    #
+
+    # 11 characters: below the role default of postfixadmin_password_validation
+    - name: Verify | Run the role with a mailbox password shorter than the rules
+      block:
+        - name: Verify | Include postfixadmin role  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            postfixadmin_mailboxes:
+              - username: 'short@example.com'
+                password: 'short-Pw-42'
+                name: 'Short'
+
+        - name: Verify | Fail when the password was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a password shorter than postfixadmin_password_validation'
+      rescue:
+        - name: Verify | Assert the password rule was reported without the password
+          ansible.builtin.assert:
+            that:
+              - __verify_failure is search('short@example.com')
+              - __verify_failure is search('too short - requires 12 characters')
+              - (ansible_failed_result | to_json) is not search('short-Pw-42')
+            fail_msg: '{{ __verify_failure }}'
+
+    - name: Verify | Look up the rejected mailbox
+      ansible.builtin.command:
+        argv:
+          - php
+          - '{{ __verify_query }}'
+          - sql
+          - '{{ __verify_dir }}'
+          - "SELECT username FROM mailbox WHERE username = 'short@example.com'"
+      register: __verify_short
+      changed_when: false
+
+    - name: Verify | Assert the rejected mailbox was not created
+      ansible.builtin.assert:
+        that:
+          - __verify_short.stdout | from_json | length == 0
+
+    - name: Verify | Run the role with a mailbox PostfixAdmin rejects
+      block:
+        - name: Verify | Include postfixadmin role  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            postfixadmin_mailboxes:
+              - username: 'leak@nodomain.example'
+                password: 'leak-Check-4242'
+                name: 'No Domain'
+
+        - name: Verify | Fail when the entry was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a mailbox of an unknown domain'
+      rescue:
+        - name: Verify | Assert the failure names the entry, not its password
+          ansible.builtin.assert:
+            that:
+              - __verify_failure is search('postfixadmin_mailboxes \\(present\\)')
+              - __verify_failure is search('leak@nodomain.example')
+              - (ansible_failed_result | to_json) is not search('leak-Check-4242')
+            fail_msg: '{{ __verify_failure }}'
+
+    # Stand-ins for a PostfixAdmin installation: one ends in die() after
+    # logging a fake hash with error_log(), as PostfixAdmin does for a
+    # failed query; the other defines no schema version.
+    - name: Verify | Create the stand-in directories
+      ansible.builtin.file:
+        path: '/root/molecule-fake-{{ item }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop: ['die', 'noversion']
+
+    - name: Verify | Create stand-in installations
+      ansible.builtin.copy:
+        content: '{{ item.content }}'
+        dest: '/root/molecule-fake-{{ item.name }}/common.php'
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - name: 'die'
+          content: |
+            <?php
+            error_log('{ARGON2ID}$argon2id$molecule-leak');
+            die('molecule die');
+        - name: 'noversion'
+          content: |
+            <?php
+            function db_connect() { return true; }
+            class Config { public static function read_string($key) { return '0.0.0'; } }
+      loop_control:
+        label: '{{ item.name }}'
+
+    - name: Verify | Run the helper on the stand-ins
+      ansible.builtin.command:
+        argv:
+          - php
+          - /usr/local/lib/postfixadmin-ansible/postfixadmin-ansible.php
+          - '/root/molecule-fake-{{ item }}'
+        stdin: '{"action": "status"}'
+      loop: ['die', 'noversion']
+      register: __verify_fake
+      changed_when: false
+      failed_when: false
+
+    - name: Verify | Assert the helper failed without leaking the logged hash
+      ansible.builtin.assert:
+        that:
+          - __verify_fake.results[0].rc == 1
+          - (__verify_fake.results[0].stdout | from_json).msg is search('molecule die')
+          - __verify_fake.results[0].stderr is not search('molecule-leak')
+          - __verify_fake.results[0].stdout is not search('molecule-leak')
+          - __verify_fake.results[1].rc == 1
+          - (__verify_fake.results[1].stdout | from_json).msg is search('no schema version')
+        fail_msg: >-
+          {{ __verify_fake.results | map(attribute='stdout') | list }}
+          {{ __verify_fake.results | map(attribute='stderr') | list }}

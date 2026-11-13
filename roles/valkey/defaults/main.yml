@@ -1,0 +1,200 @@
+---
+#
+# Role Control
+#
+
+# Enable the valkey role
+valkey_enabled: false
+
+# Enable and start the Valkey service
+valkey_service_enabled: true
+
+#
+# Package Updates
+#
+
+# State of the Valkey packages:
+#   'present' installs missing packages and never updates (default).
+#   'latest'  updates the installed Valkey packages in one transaction and
+#             restarts the Valkey service while it still runs the replaced
+#             binary.
+# Pass 'latest' for a targeted update instead of setting it in inventory:
+#   --tags valkey -e valkey_packages_state=latest
+# Ignored on Arch Linux: updating single packages is a partial upgrade there,
+# Valkey updates with the full system upgrade.
+valkey_packages_state: 'present'
+
+# Lowest acceptable version, checked before the update (nothing changes when
+# the repository does not offer it yet) and again after it. Meant to be passed
+# with the update command to require a fix. Either an upstream version, which
+# accepts every distribution release of it:
+#   -e valkey_packages_minimum=8.1.4
+# or the full distribution version, which also covers fixes the distribution
+# backports without a new upstream version:
+#   -e valkey_packages_minimum=8.1.1+dfsg1-3+deb13u3
+# A mapping per platform (keys '<os_family>-<major>' or '<os_family>') covers
+# mixed hosts in one run; a host without a matching key fails:
+#   -e @valkey-minimum.yml
+valkey_packages_minimum: ''
+
+#
+# Network
+#
+# Plain TCP is unencrypted: serve other hosts over it only on a private
+# network or WireGuard, otherwise set valkey_port to 0 and use TLS.
+
+# Addresses to listen on for TCP and TLS, space-separated as in valkey.conf
+# (e.g. '127.0.0.1 -::1' or '0.0.0.0'). protected-mode stays on: while the
+# default user is enabled without a password, only loopback and unix socket
+# clients are accepted.
+valkey_bind: '127.0.0.1'
+
+# Plain TCP port (0 disables plain TCP, e.g. when only TLS is offered)
+valkey_port: 6379
+
+# Unix Socket
+
+# Path of the unix socket ('' disables it). It has to be in /run/valkey, the
+# runtime directory of the service.
+valkey_unix_socket: ''
+
+# Permissions of the unix socket (octal, as unixsocketperm). Quote it: YAML
+# reads an unquoted 0770 as the integer 504.
+valkey_unix_socket_perm: '770'
+
+# Group of the unix socket ('' keeps the group of the service user). The role
+# creates the group when it is missing and adds the service user to it; the
+# local clients join it through their own role or users_list.
+valkey_unix_socket_group: ''
+
+#
+# TLS
+#
+# The certificate and the key must be readable by the service user (valkey);
+# on Debian through owner or group 'valkey', not another group (the unit runs
+# with PrivateUsers=true). The service restarts on every certificate change
+# notified in the play (handler topic 'Reload cert services').
+
+# Enable the TLS listener
+valkey_tls_enabled: false
+
+# TLS port, on the addresses of valkey_bind
+valkey_tls_port: 6380
+
+# Server certificate and private key (PEM)
+valkey_tls_cert_file: ''
+valkey_tls_key_file: ''
+
+# CA bundle to verify client certificates. Required unless
+# valkey_tls_auth_clients is 'no'.
+valkey_tls_ca_file: ''
+
+# Client certificates: 'no' (not requested, clients authenticate with their
+# ACL user), 'optional' (verified when sent) or 'yes' (required)
+valkey_tls_auth_clients: 'no'
+
+# Accepted TLS protocol versions
+valkey_tls_protocols: 'TLSv1.2 TLSv1.3'
+
+#
+# Authentication
+#
+
+# ACL users, one per application. When the list is not empty, the 'default'
+# user is disabled and every client has to authenticate as one of these
+# users. The password has no default; the role stores its SHA-256 hash in
+# /etc/valkey/users.conf. Empty, any local account or process can read,
+# change and flush all data as 'default' (the role warns).
+valkey_users: []
+# Example:
+#   - name: 'rspamd'
+#     password: '{{ vault_valkey_rspamd_password }}'
+#     # ACL command rules (default: ['+@all', '-@dangerous'])
+#     permissions:
+#       - '+@all'
+#       - '-@dangerous'
+#     # Key patterns (default: ['*']); '%R~' / '%W~' patterns are passed as is
+#     keys:
+#       - 'rs*'
+#     # Pub/Sub channel patterns (default: none)
+#     channels: []
+
+#
+# Memory
+#
+
+# Memory limit (valkey.conf units such as '256mb'; '0' = no limit)
+valkey_maxmemory: '0'
+
+# Eviction policy when maxmemory is reached
+valkey_maxmemory_policy: 'noeviction'
+
+#
+# Persistence
+#
+
+# RDB snapshots as '<seconds> <changes>' pairs (empty list disables
+# snapshots). Upstream default.
+valkey_save:
+  - '3600 1'
+  - '300 100'
+  - '60 10000'
+
+# Append-only file (AOF)
+valkey_appendonly: false
+
+#
+# Backup
+#
+# The script /usr/local/bin/valkey-backup writes one RDB snapshot of the
+# whole instance (every database) to valkey_backup_dir, named
+# valkey-<YYYYmmddTHHMMSS>.rdb. It fetches the snapshot from the running
+# server (valkey-cli --rdb), the service keeps running. valkey-backup.timer
+# runs it on a schedule and a restore runs it first. The retention is
+# count-based.
+
+# Enable the scheduled backup (valkey-backup.timer). Off by default: the
+# role cannot know whether the instance holds data worth a backup or only
+# a cache that the applications rebuild.
+valkey_backup_enabled: false
+
+# Backup directory
+valkey_backup_dir: '/var/backups/valkey'
+
+# Snapshots to keep (the newest N stay, older ones are removed after each
+# successful snapshot)
+valkey_backup_keep: 7
+
+# ACL user of valkey_users the backup and the restore authenticate as,
+# required while valkey_users is not empty. It needs the commands of a
+# replication sync and nothing else, e.g.
+#   - name: 'backup'
+#     password: '{{ vault_valkey_backup_password }}'
+#     permissions: ['+ping', '+replconf', '+sync']
+#     keys: []
+valkey_backup_user: ''
+
+# Enable and start the valkey-backup timer
+valkey_backup_timer_enabled: true
+
+# Schedule of the timer (systemd OnCalendar)
+valkey_backup_on_calendar: 'daily'
+
+# Snapshot in valkey_backup_dir to restore, e.g.
+# 'valkey-20261104T030000.rdb'. The role takes a fresh snapshot, stops the
+# service, replaces the data (and the AOF, when enabled) with the snapshot
+# and starts the service again. One-shot: pass it with -e for one run,
+# never set it in inventory.
+valkey_restore: ''
+
+#
+# Extra Configuration
+#
+
+# Further valkey.conf directives (directive: value). Booleans are written as
+# yes/no, a list writes the directive once per item; values are written as
+# given, so quote them where valkey.conf needs quotes.
+valkey_extra_config: {}
+# Example:
+#   tcp-keepalive: 60
+#   notify-keyspace-events: '"Ex"'

@@ -28,3 +28,8 @@ __nginx_selinux_default_ports:
   - '8009'
   - '8443'
   - '9000'
+
+# SELinux management tools: semanage for the port labels (seport) and the
+# file contexts of nginx_writable_paths (sefcontext)
+__nginx_selinux_packages:
+  - policycoreutils-python-utils

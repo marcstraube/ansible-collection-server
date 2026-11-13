@@ -1,29 +1,60 @@
 ---
-# nginx connects to a backend on any port only with this boolean; without it
-# the policy only allows ports in http_port_t. A proxy site reaches its
-# backend with or without an upstream definition, the Authentik location of
-# a site of any type proxies to the outpost, and a stream server connects to
-# its upstream.
-- name: Configure | Allow nginx network connections (SELinux)
-  ansible.posix.seboolean:
-    name: httpd_can_network_connect
-    state: true
-    persistent: true
+# nginx connects to a backend on any port only with httpd_can_network_connect;
+# without it the policy only allows ports in http_port_t. A proxy site reaches
+# its backend with or without an upstream definition, the Authentik location
+# of a site of any type proxies to the outpost, and a stream server connects
+# to its upstream. An upstream alone opens no connection, so it does not
+# count.
+- name: Configure | SELinux booleans
   vars:
     __nginx_selinux_sites: >-
       {{
         nginx_sites | selectattr('enabled', 'undefined') | list
         + nginx_sites | selectattr('enabled', 'defined') | selectattr('enabled') | list
       }}
-  when:
-    - ansible_facts['os_family'] == 'RedHat'
-    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
-    - >-
-      nginx_upstreams | length > 0
-      or nginx_sites | selectattr('type', 'defined') | selectattr('type', 'eq', 'proxy') | list | length > 0
-      or __nginx_selinux_sites | selectattr('authentik', 'defined')
-         | selectattr('authentik.enabled', 'defined') | selectattr('authentik.enabled') | list | length > 0
-      or (nginx_stream_enabled | bool and nginx_stream_servers | length > 0)
+    __nginx_selinux_network_connect_required: >-
+      {{
+        nginx_sites | selectattr('type', 'defined') | selectattr('type', 'eq', 'proxy') | list | length > 0
+        or __nginx_selinux_sites | selectattr('authentik', 'defined')
+           | selectattr('authentik.enabled', 'defined') | selectattr('authentik.enabled') | list | length > 0
+        or (nginx_stream_enabled | bool and nginx_stream_servers | length > 0)
+      }}
+  block:
+    - name: Configure | Assert proxies keep outbound connections allowed
+      ansible.builtin.assert:
+        that:
+          - nginx_selinux_network_connect is not sameas false
+        fail_msg: >-
+          nginx_selinux_network_connect is false, but proxy sites, Authentik
+          locations or stream servers need httpd_can_network_connect. Set it
+          to true or null.
+        success_msg: 'SELinux network setting is consistent with proxies.'
+      when: __nginx_selinux_network_connect_required | bool
+
+    # Without these, nginx and its PHP-FPM workers cannot open outbound
+    # connections or submit mail. The symptom is a bare "Permission denied"
+    # from the application, or a 502 from nginx, with nothing in the logs
+    # pointing at SELinux. A null value leaves the boolean untouched.
+    - name: Configure | Set SELinux booleans
+      ansible.posix.seboolean:
+        name: '{{ item.name }}'
+        state: '{{ item.state | bool }}'
+        persistent: true
+      loop:
+        - name: httpd_can_network_connect
+          state: >-
+            {{ true if __nginx_selinux_network_connect_required | bool
+               else nginx_selinux_network_connect | default(none) }}
+        - name: httpd_can_network_connect_db
+          state: '{{ nginx_selinux_connect_db | default(none) }}'
+        - name: httpd_can_sendmail
+          state: '{{ nginx_selinux_sendmail | default(none) }}'
+      loop_control:
+        label: '{{ item.name }}'
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+        - item.state is not none
 
 # The policy only lets nginx bind the TCP ports in http_port_t (80, 81, 443,
 # 488, 8008, 8009, 8443 and 9000) and no UDP port. Any other port of an

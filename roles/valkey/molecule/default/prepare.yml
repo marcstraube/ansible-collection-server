@@ -1,0 +1,144 @@
+---
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __prepare_packages:
+      Archlinux:
+        - systemd
+        - dbus
+        - procps-ng
+        - openssl
+        - util-linux
+      Debian:
+        - systemd
+        - dbus
+        - procps
+        - openssl
+        - util-linux
+      RedHat:
+        - systemd
+        - dbus
+        - procps-ng
+        - openssl
+        - util-linux
+    __prepare_tls_dir: '/etc/molecule-tls'
+
+  tasks:
+    - name: Prepare | Update package cache (Arch)
+      community.general.pacman:
+        update_cache: true
+        upgrade: true
+      when: ansible_facts['os_family'] == 'Archlinux'
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Update package cache (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+      when: ansible_facts['os_family'] == 'Debian'
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Update package cache (RedHat)
+      ansible.builtin.dnf:
+        update_cache: true
+      when: ansible_facts['os_family'] == 'RedHat'
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name: '{{ __prepare_packages[ansible_facts["os_family"]] }}'
+        state: present
+      retries: 3
+      delay: 5
+
+    #
+    # Test Certificates
+    #
+    # A test CA signs the server certificate for localhost and 127.0.0.1.
+    # The key is world-readable: the service user (valkey) only exists once
+    # the role has installed the package, and a real deployment grants the
+    # access through owner or group instead.
+    #
+
+    - name: Prepare | Create the test certificate directory
+      ansible.builtin.file:
+        path: '{{ __prepare_tls_dir }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Create the test CA
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -newkey
+          - rsa:2048
+          - -nodes
+          - -days
+          - '30'
+          - -subj
+          - '/CN=Molecule Test CA'
+          - -keyout
+          - '{{ __prepare_tls_dir }}/ca.key'
+          - -out
+          - '{{ __prepare_tls_dir }}/ca.crt'
+        creates: '{{ __prepare_tls_dir }}/ca.crt'
+
+    - name: Prepare | Create the server key and request
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -newkey
+          - rsa:2048
+          - -nodes
+          - -subj
+          - '/CN=localhost'
+          - -keyout
+          - '{{ __prepare_tls_dir }}/server.key'
+          - -out
+          - '{{ __prepare_tls_dir }}/server.csr'
+        creates: '{{ __prepare_tls_dir }}/server.csr'
+
+    - name: Prepare | Write the server certificate extensions
+      ansible.builtin.copy:
+        content: "subjectAltName=DNS:localhost,IP:127.0.0.1\n"
+        dest: '{{ __prepare_tls_dir }}/server.ext'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Sign the server certificate
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -req
+          - -in
+          - '{{ __prepare_tls_dir }}/server.csr'
+          - -CA
+          - '{{ __prepare_tls_dir }}/ca.crt'
+          - -CAkey
+          - '{{ __prepare_tls_dir }}/ca.key'
+          - -CAcreateserial
+          - -days
+          - '30'
+          - -extfile
+          - '{{ __prepare_tls_dir }}/server.ext'
+          - -out
+          - '{{ __prepare_tls_dir }}/server.crt'
+        creates: '{{ __prepare_tls_dir }}/server.crt'
+
+    - name: Prepare | Make the server key readable for the service user
+      ansible.builtin.file:
+        path: '{{ __prepare_tls_dir }}/server.key'
+        owner: root
+        group: root
+        mode: '0644'

@@ -1,0 +1,7 @@
+---
+# Pool user of the php-fpm package
+__postfixadmin_default_fpm_user: 'apache'
+__postfixadmin_default_fpm_group: 'apache'
+
+# Socket of the MariaDB server
+__postfixadmin_mariadb_socket: '/var/lib/mysql/mysql.sock'

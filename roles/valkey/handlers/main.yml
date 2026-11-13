@@ -1,0 +1,40 @@
+---
+# Runs before the restart below, so a changed drop-in takes effect with it.
+# failed_when: false keeps the daemon reload container-safe (molecule).
+- name: Reload Valkey systemd units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  failed_when: false
+  when: valkey_enabled | bool
+
+# valkey-server reads valkey.conf and users.conf only at the start; the ACL
+# users, the listeners and the socket group take effect with a restart. Without RDB
+# snapshots and AOF the data is lost with it.
+#
+# The handler also subscribes to the 'Reload cert services' topic of
+# marcstraube.common.pki and the certbot role: valkey-server rereads
+# certificate and key only at the start or on CONFIG SET of a tls-*
+# directive, which needs an admin connection the role does not hold, and
+# the unit has no reload action. One handler for both events restarts the
+# service once when the configuration and the certificate change in the
+# same play. The topic alone restarts it only with TLS (configure.yml
+# records a configuration change).
+- name: Restart Valkey
+  ansible.builtin.systemd_service:
+    name: '{{ __valkey_service_name }}'
+    state: restarted
+  listen: Reload cert services
+  when:
+    - valkey_service_enabled | bool
+    - valkey_tls_enabled | bool or __valkey_config_changed | default(false) | bool
+
+# A new schedule takes effect with the restart of the timer. Check mode on
+# a host without the timer unit has nothing to restart.
+- name: Restart Valkey backup timer
+  ansible.builtin.systemd_service:
+    name: '{{ __valkey_backup_timer_name }}'
+    state: restarted
+  when:
+    - valkey_backup_enabled | bool
+    - valkey_backup_timer_enabled | bool
+    - not (ansible_check_mode and not __valkey_backup_timer_unit.stat.exists | default(true))
