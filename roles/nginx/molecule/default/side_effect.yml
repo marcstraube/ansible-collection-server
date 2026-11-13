@@ -235,3 +235,139 @@
         path: /usr/sbin/policy-rc.d
         state: absent
       when: ansible_facts['os_family'] == 'Debian'
+
+# nginx_selinux_network_connect: false cannot be combined with a proxy site.
+# The assert runs before any configuration change, on every platform.
+- name: Side Effect | SELinux validation
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Run with network connections denied next to a proxy site
+      block:
+        - name: Side Effect | Include nginx role with a proxy site and no network connect  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_selinux_network_connect: false
+            nginx_sites:
+              - name: 'test-proxy'
+                server_names:
+                  - 'proxy.example.com'
+                type: 'proxy'
+                proxy_pass: 'http://127.0.0.1:8080'
+      rescue:
+        - name: Side Effect | Record the SELinux validation failure
+          ansible.builtin.set_fact:
+            __side_effect_selinux_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Assert network connections denied next to a proxy site failed
+      ansible.builtin.assert:
+        that:
+          - __side_effect_selinux_error is defined
+          - "'nginx_selinux_network_connect is false' in __side_effect_selinux_error"
+        fail_msg: >-
+          nginx_selinux_network_connect: false next to a proxy site did not fail
+          the run (error: {{ __side_effect_selinux_error | default('none') }})
+        success_msg: 'nginx_selinux_network_connect: false next to a proxy site fails the run'
+
+# Each boolean follows true, null, false and null again; null must leave the
+# value of the run before untouched. The PHP site has no upstream and no proxy
+# type, so only nginx_selinux_network_connect decides whether its location
+# reaches the backend on an unlabeled port (httpd_t, shared with PHP-FPM).
+# The false case defines an upstream nothing uses: it does not count as a
+# proxy and must not fail the run. Needs SELinux, so RedHat only and skipped
+# where the container runs without it.
+- name: Side Effect | SELinux booleans
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __side_effect_selinux_enabled: >-
+      {{ ansible_facts['os_family'] == 'RedHat'
+         and ansible_facts['selinux']['status'] | default('disabled') == 'enabled' }}
+    __side_effect_selinux_sites:
+      - name: 'test-selinux-php'
+        server_names:
+          - 'selinux-php.example.com'
+        type: 'php'
+        root: '/var/www/html'
+        php:
+          socket: 'unix:/run/php-fpm/www.sock'
+        locations:
+          - path: '/backend/'
+            config: 'proxy_pass http://127.0.0.1:15555/;'
+
+  tasks:
+    - name: Side Effect | Create the backend document root
+      ansible.builtin.file:
+        path: /var/www/selinux-backend
+        state: directory
+        mode: '0755'
+      when: __side_effect_selinux_enabled | bool
+
+    - name: Side Effect | Create the backend index
+      ansible.builtin.copy:
+        content: "backend\n"
+        dest: /var/www/selinux-backend/index.html
+        mode: '0644'
+      when: __side_effect_selinux_enabled | bool
+
+    - name: Side Effect | Start the backend on an unlabeled port
+      ansible.builtin.command:
+        argv:
+          - systemd-run
+          - '--unit=nginx-selinux-backend'
+          - python3
+          - '-m'
+          - http.server
+          - '15555'
+          - '--bind'
+          - '127.0.0.1'
+          - '--directory'
+          - /var/www/selinux-backend
+      changed_when: true
+      when: __side_effect_selinux_enabled | bool
+
+    - name: Side Effect | Wait for the backend
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 15555
+        timeout: 30
+      when: __side_effect_selinux_enabled | bool
+
+    - name: Side Effect | Run the SELinux boolean cases
+      ansible.builtin.include_tasks: tasks/selinux_booleans.yml
+      loop:
+        - name: 'true'
+          value: true
+          expected: 'on'
+        - name: 'null after true'
+          value: null
+          expected: 'on'
+        - name: 'false'
+          value: false
+          expected: 'off'
+          upstreams:
+            - name: 'selinux_unused'
+              servers:
+                - address: '127.0.0.1:15555'
+        - name: 'null after false'
+          value: null
+          expected: 'off'
+      loop_control:
+        loop_var: __side_effect_case
+        label: '{{ __side_effect_case.name }}'
+      when: __side_effect_selinux_enabled | bool
+
+    - name: Side Effect | Stop the backend
+      ansible.builtin.systemd_service:
+        name: nginx-selinux-backend
+        state: stopped
+      when: __side_effect_selinux_enabled | bool
+
+# The SELinux plays ran the role with its defaults; restore the configuration
+# verify.yml expects.
+- name: Side Effect | Restore
+  ansible.builtin.import_playbook: converge.yml

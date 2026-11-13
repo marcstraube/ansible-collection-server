@@ -169,6 +169,58 @@ Keep the patterns explicit. A generic `/\.` would also match
 `/.well-known/acme-challenge/`, and an nginx regex location takes precedence over
 a plain prefix location, so certificate renewal would break.
 
+### SELinux
+
+| Variable                         | Default | Description                      |
+| -------------------------------- | ------- | -------------------------------- |
+| `nginx_selinux_connect_db`       | `null`  | Let PHP-FPM reach a database     |
+| `nginx_selinux_network_connect`  | `null`  | Let nginx call out to a service  |
+| `nginx_selinux_sendmail`         | `null`  | Let nginx submit mail via an MTA |
+
+On SELinux systems, nginx and the PHP-FPM workers behind it run in the
+`httpd_t` domain and cannot open outbound network connections or submit mail
+unless the matching boolean is set. In every case the failure surfaces as a
+bare permission error, or a 502 from nginx, with nothing in the nginx or PHP
+logs pointing at SELinux.
+
+Set `nginx_selinux_connect_db` when an application served by this role
+connects to a database on another host, `nginx_selinux_network_connect` when
+it calls out to a remote service such as an API endpoint, and
+`nginx_selinux_sendmail` when it sends mail through PHP's `mail()` or a
+sendmail binary. Proxies are handled automatically: `httpd_can_network_connect`
+is also enabled whenever a site of type `proxy`, an enabled site with
+`authentik.enabled` or, with `nginx_stream_enabled`, a stream server exists;
+setting `nginx_selinux_network_connect` to `false` alongside any of them fails
+the run. An entry in `nginx_upstreams` alone does not count, because only a
+site or location that proxies to it opens the connection: a `locations` or
+`extra_config` entry that proxies from a site of another type needs
+`nginx_selinux_network_connect: true`.
+
+Each variable takes three values: `true` switches the boolean on, `false`
+switches it off, and `null` (the default) leaves it as it is on the host. The
+booleans apply to the whole `httpd_t` domain, which Apache and PHP-FPM share,
+so the role switches one off only when the variable is explicitly `false`.
+Returning a variable to `null` therefore does not revert a boolean the role set
+earlier; set it to `false` for that.
+
+A PHP application that talks to a remote database, calls an external API and
+sends mail through the local MTA:
+
+```yaml
+nginx_selinux_connect_db: true
+nginx_selinux_network_connect: true
+nginx_selinux_sendmail: true
+nginx_sites:
+  - name: 'php-app'
+    server_names:
+      - 'php.example.com'
+    root: '/var/www/php-app'
+    index: 'index.php index.html'
+    type: 'php'
+    php:
+      socket: 'unix:/run/php-fpm/www.sock'
+```
+
 ### Sites
 
 | Variable      | Default | Description              |
@@ -192,11 +244,8 @@ On SELinux systems nginx may only bind TCP ports labeled `http_port_t` (80,
 with `udp: true`) gets that label from the role;
 without it nginx cannot bind the port. A port of another type, such as 3306
 (`mysqld_port_t`), is relabeled `http_port_t`. Labels the role added stay in
-place when a port is removed from the configuration. The role also enables
-the `httpd_can_network_connect` boolean when an upstream, a site of type
-`proxy`, an enabled site with `authentik.enabled` or a stream server exists,
-so nginx can reach backends, the Authentik outpost and stream upstreams on
-any port.
+place when a port is removed from the configuration. Outbound connections
+are covered under [SELinux](#selinux).
 
 The default site listens on 80 and on `443 ssl http2`, the same options as
 the SSL sites, so the sites can share port 443 with it.
