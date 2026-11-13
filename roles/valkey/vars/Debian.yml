@@ -1,0 +1,28 @@
+---
+__valkey_packages:
+  - valkey-server
+
+__valkey_service_name: 'valkey-server'
+
+# valkey.conf and users.conf: ownership of the package (/etc/valkey is
+# valkey:valkey 2770). The service user owns the files, so no group needs
+# to read the ACL hashes.
+__valkey_config_owner: 'valkey'
+__valkey_config_group: 'valkey'
+__valkey_config_mode: '0600'
+
+# PIDFile= of valkey-server.service and the file of the packaged logrotate
+# configuration
+__valkey_pid_file: '/run/valkey/valkey-server.pid'
+__valkey_log_file: '/var/log/valkey/valkey-server.log'
+
+# valkey-server.service runs with PrivateUsers=true and a system call filter
+# without @chown: the chown of the socket to another group is killed
+# (SIGSYS) or fails with EINVAL. A drop-in lifts both while
+# valkey_unix_socket_group is set.
+__valkey_socket_group_dropin: true
+
+# valkey-server.service runs with PrivateUsers=true: the service reads a
+# file as its owner, through its own group or as world-readable only;
+# supplementary groups map to nobody (unless the drop-in above is active)
+__valkey_private_users: true

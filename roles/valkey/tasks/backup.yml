@@ -1,0 +1,74 @@
+---
+# Deploys the backup script with the oneshot service and the timer that
+# run it. The restore runs the script too, so it is deployed on every run;
+# the toggles only decide whether the timer runs it on a schedule.
+
+- name: Backup | Create backup directory
+  ansible.builtin.file:
+    path: '{{ valkey_backup_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+# Read by the backup script; root-only, removed again without a backup user
+- name: Backup | Deploy the password of the backup user
+  ansible.builtin.copy:
+    content: "{{ (valkey_users | selectattr('name', 'equalto', valkey_backup_user) | first).password }}"
+    dest: '{{ __valkey_backup_auth_file }}'
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+  when: valkey_backup_user | length > 0
+
+- name: Backup | Remove the password of the backup user
+  ansible.builtin.file:
+    path: '{{ __valkey_backup_auth_file }}'
+    state: absent
+  when: valkey_backup_user | length == 0
+
+- name: Backup | Deploy backup script
+  ansible.builtin.template:
+    src: valkey-backup.sh.j2
+    dest: '{{ __valkey_backup_script }}'
+    owner: root
+    group: root
+    mode: '0750'
+
+# Check mode does not write the unit files, so the timer is only managed
+# where its unit exists or a real run deploys it
+- name: Backup | Check for the backup timer unit
+  ansible.builtin.stat:
+    path: '/etc/systemd/system/{{ __valkey_backup_timer_name }}'
+  register: __valkey_backup_timer_unit
+
+- name: Backup | Deploy backup service file
+  ansible.builtin.template:
+    src: valkey-backup.service.j2
+    dest: '/etc/systemd/system/{{ __valkey_backup_service_name }}'
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload Valkey systemd units
+
+- name: Backup | Deploy backup timer file
+  ansible.builtin.template:
+    src: valkey-backup.timer.j2
+    dest: '/etc/systemd/system/{{ __valkey_backup_timer_name }}'
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - Reload Valkey systemd units
+    - Restart Valkey backup timer
+
+- name: Backup | Manage backup timer
+  ansible.builtin.systemd_service:
+    name: '{{ __valkey_backup_timer_name }}'
+    enabled: '{{ __valkey_backup_timer_active }}'
+    state: "{{ __valkey_backup_timer_active | ternary('started', 'stopped') }}"
+    daemon_reload: true
+  vars:
+    __valkey_backup_timer_active: '{{ valkey_backup_enabled | bool and valkey_backup_timer_enabled | bool }}'
+  when: not (ansible_check_mode and not __valkey_backup_timer_unit.stat.exists)

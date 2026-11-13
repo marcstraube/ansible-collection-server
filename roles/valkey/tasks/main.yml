@@ -1,0 +1,312 @@
+---
+- name: Main | Load OS-specific variables
+  ansible.builtin.include_vars: '{{ item }}'
+  with_first_found:
+    - files:
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}.yml'
+      paths:
+        - 'vars'
+  tags:
+    - always
+
+# Every validation collects one message per failed check, so a run names
+# exactly what is wrong. The checks run before any change.
+- name: Main | Validate package update settings
+  ansible.builtin.assert:
+    that:
+      - __valkey_errors | length == 0
+    fail_msg: '{{ __valkey_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __valkey_errors: >-
+      {{ [
+           ("valkey_packages_state must be 'present' or 'latest' (got '" ~ valkey_packages_state ~ "').")
+             if valkey_packages_state not in ['present', 'latest'] else '',
+           ("valkey_packages_minimum must be a version string, e.g. '8.1.4', or a mapping per platform (got '"
+            ~ valkey_packages_minimum ~ "').")
+             if not (valkey_packages_minimum is string or valkey_packages_minimum is mapping) else ''
+         ] | select | list }}
+  when: valkey_enabled | bool
+  tags:
+    - always
+
+# A mapping selects the minimum by '<os_family>-<major>', then
+# '<os_family>'. A host without a matching key fails here, before any
+# change, so a platform left out of the mapping cannot pass unchecked.
+- name: Main | Select the minimum version for this platform
+  ansible.builtin.set_fact:
+    __valkey_minimum: >-
+      {{ (valkey_packages_minimum[__valkey_minimum_key] if __valkey_minimum_key | length > 0 else '')
+         if valkey_packages_minimum is mapping
+         else valkey_packages_minimum }}
+    __valkey_minimum_key_found: '{{ valkey_packages_minimum is not mapping or __valkey_minimum_key | length > 0 }}'
+  vars:
+    __valkey_minimum_key: >-
+      {{ ([ansible_facts['os_family'] ~ '-' ~ ansible_facts['distribution_major_version'],
+           ansible_facts['os_family']]
+          | select('in', valkey_packages_minimum) | list + [''])
+         | first
+         if valkey_packages_minimum is mapping
+         else '' }}
+  when: valkey_enabled | bool
+  tags:
+    - always
+
+# The value reaches dpkg, rpm and vercmp as an argument; only characters of
+# a package version are accepted.
+- name: Main | Validate the minimum version for this platform
+  ansible.builtin.assert:
+    that:
+      - __valkey_minimum_key_found | bool
+      - __valkey_minimum | string is match('^[0-9A-Za-z.+~:_-]*$')
+    fail_msg: >-
+      {{ ('valkey_packages_minimum has no key for this host (expected '
+          ~ ansible_facts['os_family'] ~ '-' ~ ansible_facts['distribution_major_version']
+          ~ ' or ' ~ ansible_facts['os_family'] ~ ')')
+         if not (__valkey_minimum_key_found | bool)
+         else ('valkey_packages_minimum ' ~ __valkey_minimum ~ ' is not a package version') }}
+    quiet: true
+  when: valkey_enabled | bool
+  tags:
+    - always
+
+# Every listener needs a port or a path; a server without any listener
+# would start but serve nobody.
+- name: Main | Validate network settings
+  ansible.builtin.assert:
+    that:
+      - __valkey_errors | length == 0
+    fail_msg: '{{ __valkey_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __valkey_errors: >-
+      {{ [
+           ("valkey_bind must name at least one address (got '" ~ valkey_bind ~ "').")
+             if not (valkey_bind is string and valkey_bind | trim | length > 0) else '',
+           ("valkey_port must be 0-65535 (got '" ~ valkey_port ~ "').")
+             if not (valkey_port | string is match('^[0-9]+$') and valkey_port | int <= 65535) else '',
+           'No listener: enable valkey_port, valkey_tls_enabled or valkey_unix_socket.'
+             if not (valkey_port | int > 0 or valkey_tls_enabled | bool or valkey_unix_socket | length > 0) else '',
+           ("valkey_unix_socket must be a path in " ~ __valkey_run_dir ~ ", the runtime directory of the service (got '"
+            ~ valkey_unix_socket ~ "').")
+             if not (valkey_unix_socket | length == 0 or (valkey_unix_socket | dirname) == __valkey_run_dir) else '',
+           ("valkey_unix_socket_perm must be a quoted string, e.g. '770' (got the integer "
+            ~ valkey_unix_socket_perm ~ "; YAML reads an unquoted 0770 as 504).")
+             if valkey_unix_socket_perm is not string else '',
+           ("valkey_unix_socket_perm must be an octal mode of 3 or 4 digits (got '" ~ valkey_unix_socket_perm ~ "').")
+             if valkey_unix_socket_perm is string and valkey_unix_socket_perm is not match('^[0-7]{3,4}$') else '',
+           ("valkey_unix_socket_group must be a group name without whitespace or quotes (got '"
+            ~ valkey_unix_socket_group ~ "').")
+             if not (valkey_unix_socket_group is string
+                     and (valkey_unix_socket_group | length == 0
+                          or valkey_unix_socket_group is match(__valkey_acl_token_regex))) else ''
+         ] | select | list }}
+  when: valkey_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate TLS settings
+  ansible.builtin.assert:
+    that:
+      - __valkey_errors | length == 0
+    fail_msg: '{{ __valkey_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __valkey_errors: >-
+      {{ [
+           ("valkey_tls_port must be 1-65535 (got '" ~ valkey_tls_port ~ "').")
+             if not (valkey_tls_port | string is match('^[0-9]+$')
+                     and valkey_tls_port | int > 0 and valkey_tls_port | int <= 65535) else '',
+           ("valkey_tls_port must differ from valkey_port (both " ~ valkey_tls_port ~ ").")
+             if valkey_tls_port | int == valkey_port | int else '',
+           'valkey_tls_enabled needs valkey_tls_cert_file and valkey_tls_key_file.'
+             if valkey_tls_cert_file | length == 0 or valkey_tls_key_file | length == 0 else '',
+           ("valkey_tls_auth_clients must be 'no', 'optional' or 'yes' (got '" ~ valkey_tls_auth_clients ~ "').")
+             if valkey_tls_auth_clients not in ['no', 'optional', 'yes'] else '',
+           ("valkey_tls_auth_clients '" ~ valkey_tls_auth_clients
+            ~ "' needs valkey_tls_ca_file to verify client certificates.")
+             if valkey_tls_auth_clients in ['optional', 'yes'] and valkey_tls_ca_file | length == 0 else ''
+         ] | select | list }}
+  when:
+    - valkey_enabled | bool
+    - valkey_tls_enabled | bool
+  tags:
+    - always
+
+# The password is hashed and may contain anything, whitespace and line
+# breaks included. The loop runs over the indexes, so neither the loop item
+# nor the result carries a password and the failure message stays visible.
+- name: Main | Validate ACL users
+  ansible.builtin.assert:
+    that:
+      - __valkey_errors | length == 0
+    fail_msg: 'valkey_users entry {{ __valkey_index }}: {{ __valkey_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __valkey_entry: '{{ valkey_users[__valkey_index] }}'
+    __valkey_lists: >-
+      {{ [__valkey_entry.permissions | default([]),
+          __valkey_entry['keys'] if 'keys' in __valkey_entry else [],
+          __valkey_entry.channels | default([])]
+         if __valkey_entry is mapping else [] }}
+    __valkey_errors: >-
+      {{ (['is not a mapping with name and password.'] if __valkey_entry is not mapping else [
+           "needs a name." if __valkey_entry.name | default('') | string | length == 0 else '',
+           "The name must not contain whitespace, line breaks or quotes."
+             if __valkey_entry.name | default('') | string | length > 0
+                and __valkey_entry.name | string is not match(__valkey_acl_token_regex) else '',
+           "The name 'default' is reserved: the role disables the default user."
+             if __valkey_entry.name | default('') == 'default' else '',
+           "needs a password (there is no default)."
+             if not (__valkey_entry.password | default('') is string
+                     and __valkey_entry.password | default('') | length > 0) else '',
+           "permissions, keys and channels must be lists."
+             if __valkey_lists | select('string') | list | length > 0 else '',
+           "ACL rules and patterns must not contain whitespace, line breaks or quotes."
+             if __valkey_lists | reject('string') | flatten | map('string')
+                | reject('match', __valkey_acl_token_regex) | list | length > 0 else ''
+         ]) | select | list }}
+  loop: '{{ range(valkey_users | length) | list }}'
+  loop_control:
+    loop_var: __valkey_index
+    label: >-
+      {{ valkey_users[__valkey_index].name | default('(no name)')
+         if valkey_users[__valkey_index] is mapping else '(not a mapping)' }}
+  when: valkey_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate unique ACL user names
+  ansible.builtin.assert:
+    that:
+      - __valkey_user_names | length == __valkey_user_names | unique | length
+    fail_msg: 'valkey_users names must be unique (got {{ __valkey_user_names | join(", ") }})'
+    quiet: true
+  vars:
+    __valkey_user_names: "{{ valkey_users | map(attribute='name') | list }}"
+  when: valkey_enabled | bool
+  tags:
+    - always
+
+# Without ACL users the default user has no password and all commands;
+# protected-mode limits it to local clients only.
+- name: Main | Warn about the missing ACL users
+  ansible.builtin.debug:
+    msg: >-
+      valkey_users is empty: the default user has no password and all
+      commands, so any local account or process can read, change and flush
+      all data. In production define at least one ACL user per application
+      in valkey_users, which disables the default user.
+  when:
+    - valkey_enabled | bool
+    - valkey_users | length == 0
+  tags:
+    - always
+
+# The backup authenticates as valkey_backup_user once the default user is
+# disabled, and connects locally (backup script, restore): over TLS it
+# presents no client certificate.
+- name: Main | Validate backup settings
+  ansible.builtin.assert:
+    that:
+      - __valkey_errors | length == 0
+    fail_msg: '{{ __valkey_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __valkey_backup_needed: '{{ valkey_backup_enabled | bool or valkey_restore | length > 0 }}'
+    __valkey_errors: >-
+      {{ [
+           ("valkey_backup_dir must be an absolute path (got '" ~ valkey_backup_dir ~ "').")
+             if not (valkey_backup_dir is string and valkey_backup_dir is match('^/\S*$')
+                     and valkey_backup_dir | trim('/') | length > 0) else '',
+           ("valkey_backup_keep must be a number of at least 1 (got '" ~ valkey_backup_keep ~ "').")
+             if not (valkey_backup_keep | string is match('^[0-9]+$') and valkey_backup_keep | int >= 1) else '',
+           ("valkey_backup_on_calendar must be a systemd OnCalendar expression on one line (got '"
+            ~ valkey_backup_on_calendar ~ "').")
+             if not (valkey_backup_on_calendar is string and valkey_backup_on_calendar | trim | length > 0
+                     and valkey_backup_on_calendar is not search('[\n\r]')) else '',
+           ("valkey_backup_user '" ~ valkey_backup_user ~ "' is not a name in valkey_users.")
+             if valkey_backup_user | length > 0
+                and valkey_backup_user not in (valkey_users | selectattr('name', 'defined')
+                                               | map(attribute='name') | list) else '',
+           ('valkey_backup_user must name an entry of valkey_users: the default user is disabled, '
+            ~ 'and the backup and the restore authenticate as this user.')
+             if __valkey_backup_needed | bool and valkey_users | length > 0
+                and valkey_backup_user | length == 0 else '',
+           ('The backup connects locally without a client certificate: with only TLS and '
+            ~ 'valkey_tls_auth_clients yes, enable valkey_unix_socket or valkey_port.')
+             if __valkey_backup_needed | bool and valkey_unix_socket | length == 0 and valkey_port | int == 0
+                and valkey_tls_auth_clients == 'yes' else ''
+         ] | select | list }}
+  when: valkey_enabled | bool
+  tags:
+    - always
+
+# Checked before any change: a restore needs a snapshot name of the role's
+# own backup directory and the running server for the fresh snapshot.
+- name: Main | Validate the restore request
+  ansible.builtin.assert:
+    that:
+      - __valkey_errors | length == 0
+    fail_msg: '{{ __valkey_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __valkey_errors: >-
+      {{ [
+           ("valkey_restore must name a snapshot in valkey_backup_dir, valkey-<YYYYmmddTHHMMSS>.rdb (got '"
+            ~ valkey_restore ~ "').")
+             if valkey_restore is not match(__valkey_backup_set_regex) else '',
+           'valkey_restore needs valkey_service_enabled: the role takes a fresh snapshot from the running server first.'
+             if not valkey_service_enabled | bool else ''
+         ] | select | list }}
+  when:
+    - valkey_enabled | bool
+    - valkey_restore | length > 0
+  tags:
+    - always
+
+- name: Main | Import install tasks
+  ansible.builtin.import_tasks: install.yml
+  when: valkey_enabled | bool
+  tags:
+    - valkey
+    - valkey:install
+
+- name: Main | Import configure tasks
+  ansible.builtin.import_tasks: configure.yml
+  when: valkey_enabled | bool
+  tags:
+    - valkey
+    - valkey:configure
+
+- name: Main | Import service tasks
+  ansible.builtin.import_tasks: service.yml
+  when: valkey_enabled | bool
+  tags:
+    - valkey
+    - valkey:service
+
+- name: Main | Import backup tasks
+  ansible.builtin.import_tasks: backup.yml
+  when: valkey_enabled | bool
+  tags:
+    - valkey
+    - valkey:backup
+
+- name: Main | Include restore tasks
+  ansible.builtin.include_tasks:
+    file: restore.yml
+    apply:
+      tags:
+        - valkey
+        - valkey:restore
+  when:
+    - valkey_enabled | bool
+    - valkey_restore | length > 0
+  tags:
+    - valkey
+    - valkey:restore
