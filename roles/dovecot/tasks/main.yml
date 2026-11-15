@@ -1,0 +1,551 @@
+---
+- name: Main | Load OS-specific variables
+  ansible.builtin.include_vars: '{{ item }}'
+  with_first_found:
+    - files:
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}.yml'
+      paths:
+        - 'vars'
+  tags:
+    - always
+
+# Every validation collects one message per failed check, so a run names
+# exactly what is wrong. The checks run before any change.
+- name: Main | Validate package update settings
+  ansible.builtin.assert:
+    that:
+      - __dovecot_errors | length == 0
+    fail_msg: '{{ __dovecot_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __dovecot_errors: >-
+      {{ [
+           ("dovecot_packages_state must be 'present' or 'latest' (got '" ~ dovecot_packages_state ~ "').")
+             if dovecot_packages_state not in ['present', 'latest'] else '',
+           ("dovecot_packages_minimum must be a version string, e.g. '2.4.1', or a mapping per platform (got '"
+            ~ dovecot_packages_minimum ~ "').")
+             if not (dovecot_packages_minimum is string or dovecot_packages_minimum is mapping) else ''
+         ] | select | list }}
+  when: dovecot_enabled | bool
+  tags:
+    - always
+
+# The repository file holds one setting per line; the address and the key
+# must be a single https:// or file:// URL.
+- name: Main | Validate the repository settings (RedHat)
+  ansible.builtin.assert:
+    that:
+      - __dovecot_errors | length == 0
+    fail_msg: '{{ __dovecot_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __dovecot_errors: >-
+      {{ [
+           ("dovecot_repo_baseurl must be an https:// or file:// URL without whitespace (got '"
+            ~ dovecot_repo_baseurl ~ "').")
+             if not (dovecot_repo_baseurl is string and dovecot_repo_baseurl is match('^(https|file)://\S+$'))
+             else '',
+           ("dovecot_repo_gpgkey must be an https:// or file:// URL without whitespace (got '"
+            ~ dovecot_repo_gpgkey ~ "').")
+             if not (dovecot_repo_gpgkey is string and dovecot_repo_gpgkey is match('^(https|file)://\S+$'))
+             else ''
+         ] | select | list }}
+  when:
+    - dovecot_enabled | bool
+    - ansible_facts['os_family'] == 'RedHat'
+  tags:
+    - always
+
+# A mapping selects the minimum by '<os_family>-<major>', then
+# '<os_family>'. A host without a matching key fails here, before any
+# change, so a platform left out of the mapping cannot pass unchecked.
+- name: Main | Select the minimum version for this platform
+  ansible.builtin.set_fact:
+    __dovecot_minimum: >-
+      {{ (dovecot_packages_minimum[__dovecot_minimum_key] if __dovecot_minimum_key | length > 0 else '')
+         if dovecot_packages_minimum is mapping
+         else dovecot_packages_minimum }}
+    __dovecot_minimum_key_found: '{{ dovecot_packages_minimum is not mapping or __dovecot_minimum_key | length > 0 }}'
+  vars:
+    __dovecot_minimum_key: >-
+      {{ ([ansible_facts['os_family'] ~ '-' ~ ansible_facts['distribution_major_version'],
+           ansible_facts['os_family']]
+          | select('in', dovecot_packages_minimum) | list + [''])
+         | first
+         if dovecot_packages_minimum is mapping
+         else '' }}
+  when: dovecot_enabled | bool
+  tags:
+    - always
+
+# The value reaches dpkg, rpm and vercmp as an argument; only characters of
+# a package version are accepted.
+- name: Main | Validate the minimum version for this platform
+  ansible.builtin.assert:
+    that:
+      - __dovecot_minimum_key_found | bool
+      - __dovecot_minimum | string is match('^[0-9A-Za-z.+~:_-]*$')
+    fail_msg: >-
+      {{ ('dovecot_packages_minimum has no key for this host (expected '
+          ~ ansible_facts['os_family'] ~ '-' ~ ansible_facts['distribution_major_version']
+          ~ ' or ' ~ ansible_facts['os_family'] ~ ')')
+         if not (__dovecot_minimum_key_found | bool)
+         else ('dovecot_packages_minimum ' ~ __dovecot_minimum ~ ' is not a package version') }}
+    quiet: true
+  when: dovecot_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate the version and storage settings
+  ansible.builtin.assert:
+    that:
+      - __dovecot_errors | length == 0
+    fail_msg: '{{ __dovecot_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __dovecot_errors: >-
+      {{ [
+           ("dovecot_config_version must be a Dovecot 2.4 release such as '2.4.0' (got '"
+            ~ dovecot_config_version ~ "').")
+             if dovecot_config_version | string is not match('^2\.4\.[0-9]+$') else '',
+           ("dovecot_storage_version must be a Dovecot 2.4 release such as '2.4.0' (got '"
+            ~ dovecot_storage_version ~ "').")
+             if dovecot_storage_version | string is not match('^2\.4\.[0-9]+$') else '',
+           ("dovecot_vmail_user and dovecot_vmail_group must be user and group names (got '"
+            ~ dovecot_vmail_user ~ "', '" ~ dovecot_vmail_group ~ "').")
+             if not (dovecot_vmail_user is match('^[a-z_][a-z0-9_-]*$')
+                     and dovecot_vmail_group is match('^[a-z_][a-z0-9_-]*$')) else '',
+           ("dovecot_vmail_uid and dovecot_vmail_gid must be numbers from 1 to 4294967294 (got '"
+            ~ dovecot_vmail_uid ~ "', '" ~ dovecot_vmail_gid ~ "').")
+             if not (dovecot_vmail_uid | string is match('^[0-9]+$') and dovecot_vmail_uid | int > 0
+                     and dovecot_vmail_uid | int < 4294967295
+                     and dovecot_vmail_gid | string is match('^[0-9]+$') and dovecot_vmail_gid | int > 0
+                     and dovecot_vmail_gid | int < 4294967295) else '',
+           ("dovecot_mail_root must be an absolute path without whitespace or quotes (got '"
+            ~ dovecot_mail_root ~ "').")
+             if not (dovecot_mail_root is string and dovecot_mail_root is match('^/[^\s"''%$]*[^/\s"''%$]$')) else ''
+         ] | select | list }}
+  when: dovecot_enabled | bool
+  tags:
+    - always
+
+# The connection settings are written to dovecot.conf unquoted, so they must
+# not contain whitespace, quotes or braces. The password goes to a file of
+# its own and may contain anything but a line break.
+- name: Main | Validate the database settings
+  ansible.builtin.assert:
+    that:
+      - __dovecot_errors | length == 0
+    fail_msg: '{{ __dovecot_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __dovecot_token: '^[^\s"''{}#\\]+$'
+    __dovecot_db_socket: >-
+      {{ dovecot_db_host is match('/') or (dovecot_db_type == 'mariadb' and dovecot_db_host == 'localhost') }}
+    __dovecot_errors: >-
+      {{ [
+           ("dovecot_db_type must be 'postgresql' or 'mariadb' (got '" ~ dovecot_db_type ~ "').")
+             if dovecot_db_type not in __dovecot_sql_drivers else '',
+           ("dovecot_db_host, dovecot_db_name and dovecot_db_user must be set, without whitespace, quotes "
+            ~ "or braces.")
+             if not (dovecot_db_host | string is match(__dovecot_token)
+                     and dovecot_db_name | string is match(__dovecot_token)
+                     and dovecot_db_user | string is match(__dovecot_token)) else '',
+           ("dovecot_db_port must be 1-65535 (got '" ~ dovecot_db_port ~ "').")
+             if not (dovecot_db_port | string is match('^[0-9]+$')
+                     and dovecot_db_port | int > 0 and dovecot_db_port | int <= 65535) else '',
+           'dovecot_db_password must be set (store it in the vault); it must not contain a line break.'
+             if not (dovecot_db_password is string and dovecot_db_password | length > 0
+                     and dovecot_db_password is not search('[\r\n]')) else '',
+           'dovecot_db_tls needs dovecot_db_tls_ca_file.'
+             if dovecot_db_tls | bool and dovecot_db_tls_ca_file | length == 0 else '',
+           ("dovecot_db_tls needs a TCP connection; '" ~ dovecot_db_host
+            ~ "' connects through a unix socket (use the host name of the server certificate).")
+             if dovecot_db_tls | bool and __dovecot_db_socket | bool else '',
+           ("dovecot_db_tls_ca_file must be an absolute path without whitespace or quotes (got '"
+            ~ dovecot_db_tls_ca_file ~ "').")
+             if dovecot_db_tls_ca_file | length > 0 and dovecot_db_tls_ca_file is not match('^/[^\s"''{}]+$') else '',
+           'dovecot_sql_passdb_query and dovecot_sql_userdb_query must be single-line strings.'
+             if dovecot_sql_passdb_query is search('[\r\n]') or dovecot_sql_userdb_query is search('[\r\n]') else ''
+         ] | select | list }}
+  when: dovecot_enabled | bool
+  tags:
+    - always
+
+# The MySQL driver of Dovecot 2.4 never enables the server certificate
+# verification (its code for it is compiled out); the CA settings are
+# written but not enforced.
+- name: Main | Warn about MariaDB TLS without certificate verification
+  ansible.builtin.debug:
+    msg: >-
+      dovecot_db_tls with dovecot_db_type mariadb encrypts the connection, but
+      Dovecot 2.4 does not verify the server certificate of MariaDB (neither
+      against dovecot_db_tls_ca_file nor the host name). Reach a MariaDB
+      server on another host only over a private network or WireGuard, or
+      use PostgreSQL (sslmode verify-full).
+  when:
+    - dovecot_enabled | bool
+    - dovecot_db_type == 'mariadb'
+    - dovecot_db_tls | bool
+  tags:
+    - always
+
+# A unix socket and the loopback interface never leave the host
+- name: Main | Warn about a database connection without TLS over the network
+  ansible.builtin.debug:
+    msg: >-
+      dovecot_db_tls is false: the connection to the database server
+      '{{ dovecot_db_host }}' is not encrypted, the queries and the password
+      hashes they return cross the network in cleartext. Reach it only over a
+      private network or WireGuard, or enable dovecot_db_tls.
+  when:
+    - dovecot_enabled | bool
+    - not dovecot_db_tls | bool
+    - dovecot_db_host is not match('/')
+    - dovecot_db_host | lower not in ['localhost', '::1']
+    - dovecot_db_host is not match('^127\.[0-9]+\.[0-9]+\.[0-9]+$')
+  tags:
+    - always
+
+- name: Main | Validate the authentication and TLS settings
+  ansible.builtin.assert:
+    that:
+      - __dovecot_errors | length == 0
+    fail_msg: '{{ __dovecot_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __dovecot_errors: >-
+      {{ [
+           ("dovecot_password_scheme must be one of " ~ __dovecot_password_schemes | join(', ')
+            ~ " (got '" ~ dovecot_password_scheme ~ "').")
+             if dovecot_password_scheme not in __dovecot_password_schemes else '',
+           ("dovecot_auth_worker_vsz_limit must be a size such as '256M' (got '"
+            ~ dovecot_auth_worker_vsz_limit ~ "').")
+             if dovecot_auth_worker_vsz_limit | string is not match('^[0-9]+ ?[kKMG]?$') else '',
+           'dovecot_tls_cert_file and dovecot_tls_key_file are required: IMAP, POP3 and ManageSieve need TLS.'
+             if dovecot_tls_cert_file | length == 0 or dovecot_tls_key_file | length == 0 else '',
+           'dovecot_tls_cert_file and dovecot_tls_key_file must be absolute paths without whitespace or quotes.'
+             if not ((dovecot_tls_cert_file | length == 0 or dovecot_tls_cert_file is match('^/[^\s"''{}]+$'))
+                     and (dovecot_tls_key_file | length == 0 or dovecot_tls_key_file is match('^/[^\s"''{}]+$')))
+             else '',
+           ("dovecot_tls_min_protocol must be 'TLSv1.2' or 'TLSv1.3' (got '" ~ dovecot_tls_min_protocol ~ "').")
+             if dovecot_tls_min_protocol not in ['TLSv1.2', 'TLSv1.3'] else ''
+         ] | select | list }}
+  when: dovecot_enabled | bool
+  tags:
+    - always
+
+# LMTP, the auth protocol and quota-status carry no authentication of their
+# own: a TCP listener needs an explicit address, never every interface.
+- name: Main | Validate the listeners and the Sieve outgoing mail
+  ansible.builtin.assert:
+    that:
+      - __dovecot_errors | length == 0
+    fail_msg: '{{ __dovecot_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __dovecot_listeners:
+      dovecot_lmtp_listen: '{{ dovecot_lmtp_listen }}'
+      dovecot_auth_listen: '{{ dovecot_auth_listen }}'
+      dovecot_quota_status_listen: '{{ dovecot_quota_status_listen }}'
+    __dovecot_listener_errors: >-
+      {%- set ns = namespace(errors=[]) -%}
+      {%- for name, value in __dovecot_listeners.items() if value | length > 0 -%}
+      {%- if value is not match(__dovecot_listen_regex) -%}
+      {%- set ns.errors = ns.errors + [name ~ " must be '<address>:<port>' or '[<IPv6 address>]:<port>' (got '"
+            ~ value ~ "')."] -%}
+      {%- elif value | regex_replace(__dovecot_listen_regex, '\\1') in __dovecot_wildcard_addresses -%}
+      {%- set ns.errors = ns.errors + [name ~ " needs a specific address, not a wildcard (got '" ~ value
+            ~ "'): the protocol has no authentication; listen on a private network or WireGuard address."] -%}
+      {%- elif not (value | regex_replace(__dovecot_listen_regex, '\\2') | int > 0
+                    and value | regex_replace(__dovecot_listen_regex, '\\2') | int <= 65535) -%}
+      {%- set ns.errors = ns.errors + [name ~ " needs a port from 1 to 65535 (got '" ~ value ~ "')."] -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ ns.errors }}
+    __dovecot_errors: >-
+      {{ (__dovecot_listener_errors + [
+           ("dovecot_listen must name at least one address (got '" ~ dovecot_listen ~ "').")
+             if not (dovecot_listen is string and dovecot_listen | trim | length > 0
+                     and dovecot_listen is not search('[\r\n"{}#]')) else '',
+           'dovecot_quota_status_listen needs dovecot_quota_enabled.'
+             if dovecot_quota_status_listen | length > 0 and not dovecot_quota_enabled | bool else '',
+           ("dovecot_submission_host must be '<host>:<port>', e.g. 'mx.example.com:25' (got '"
+            ~ dovecot_submission_host ~ "').")
+             if dovecot_submission_host | length > 0 and dovecot_submission_host is not match(__dovecot_listen_regex)
+             else '',
+           ("dovecot_submission_ssl must be 'starttls', 'smtps' or 'no' (got '" ~ dovecot_submission_ssl ~ "').")
+             if dovecot_submission_ssl not in ['starttls', 'smtps', 'no'] else ''
+         ]) | select | list }}
+  when: dovecot_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate the mailboxes and the Sieve scripts
+  ansible.builtin.assert:
+    that:
+      - __dovecot_errors | length == 0
+    fail_msg: '{{ __dovecot_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __dovecot_scripts: '{{ dovecot_sieve_before + dovecot_sieve_after }}'
+    __dovecot_special_use: ['\All', '\Archive', '\Drafts', '\Flagged', '\Junk', '\Sent', '\Trash', '\Important']
+    __dovecot_errors: >-
+      {{ [
+           ("Every entry of dovecot_mailboxes needs a name without quotes, line breaks or a leading or "
+            ~ "trailing '/', special_use one of " ~ __dovecot_special_use | join(' ')
+            ~ " and auto 'subscribe', 'create' or 'no'.")
+             if (dovecot_mailboxes | rejectattr('name', 'defined') | list | length > 0)
+                or (dovecot_mailboxes | selectattr('name', 'defined') | map(attribute='name')
+                    | reject('match', '^[^/"\r\n\\\\][^"\r\n\\\\]*$') | list | length > 0)
+                or (dovecot_mailboxes | selectattr('name', 'defined') | map(attribute='name')
+                    | select('search', '/$') | list | length > 0)
+                or (dovecot_mailboxes | selectattr('special_use', 'defined') | map(attribute='special_use')
+                    | reject('in', __dovecot_special_use + ['']) | list | length > 0)
+                or (dovecot_mailboxes | selectattr('auto', 'defined') | map(attribute='auto')
+                    | reject('in', ['subscribe', 'create', 'no']) | list | length > 0) else '',
+           'dovecot_mailboxes names must be unique.'
+             if dovecot_mailboxes | map(attribute='name', default='') | unique | list | length
+                != dovecot_mailboxes | length else '',
+           ("Every entry of dovecot_sieve_before and dovecot_sieve_after needs a name of letters, digits, "
+            ~ "'-' and '_' and a content.")
+             if (__dovecot_scripts | map(attribute='name', default='') | reject('match', '^[A-Za-z0-9_-]+$')
+                 | list | length > 0)
+                or (__dovecot_scripts | map(attribute='content', default='') | map('trim')
+                    | select('eq', '') | list | length > 0) else '',
+           'dovecot_sieve_before and dovecot_sieve_after names must be unique within each list.'
+             if (dovecot_sieve_before | map(attribute='name', default='') | unique | list | length
+                 != dovecot_sieve_before | length)
+                or (dovecot_sieve_after | map(attribute='name', default='') | unique | list | length
+                    != dovecot_sieve_after | length) else '',
+           'dovecot_extra_config must be a string of dovecot.conf settings.'
+             if dovecot_extra_config is not string else ''
+         ] | select | list }}
+  when: dovecot_enabled | bool
+  tags:
+    - always
+
+# A controller on another host is reached over the network: only with TLS
+# (a web server in front of rspamd).
+- name: Main | Validate the spam training settings
+  ansible.builtin.assert:
+    that:
+      - __dovecot_errors | length == 0
+    fail_msg: '{{ __dovecot_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __dovecot_errors: >-
+      {{ [
+           ("dovecot_rspamd_controller_url must be an http:// or https:// URL without whitespace or quotes (got '"
+            ~ dovecot_rspamd_controller_url ~ "').")
+             if dovecot_rspamd_controller_url is not match('^https?://[^\s"''\\\\]+$') else '',
+           ("dovecot_rspamd_controller_url must use https:// for a controller on another host (got '"
+            ~ dovecot_rspamd_controller_url ~ "').")
+             if dovecot_rspamd_controller_url is match('^http://') and not __dovecot_rspamd_controller_local | bool
+             else '',
+           'dovecot_rspamd_learn_enabled needs dovecot_rspamd_controller_password (no line breaks).'
+             if not (dovecot_rspamd_controller_password is string
+                     and dovecot_rspamd_controller_password | length > 0
+                     and dovecot_rspamd_controller_password is not search('[\r\n]')) else '',
+           'dovecot_rspamd_learn_enabled needs a mailbox with special_use \Junk in dovecot_mailboxes.'
+             if __dovecot_junk_mailbox | length == 0 else '',
+           ("dovecot_rspamd_controller_ca_file must be an absolute path (got '"
+            ~ dovecot_rspamd_controller_ca_file ~ "').")
+             if dovecot_rspamd_controller_ca_file | length > 0
+                and dovecot_rspamd_controller_ca_file is not match('^/[^\s"''\\\\]+$') else ''
+         ] | select | list }}
+  when:
+    - dovecot_enabled | bool
+    - dovecot_rspamd_learn_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate the shared mailboxes
+  ansible.builtin.assert:
+    that:
+      - __dovecot_errors | length == 0
+    fail_msg: 'dovecot_shared_mailboxes entry {{ __dovecot_index }}: {{ __dovecot_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __dovecot_entry: '{{ dovecot_shared_mailboxes[__dovecot_index] }}'
+    __dovecot_address: '^[^\s@"''/]+@[^\s@"''/]+$'
+    __dovecot_errors: >-
+      {{ (['is not a mapping with owner and user.'] if __dovecot_entry is not mapping else [
+           "needs 'owner' and 'user' as addresses."
+             if not (__dovecot_entry.owner | default('') is match(__dovecot_address)
+                     and __dovecot_entry.user | default('') is match(__dovecot_address)) else '',
+           "'owner' and 'user' must differ."
+             if __dovecot_entry.owner | default('') | lower == __dovecot_entry.user | default('') | lower else '',
+           "'folder' must be a mailbox name without quotes or line breaks."
+             if __dovecot_entry.folder | default('INBOX') is not match('^[^/"\r\n\\\\][^"\r\n\\\\]*$') else '',
+           ("'rights' must be ACL letters out of '" ~ __dovecot_owner_rights
+            ~ "' (the role never grants 'a', admin).")
+             if __dovecot_entry.rights | default('lrws') is not match('^[' ~ __dovecot_owner_rights ~ ']+$') else '',
+           ("'mode' must be one of " ~ __dovecot_account_modes | join(', ') ~ '.')
+             if __dovecot_entry.mode | default(dovecot_shared_mailboxes_mode) not in __dovecot_account_modes
+             else '',
+           "'state' must be 'present' or 'absent'."
+             if __dovecot_entry.state | default('present') not in ['present', 'absent'] else ''
+         ]) | select | list }}
+  loop: '{{ range(dovecot_shared_mailboxes | length) | list }}'
+  loop_control:
+    loop_var: __dovecot_index
+    label: >-
+      {{ (dovecot_shared_mailboxes[__dovecot_index].owner | default('?')) ~ ' -> '
+         ~ (dovecot_shared_mailboxes[__dovecot_index].user | default('?'))
+         if dovecot_shared_mailboxes[__dovecot_index] is mapping else '(not a mapping)' }}
+  when: dovecot_enabled | bool
+  tags:
+    - always
+
+# doveadm acl talks to the running service
+- name: Main | Validate the shared mailbox mode
+  ansible.builtin.assert:
+    that:
+      - dovecot_shared_mailboxes_mode in __dovecot_account_modes
+      - __dovecot_shared_entries | length == 0 or dovecot_service_enabled | bool
+    fail_msg: >-
+      dovecot_shared_mailboxes_mode must be one of {{ __dovecot_account_modes | join(', ') }};
+      dovecot_shared_mailboxes needs dovecot_service_enabled (doveadm acl uses the running service).
+    quiet: true
+  when: dovecot_enabled | bool
+  tags:
+    - always
+
+# The unix listeners live in the Postfix queue directory, which the Postfix
+# package creates together with the postfix user. Without it Dovecot would
+# fail to start; the role fails here, before any change.
+- name: Main | Check the Postfix queue directory
+  ansible.builtin.stat:
+    path: '{{ __dovecot_postfix_private_dir }}'
+  register: __dovecot_postfix_dir
+  when:
+    - dovecot_enabled | bool
+    - dovecot_postfix_local | bool
+  tags:
+    - always
+
+- name: Main | Assert Postfix is installed for the local listeners
+  ansible.builtin.assert:
+    that:
+      - __dovecot_postfix_dir.stat.isdir | default(false)
+    fail_msg: >-
+      dovecot_postfix_local is true, but {{ __dovecot_postfix_private_dir }} does
+      not exist: Postfix is not installed on this host. Run the postfix role
+      before the dovecot role, or set dovecot_postfix_local to false and use
+      dovecot_lmtp_listen and dovecot_auth_listen for a Postfix on another host.
+    quiet: true
+  when:
+    - dovecot_enabled | bool
+    - dovecot_postfix_local | bool
+  tags:
+    - always
+
+# The TLS files are read when the configuration is validated. A missing file
+# is named here, before any change: on Debian the package would otherwise be
+# installed and the run fail later on the doveconf error. Check mode skips
+# the assertion, as the role that deploys the files writes nothing then.
+- name: Main | Check the TLS files
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  loop: >-
+    {{ [dovecot_tls_cert_file, dovecot_tls_key_file]
+       + ([dovecot_db_tls_ca_file] if dovecot_db_tls | bool else [])
+       + ([dovecot_rspamd_controller_ca_file]
+          if dovecot_rspamd_learn_enabled | bool and dovecot_rspamd_controller_ca_file | length > 0 else []) }}
+  register: __dovecot_tls_stat
+  when: dovecot_enabled | bool
+  tags:
+    - always
+
+- name: Main | Assert the TLS files exist
+  ansible.builtin.assert:
+    that:
+      - __dovecot_tls_missing | length == 0
+    fail_msg: >-
+      File(s) not found: {{ __dovecot_tls_missing | join(', ') }}. Deploy
+      certificate, key and CA files (e.g. with marcstraube.common.pki) before
+      the dovecot role.
+    quiet: true
+  vars:
+    __dovecot_tls_missing: >-
+      {{ __dovecot_tls_stat.results | rejectattr('stat.exists') | map(attribute='item') | list }}
+  when:
+    - dovecot_enabled | bool
+    - not ansible_check_mode
+  tags:
+    - always
+
+# EL: an installed AppStream Dovecot 2.3 is never upgraded by the role. The
+# check runs before the CE 2.4 repository is added, from which dnf would
+# otherwise update it to a release that rejects the 2.3 configuration.
+- name: Main | Gather package facts for the installed release (RedHat)
+  ansible.builtin.package_facts:
+  when:
+    - dovecot_enabled | bool
+    - ansible_facts['os_family'] == 'RedHat'
+  tags:
+    - always
+
+- name: Main | Assert no Dovecot older than 2.4 is installed (RedHat)
+  ansible.builtin.assert:
+    that:
+      - __dovecot_old_versions | length == 0
+    fail_msg: >-
+      Dovecot {{ __dovecot_old_versions | join(', ') }} is installed; the role
+      supports Dovecot 2.4 only and does not upgrade an older release. Remove
+      the Dovecot 2.3 packages and their configuration (/etc/dovecot) first.
+      Nothing was changed.
+    quiet: true
+  vars:
+    __dovecot_old_versions: >-
+      {{ ansible_facts['packages'][__dovecot_version_package] | default([])
+         | map(attribute='version') | select('version', __dovecot_supported_major_minor, '<') | list }}
+  when:
+    - dovecot_enabled | bool
+    - ansible_facts['os_family'] == 'RedHat'
+  tags:
+    - always
+
+- name: Main | Import repository tasks
+  ansible.builtin.import_tasks: repos.yml
+  when:
+    - dovecot_enabled | bool
+    - ansible_facts['os_family'] == 'RedHat'
+  tags:
+    - dovecot
+    - dovecot:install
+
+- name: Main | Import install tasks
+  ansible.builtin.import_tasks: install.yml
+  when: dovecot_enabled | bool
+  tags:
+    - dovecot
+    - dovecot:install
+
+- name: Main | Import configure tasks
+  ansible.builtin.import_tasks: configure.yml
+  when: dovecot_enabled | bool
+  tags:
+    - dovecot
+    - dovecot:configure
+
+- name: Main | Import service tasks
+  ansible.builtin.import_tasks: service.yml
+  when: dovecot_enabled | bool
+  tags:
+    - dovecot
+    - dovecot:service
+
+- name: Main | Import shared mailbox tasks
+  ansible.builtin.import_tasks: shared.yml
+  when:
+    - dovecot_enabled | bool
+    - __dovecot_shared_entries | length > 0
+  tags:
+    - dovecot
+    - dovecot:shared

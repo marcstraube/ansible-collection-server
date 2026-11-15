@@ -1,0 +1,223 @@
+---
+#
+# Shared Variables
+#
+
+# Configuration file, deployed in full by the role
+__dovecot_config_dir: '/etc/dovecot'
+__dovecot_config_file: '{{ __dovecot_config_dir }}/dovecot.conf'
+
+# Database password, included by dovecot.conf; root and Dovecot only. A file
+# of its own, so dovecot.conf shows a diff while this one stays no_log.
+__dovecot_db_config_file: '{{ __dovecot_config_dir }}/dovecot-db-password.conf.ext'
+
+# Global Sieve scripts (before and after the personal script) and the
+# IMAPSieve scripts of the spam training. Root-owned; the role compiles them
+# with sievec, since the mail user cannot write the binaries here.
+__dovecot_sieve_dir: '{{ __dovecot_config_dir }}/sieve'
+__dovecot_sieve_before_dir: '{{ __dovecot_sieve_dir }}/before.d'
+__dovecot_sieve_after_dir: '{{ __dovecot_sieve_dir }}/after.d'
+__dovecot_sieve_imap_dir: '{{ __dovecot_sieve_dir }}/imapsieve'
+
+# Global Sieve scripts as files: the list position in the name keeps the
+# order of the file driver (alphabetical) equal to the list order
+__dovecot_sieve_files: >-
+  {%- set ns = namespace(files=[]) -%}
+  {%- for script in dovecot_sieve_before -%}
+  {%- set ns.files = ns.files + [{'dir': __dovecot_sieve_before_dir,
+        'file': '%02d-%s.sieve' | format(loop.index, script.name), 'content': script.content}] -%}
+  {%- endfor -%}
+  {%- for script in dovecot_sieve_after -%}
+  {%- set ns.files = ns.files + [{'dir': __dovecot_sieve_after_dir,
+        'file': '%02d-%s.sieve' | format(loop.index, script.name), 'content': script.content}] -%}
+  {%- endfor -%}
+  {{ ns.files }}
+
+# Programs the IMAPSieve scripts may pipe to (sieve_pipe_bin_dir)
+__dovecot_sieve_pipe_dir: '/usr/local/lib/dovecot/sieve-pipe'
+
+# HTTP header with the rspamd controller password, read by curl (-H @file);
+# root and the mail user only
+__dovecot_rspamd_header_file: '{{ __dovecot_config_dir }}/rspamd-controller.header'
+
+# Shared mailbox map (acl_sharing_map), written by the IMAP processes of the
+# mail user, next to the mailboxes
+__dovecot_shared_map_file: '{{ dovecot_mail_root }}/shared-mailboxes.db'
+
+# Postfix queue directory and the unix listeners for a local Postfix
+__dovecot_postfix_private_dir: '/var/spool/postfix/private'
+__dovecot_postfix_lmtp_socket: '{{ __dovecot_postfix_private_dir }}/dovecot-lmtp'
+__dovecot_postfix_auth_socket: '{{ __dovecot_postfix_private_dir }}/auth'
+
+# Dovecot SQL driver per dovecot_db_type
+__dovecot_sql_drivers:
+  postgresql: 'pgsql'
+  mariadb: 'mysql'
+__dovecot_sql_driver: '{{ __dovecot_sql_drivers[dovecot_db_type] | default("") }}'
+
+# Schemes PostfixAdmin writes and Dovecot 2.4 verifies
+__dovecot_password_schemes:
+  - 'ARGON2ID'
+  - 'BLF-CRYPT'
+  - 'SHA512-CRYPT'
+
+# Supported Dovecot release line; the role asserts the installed version
+__dovecot_supported_major_minor: '2.4'
+
+#
+# SQL Queries
+#
+# PostfixAdmin schema: mailbox (username, password, maildir, quota in bytes,
+# active, domain) and domain (domain, active, backupmx). CONCAT works on
+# PostgreSQL and MariaDB alike, '1' compares with a boolean (PostgreSQL) and
+# a tinyint (MariaDB).
+
+__dovecot_sql_active_mailbox: >-
+  FROM mailbox JOIN domain ON domain.domain = mailbox.domain
+  WHERE mailbox.username = '%{user}' AND mailbox.active = '1'
+  AND domain.active = '1' AND domain.backupmx = '0'
+
+__dovecot_default_passdb_query: >-
+  SELECT mailbox.username AS "user", mailbox.password AS password
+  {{ __dovecot_sql_active_mailbox }}
+
+__dovecot_default_userdb_query: >-
+  SELECT CONCAT('{{ dovecot_mail_root }}/', TRIM(TRAILING '/' FROM mailbox.maildir)) AS home,
+  {{ dovecot_vmail_uid }} AS uid, {{ dovecot_vmail_gid }} AS gid{{
+  (", CONCAT(mailbox.quota, 'B') AS quota_storage_size") if dovecot_quota_enabled | bool else '' }}
+  {{ __dovecot_sql_active_mailbox }}
+
+__dovecot_iterate_query: >-
+  SELECT mailbox.username AS "user"
+  FROM mailbox JOIN domain ON domain.domain = mailbox.domain
+  WHERE mailbox.active = '1' AND domain.active = '1' AND domain.backupmx = '0'
+
+__dovecot_passdb_query: >-
+  {{ dovecot_sql_passdb_query | trim if dovecot_sql_passdb_query | trim | length > 0
+     else __dovecot_default_passdb_query }}
+__dovecot_userdb_query: >-
+  {{ dovecot_sql_userdb_query | trim if dovecot_sql_userdb_query | trim | length > 0
+     else __dovecot_default_userdb_query }}
+
+#
+# Protocols and Listeners
+#
+
+__dovecot_protocols: >-
+  {{ ['imap', 'lmtp']
+     + (['pop3'] if dovecot_pop3_enabled | bool else [])
+     + (['sieve'] if dovecot_managesieve_enabled | bool else []) }}
+
+# '<address>:<port>' and '[<IPv6 address>]:<port>' of the TCP listeners
+__dovecot_listen_regex: '^(\[[0-9A-Fa-f:.]+\]|[^\s:\[\]]+):([0-9]{1,5})$'
+
+# Addresses that bind every interface, refused for the unauthenticated
+# listeners
+__dovecot_wildcard_addresses:
+  - '*'
+  - '0.0.0.0'
+  - '::'
+  - '[::]'
+
+__dovecot_lmtp_address: "{{ dovecot_lmtp_listen | regex_replace(__dovecot_listen_regex, '\\1') | trim('[]') }}"
+__dovecot_lmtp_port: "{{ dovecot_lmtp_listen | regex_replace(__dovecot_listen_regex, '\\2') }}"
+__dovecot_auth_address: "{{ dovecot_auth_listen | regex_replace(__dovecot_listen_regex, '\\1') | trim('[]') }}"
+__dovecot_auth_port: "{{ dovecot_auth_listen | regex_replace(__dovecot_listen_regex, '\\2') }}"
+__dovecot_quota_status_address: >-
+  {{ dovecot_quota_status_listen | regex_replace(__dovecot_listen_regex, '\1') | trim('[]') }}
+__dovecot_quota_status_port: >-
+  {{ dovecot_quota_status_listen | regex_replace(__dovecot_listen_regex, '\2') }}
+
+# Mailbox with the \Junk and \Trash special-use flags (spam training)
+__dovecot_junk_mailbox: >-
+  {{ (dovecot_mailboxes | selectattr('special_use', 'defined')
+      | selectattr('special_use', 'eq', '\Junk') | map(attribute='name') | list + ['']) | first }}
+__dovecot_trash_mailbox: >-
+  {{ (dovecot_mailboxes | selectattr('special_use', 'defined')
+      | selectattr('special_use', 'eq', '\Trash') | map(attribute='name') | list + ['']) | first }}
+
+# The rspamd controller runs on this host
+__dovecot_rspamd_controller_local: >-
+  {{ dovecot_rspamd_controller_url
+     is match('^https?://(localhost|127\.[0-9.]+|\[::1\])(:[0-9]+)?(/.*)?$') }}
+
+#
+# SELinux
+#
+# Listener ports get lmtp_port_t (LMTP) or mail_port_t (auth, quota-status),
+# types dovecot_t may bind (EL 9 and 10 policy). Outgoing connections of
+# dovecot_t (submission, rspamd controller) are allowed to every port.
+#
+# The mail root (mailboxes, shared mailbox map) is labeled mail_spool_t: a
+# directory below /var defaults to var_t, which dovecot_t may only search,
+# while it may create, write and rename in mail_spool_t.
+__dovecot_selinux_mail_type: 'mail_spool_t'
+
+# The auth processes (dovecot_auth_t) may connect to mysqld_port_t but not
+# to postgresql_port_t; a PostgreSQL server reached over TCP needs this rule.
+# A unix socket is allowed by the policy.
+__dovecot_selinux_module_name: 'dovecot_ansible'
+__dovecot_selinux_module_file: '/usr/local/share/selinux/{{ __dovecot_selinux_module_name }}.cil'
+__dovecot_selinux_module_needed: >-
+  {{ dovecot_db_type == 'postgresql' and dovecot_db_host is not match('/') }}
+
+#
+# Shared Mailboxes
+#
+
+__dovecot_account_modes:
+  - 'managed'
+  - 'initial'
+  - 'disabled'
+
+# ACL letters and the right names doveadm acl uses
+__dovecot_acl_rights:
+  l: 'lookup'
+  r: 'read'
+  w: 'write'
+  s: 'write-seen'
+  t: 'write-deleted'
+  i: 'insert'
+  p: 'post'
+  e: 'expunge'
+  k: 'create'
+  x: 'delete'
+  a: 'admin'
+
+# Rights of the owner entry with owner_admin: false (everything but admin)
+__dovecot_owner_rights: 'lrwstipekx'
+
+# Entries of dovecot_shared_mailboxes with folder, rights, mode and state
+# filled in, without the disabled ones
+__dovecot_shared_entries: >-
+  {%- set ns = namespace(entries=[]) -%}
+  {%- for entry in dovecot_shared_mailboxes -%}
+  {%- set mode = entry.mode | default(dovecot_shared_mailboxes_mode) -%}
+  {%- if mode != 'disabled' -%}
+  {%- set ns.entries = ns.entries + [{
+        'owner': entry.owner | default('') | lower,
+        'folder': entry.folder | default('INBOX'),
+        'user': entry.user | default('') | lower,
+        'rights': entry.rights | default('lrws'),
+        'owner_admin': entry.owner_admin | default(true) | bool,
+        'mode': mode,
+        'state': entry.state | default('present')}] -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {{ ns.entries }}
+
+# Folders of dovecot_shared_mailboxes, one entry per owner and folder;
+# 'grant' when an entry grants rights on it (the folder is created then)
+__dovecot_shared_folders: >-
+  {%- set ns = namespace(folders=[], keys=[]) -%}
+  {%- for entry in __dovecot_shared_entries -%}
+  {%- set key = entry.owner ~ '/' ~ entry.folder -%}
+  {%- if key not in ns.keys -%}
+  {%- set ns.keys = ns.keys + [key] -%}
+  {%- set ns.folders = ns.folders + [{'owner': entry.owner, 'folder': entry.folder,
+        'grant': __dovecot_shared_entries | selectattr('owner', 'eq', entry.owner)
+                 | selectattr('folder', 'eq', entry.folder) | selectattr('state', 'eq', 'present')
+                 | list | length > 0}] -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {{ ns.folders }}

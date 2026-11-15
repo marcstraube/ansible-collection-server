@@ -1,0 +1,88 @@
+---
+# Test data shared by prepare (PostfixAdmin), converge and verify of the
+# postgresql and mariadb scenarios.
+
+#
+# PostfixAdmin
+#
+
+postfixadmin_enabled: true
+postfixadmin_db_password: 'test-db-Password-42'
+postfixadmin_db_create: true
+# The read-only user Dovecot connects as
+postfixadmin_db_readers:
+  - name: 'dovecot'
+    password: '{{ dovecot_db_password }}'
+    tables: ['mailbox', 'domain']
+# The test domains under .example have no DNS records, which PostfixAdmin
+# checks for every domain and address by default
+postfixadmin_extra_config:
+  emailcheck_resolve_domain: 'NO'
+postfixadmin_domains:
+  - domain: 'example.com'
+postfixadmin_mailboxes:
+  - username: 'alice@example.com'
+    password: 'alice-Secret-42'
+    name: 'Alice'
+  - username: 'bob@example.com'
+    password: 'bob-Secret-42'
+    name: 'Bob'
+  # Only serves as shared mailbox
+  - username: 'support@example.com'
+    password: 'support-Secret-42'
+    name: 'Support'
+  # 1 MB quota (postfixadmin_quota_multiplier 1024000)
+  - username: 'dave@example.com'
+    password: 'dave-Secret-42'
+    name: 'Dave'
+    quota: 1
+  # Refused by the passdb query
+  - username: 'inactive@example.com'
+    password: 'inactive-Secret-42'
+    name: 'Inactive'
+    active: false
+
+#
+# Dovecot
+#
+
+dovecot_enabled: true
+# '%{' would be a variable for Dovecot; the role escapes it
+dovecot_db_password: 'dovecot-%{Reader}-42'
+# Written by prepare; key and certificate where AppArmor profiles of a
+# Molecule host would allow them as well
+dovecot_tls_cert_file: '/etc/ssl/certs/molecule-dovecot.pem'
+dovecot_tls_key_file: '/etc/ssl/private/molecule-dovecot.key'
+dovecot_imap_starttls_enabled: true
+dovecot_managesieve_enabled: true
+dovecot_lmtp_listen: '127.0.0.1:24'
+dovecot_auth_listen: '127.0.0.1:12345'
+dovecot_quota_status_listen: '127.0.0.1:12340'
+# Stand-in controller of prepare on the default URL
+dovecot_rspamd_learn_enabled: true
+dovecot_rspamd_controller_password: 'learn-Secret-42'
+dovecot_shared_mailboxes:
+  - owner: 'support@example.com'
+    user: 'alice@example.com'
+    rights: 'lrwstipe'
+    owner_admin: false
+  - owner: 'support@example.com'
+    folder: 'Archive'
+    user: 'bob@example.com'
+    rights: 'lr'
+    mode: 'initial'
+  # Never granted: absent
+  - owner: 'support@example.com'
+    user: 'dave@example.com'
+    state: 'absent'
+# Files mail the personal script kept into a folder of its own
+dovecot_sieve_after:
+  - name: 'late-filter'
+    content: |
+      require ["fileinto", "mailbox"];
+      if header :contains "Subject" "late-filter" {
+        fileinto :create "After";
+      }
+# Without the grace a message above the 1 MB quota of dave@ is refused
+dovecot_extra_config: |
+  quota_storage_grace = 0

@@ -1,0 +1,135 @@
+---
+# Split scenario: PostgreSQL and PostfixAdmin run in a second container on a
+# podman network and accept the Dovecot reader over TLS only (hostssl);
+# Dovecot connects by host name and verifies the server certificate
+# (sslmode verify-full). The database container also plays the Postfix
+# host: verify sends LMTP, SASL and quota-status requests to the TCP
+# listeners of the Dovecot container (dovecot_postfix_local: false) and logs
+# in over IMAP from there. Both containers run in one job.
+driver:
+  name: podman
+platforms:
+  - name: dovecot-split-db
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    network: dovecot-split
+    groups:
+      - database
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: dovecot-split-mail
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    network: dovecot-split
+    groups:
+      - mail
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: prepare.yml
+    converge: converge.yml
+    side_effect: side_effect.yml
+    verify: verify.yml
+  inventory:
+    group_vars:
+      all:
+        __molecule_db_password: 'test-db-Password-42'
+        __molecule_reader_password: 'dovecot-Reader-42'
+        __molecule_db_ca_file: '/etc/ssl/certs/dovecot-split-db-ca.pem'
+        __molecule_mail_ca_file: '/etc/ssl/certs/dovecot-split-mail.pem'
+      database:
+        postgresql_enabled: true
+        postgresql_listen_addresses: '*'
+        postgresql_firewalld_enabled: false
+        postgresql_shared_buffers: '64MB'
+        postgresql_effective_cache_size: '128MB'
+        postgresql_lc_messages: 'en_US.UTF-8'
+        postgresql_lc_monetary: 'en_US.UTF-8'
+        postgresql_lc_numeric: 'en_US.UTF-8'
+        postgresql_lc_time: 'en_US.UTF-8'
+        postgresql_ssl_enabled: true
+        postgresql_ssl_cert_file: '/etc/postgresql-tls/server.crt'
+        postgresql_ssl_key_file: '/etc/postgresql-tls/server.key'
+        # The Dovecot reader from other hosts only with TLS: there is no
+        # host entry for it
+        postgresql_hba_additional:
+          - type: 'hostssl'
+            database: 'postfixadmin'
+            user: 'dovecot'
+            address: '0.0.0.0/0'
+            method: 'scram-sha-256'
+          - type: 'hostssl'
+            database: 'postfixadmin'
+            user: 'dovecot'
+            address: '::/0'
+            method: 'scram-sha-256'
+        postfixadmin_enabled: true
+        postfixadmin_db_type: 'postgresql'
+        postfixadmin_db_password: '{{ __molecule_db_password }}'
+        postfixadmin_db_create: true
+        postfixadmin_db_readers:
+          - name: 'dovecot'
+            password: '{{ __molecule_reader_password }}'
+            tables: ['mailbox', 'domain']
+        postfixadmin_extra_config:
+          emailcheck_resolve_domain: 'NO'
+        postfixadmin_domains:
+          - domain: 'example.com'
+        postfixadmin_mailboxes:
+          - username: 'alice@example.com'
+            password: 'alice-Secret-42'
+            name: 'Alice'
+      mail:
+        dovecot_enabled: true
+        dovecot_db_type: 'postgresql'
+        dovecot_db_host: 'dovecot-split-db'
+        dovecot_db_password: '{{ __molecule_reader_password }}'
+        dovecot_db_tls: true
+        dovecot_db_tls_ca_file: '{{ __molecule_db_ca_file }}'
+        dovecot_tls_cert_file: '{{ __molecule_mail_ca_file }}'
+        dovecot_tls_key_file: '/etc/ssl/private/dovecot-split-mail.key'
+        dovecot_imap_starttls_enabled: true
+        # POP3 on in this scenario only
+        dovecot_pop3_enabled: true
+        # Sieve outgoing mail to the Postfix host (rendered only; no SMTP
+        # server runs there)
+        dovecot_submission_host: 'dovecot-split-db:25'
+        dovecot_submission_ssl: 'starttls'
+        # Postfix on the other host: TCP listeners on the address of the
+        # container on the podman network
+        dovecot_postfix_local: false
+        dovecot_lmtp_listen: "{{ ansible_facts['default_ipv4']['address'] }}:24"
+        dovecot_auth_listen: "{{ ansible_facts['default_ipv4']['address'] }}:12345"
+        dovecot_quota_status_listen: "{{ ansible_facts['default_ipv4']['address'] }}:12340"
+    host_vars:
+      dovecot-split-db:
+        ansible_python_interpreter: /usr/bin/python3
+      dovecot-split-mail:
+        ansible_python_interpreter: /usr/bin/python3
+  config_options:
+    defaults:
+      allow_broken_conditionals: true
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - side_effect
+    - verify
+    - destroy

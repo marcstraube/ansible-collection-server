@@ -50,6 +50,7 @@ for the base system (podman, pki, firewalld, fail2ban).
 | Role                | Description                                                     |
 | ------------------- | --------------------------------------------------------------- |
 | **postfixadmin**    | PostfixAdmin with its schema, read-only users and mail accounts |
+| **dovecot**         | Dovecot 2.4: IMAP, LMTP, SASL, ManageSieve and shared mailboxes |
 | **mail_autoconfig** | Mail client autoconfiguration (Autoconfig, Autodiscover, Apple) |
 
 ### Applications

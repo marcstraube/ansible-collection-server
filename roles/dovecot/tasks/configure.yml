@@ -1,0 +1,387 @@
+---
+#
+# Mail Storage
+#
+# The virtual mail user owns every mailbox; the LMTP, IMAP and POP3
+# processes switch to it for the mail access (the uid and gid the userdb
+# returns).
+#
+
+- name: Configure | Virtual mail group
+  ansible.builtin.group:
+    name: '{{ dovecot_vmail_group }}'
+    gid: '{{ dovecot_vmail_gid }}'
+    system: true
+    state: present
+  register: __dovecot_vmail_group_result
+
+# Check mode does not create the group the user module needs
+- name: Configure | Virtual mail user
+  ansible.builtin.user:
+    name: '{{ dovecot_vmail_user }}'
+    uid: '{{ dovecot_vmail_uid }}'
+    group: '{{ dovecot_vmail_group }}'
+    home: '{{ dovecot_mail_root }}'
+    create_home: false
+    shell: '{{ __dovecot_nologin_shell }}'
+    system: true
+    state: present
+  register: __dovecot_vmail_user_result
+  when: not (ansible_check_mode and __dovecot_vmail_group_result is changed)
+
+# EL: a new directory below /var is var_t, which dovecot_t may not write.
+# The mail root (mailboxes and the shared mailbox map) gets mail_spool_t;
+# the rule comes first, so a directory created below takes the label right
+# away, and existing content is relabeled when the rule changed.
+- name: Configure | SELinux file context of the mail root (RedHat)
+  community.general.sefcontext:
+    target: '{{ dovecot_mail_root }}(/.*)?'
+    setype: '{{ __dovecot_selinux_mail_type }}'
+    state: present
+  register: __dovecot_sefcontext_result
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+- name: Configure | Mail root directory
+  ansible.builtin.file:
+    path: '{{ dovecot_mail_root }}'
+    state: directory
+    owner: '{{ dovecot_vmail_user }}'
+    group: '{{ dovecot_vmail_group }}'
+    mode: '0700'
+  when: not (ansible_check_mode and (__dovecot_vmail_user_result is changed or __dovecot_vmail_user_result is skipped))
+
+- name: Configure | Apply the SELinux label to the mail root (RedHat)
+  ansible.builtin.command:
+    argv:
+      - restorecon
+      - '-R'
+      - '-v'
+      - '{{ dovecot_mail_root }}'
+  register: __dovecot_restorecon
+  changed_when: __dovecot_restorecon.stdout | length > 0
+  when:
+    - not ansible_check_mode
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+    - __dovecot_sefcontext_result is changed
+
+#
+# SELinux (RedHat)
+#
+# dovecot_t binds the ports of lmtp_port_t, mail_port_t, pop_port_t,
+# sieve_port_t and smtp_port_t only. A TCP listener on a port without such
+# a label fails with "Permission denied"; the role labels it. The auth
+# processes (dovecot_auth_t) may not connect to postgresql_port_t; a small
+# policy module allows it for a PostgreSQL server reached over TCP.
+#
+
+- name: Configure | Label the listener ports for SELinux
+  community.general.seport:
+    ports: '{{ item.port }}'
+    proto: tcp
+    setype: '{{ item.setype }}'
+    state: present
+  loop: >-
+    {{ ([{'port': __dovecot_lmtp_port, 'setype': 'lmtp_port_t'}] if dovecot_lmtp_listen | length > 0 else [])
+       + ([{'port': __dovecot_auth_port, 'setype': 'mail_port_t'}] if dovecot_auth_listen | length > 0 else [])
+       + ([{'port': __dovecot_quota_status_port, 'setype': 'mail_port_t'}]
+          if dovecot_quota_status_listen | length > 0 else []) }}
+  loop_control:
+    label: '{{ item.port }}/tcp {{ item.setype }}'
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+- name: Configure | SELinux policy module directory (RedHat)
+  ansible.builtin.file:
+    path: '{{ __dovecot_selinux_module_file | dirname }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+    - __dovecot_selinux_module_needed | bool
+
+- name: Configure | SELinux policy module for PostgreSQL over TCP (RedHat)
+  ansible.builtin.copy:
+    content: |
+      ; Managed by Ansible (marcstraube.server.dovecot): the Dovecot auth
+      ; processes connect to a PostgreSQL server over TCP
+      (allow dovecot_auth_t postgresql_port_t (tcp_socket (name_connect)))
+    dest: '{{ __dovecot_selinux_module_file }}'
+    owner: root
+    group: root
+    mode: '0644'
+  register: __dovecot_selinux_module_result
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+    - __dovecot_selinux_module_needed | bool
+
+- name: Configure | List the loaded SELinux modules (RedHat)
+  ansible.builtin.command:
+    argv:
+      - semodule
+      - --list-modules
+  register: __dovecot_selinux_modules
+  changed_when: false
+  check_mode: false
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+- name: Configure | Load the SELinux policy module (RedHat)
+  ansible.builtin.command:
+    argv:
+      - semodule
+      - --install
+      - '{{ __dovecot_selinux_module_file }}'
+  changed_when: true
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+    - __dovecot_selinux_module_needed | bool
+    - __dovecot_selinux_module_result is changed
+      or __dovecot_selinux_module_name not in (__dovecot_selinux_modules.stdout_lines | default([]))
+
+- name: Configure | Remove the SELinux policy module (RedHat)
+  ansible.builtin.command:
+    argv:
+      - semodule
+      - --remove
+      - '{{ __dovecot_selinux_module_name }}'
+  changed_when: true
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+    - not __dovecot_selinux_module_needed | bool
+    - __dovecot_selinux_module_name in (__dovecot_selinux_modules.stdout_lines | default([]))
+
+- name: Configure | Remove the SELinux policy module file (RedHat)
+  ansible.builtin.file:
+    path: '{{ __dovecot_selinux_module_file }}'
+    state: absent
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - not __dovecot_selinux_module_needed | bool
+
+#
+# Global Sieve Scripts
+#
+# Root-owned and compiled by the role with sievec: the mail user cannot
+# write the binaries next to them. Scripts that are no longer listed are
+# removed from the role's directories.
+#
+
+- name: Configure | Sieve script directories
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - '{{ __dovecot_sieve_dir }}'
+    - '{{ __dovecot_sieve_before_dir }}'
+    - '{{ __dovecot_sieve_after_dir }}'
+    - '{{ __dovecot_sieve_imap_dir }}'
+  when: not __dovecot_check_mode_install | default(false) | bool
+
+# File names carry the list position, so the file driver runs them in list
+# order
+- name: Configure | Global Sieve scripts
+  ansible.builtin.copy:
+    content: "{{ item.content | trim }}\n"
+    dest: '{{ item.dir }}/{{ item.file }}'
+    owner: root
+    group: root
+    mode: '0644'
+  loop: '{{ __dovecot_sieve_files }}'
+  loop_control:
+    label: '{{ item.dir }}/{{ item.file }}'
+  register: __dovecot_sieve_scripts_result
+  when: not __dovecot_check_mode_install | default(false) | bool
+
+- name: Configure | IMAPSieve scripts of the spam training
+  ansible.builtin.template:
+    src: '{{ item }}.j2'
+    dest: '{{ __dovecot_sieve_imap_dir }}/{{ item }}'
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - report-spam.sieve
+    - report-ham.sieve
+  register: __dovecot_imapsieve_result
+  when:
+    - dovecot_rspamd_learn_enabled | bool
+    - not __dovecot_check_mode_install | default(false) | bool
+
+- name: Configure | Find Sieve files of the role's directories
+  ansible.builtin.find:
+    paths:
+      - '{{ __dovecot_sieve_before_dir }}'
+      - '{{ __dovecot_sieve_after_dir }}'
+      - '{{ __dovecot_sieve_imap_dir }}'
+    patterns:
+      - '*.sieve'
+      - '*.svbin'
+  register: __dovecot_sieve_found
+
+# A compiled binary goes with its script
+- name: Configure | Remove Sieve scripts that are no longer listed
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: absent
+  loop: >-
+    {{ __dovecot_sieve_found.files | map(attribute='path')
+       | reject('in', __dovecot_sieve_expected) | list }}
+  vars:
+    __dovecot_sieve_expected: >-
+      {{ (__dovecot_sieve_files | map(attribute='dir')
+          | zip(__dovecot_sieve_files | map(attribute='file')) | map('join', '/') | list)
+         + (__dovecot_sieve_files | map(attribute='dir')
+            | zip(__dovecot_sieve_files | map(attribute='file') | map('regex_replace', '\.sieve$', '.svbin'))
+            | map('join', '/') | list)
+         + ([__dovecot_sieve_imap_dir ~ '/report-spam.sieve', __dovecot_sieve_imap_dir ~ '/report-spam.svbin',
+             __dovecot_sieve_imap_dir ~ '/report-ham.sieve', __dovecot_sieve_imap_dir ~ '/report-ham.svbin']
+            if dovecot_rspamd_learn_enabled | bool else []) }}
+
+#
+# Spam Training
+#
+
+- name: Configure | Sieve pipe directory
+  ansible.builtin.file:
+    path: '{{ __dovecot_sieve_pipe_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: dovecot_rspamd_learn_enabled | bool
+
+- name: Configure | Programs reporting spam and ham to rspamd
+  ansible.builtin.template:
+    src: rspamd-learn.sh.j2
+    dest: '{{ __dovecot_sieve_pipe_dir }}/rspamd-learn-{{ item }}.sh'
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - spam
+    - ham
+  vars:
+    __dovecot_learn_class: '{{ item }}'
+  when: dovecot_rspamd_learn_enabled | bool
+
+# The password reaches curl as a header file, never on the command line
+- name: Configure | rspamd controller password
+  ansible.builtin.copy:
+    content: "Password: {{ dovecot_rspamd_controller_password }}\n"
+    dest: '{{ __dovecot_rspamd_header_file }}'
+    owner: root
+    group: '{{ dovecot_vmail_group }}'
+    mode: '0640'
+  no_log: true
+  when:
+    - dovecot_rspamd_learn_enabled | bool
+    - not (ansible_check_mode and (__dovecot_vmail_user_result is changed or __dovecot_vmail_user_result is skipped))
+
+- name: Configure | Remove the spam training files
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: absent
+  loop:
+    - '{{ __dovecot_rspamd_header_file }}'
+    - '{{ __dovecot_sieve_pipe_dir }}/rspamd-learn-spam.sh'
+    - '{{ __dovecot_sieve_pipe_dir }}/rspamd-learn-ham.sh'
+  when: not dovecot_rspamd_learn_enabled | bool
+
+#
+# Configuration
+#
+
+# Included by dovecot.conf inside the database block; root and the Dovecot
+# processes only. A JSON string is a quoted dovecot.conf value with
+# backslashes and quotes escaped; '%{', which Dovecot would expand as a
+# variable, becomes '%%{'.
+- name: Configure | Database password
+  ansible.builtin.copy:
+    content: |
+      # Managed by Ansible (marcstraube.server.dovecot)
+      password = {{ dovecot_db_password | to_json(ensure_ascii=false) | replace('%{', '%%{') }}
+    dest: '{{ __dovecot_db_config_file }}'
+    owner: root
+    group: '{{ __dovecot_internal_group }}'
+    mode: '0640'
+  register: __dovecot_db_config_result
+  notify: Reload Dovecot
+  no_log: true
+  when: not __dovecot_check_mode_install | default(false) | bool
+
+# doveconf parses the rendered file with the includes, the TLS files and the
+# installed plugins, so a broken setting (dovecot_extra_config included)
+# fails here and never reaches the running service.
+- name: Configure | Deploy dovecot.conf
+  ansible.builtin.template:
+    src: dovecot.conf.j2
+    dest: '{{ __dovecot_config_file }}'
+    owner: root
+    group: root
+    mode: '0644'
+    validate: 'doveconf -n -c %s'
+    backup: true
+  register: __dovecot_config_result
+  notify: Reload Dovecot
+  when: not __dovecot_check_mode_install | default(false) | bool
+
+# service.yml reloads a running Dovecot right away for these changes
+- name: Configure | Record a configuration change
+  ansible.builtin.set_fact:
+    __dovecot_config_changed: >-
+      {{ [__dovecot_db_config_result, __dovecot_config_result] | select('changed') | list | length > 0 }}
+
+# sievec needs the enabled extensions of the new dovecot.conf, so it runs
+# after the configuration and reads the file itself (-c): without it, a
+# running Dovecot that has not reloaded yet answers with its old
+# configuration (seen with the Debian package started by its postinst),
+# and the IMAPSieve scripts fail to compile. A script without binary or
+# with a changed source is compiled.
+- name: Configure | Find compiled Sieve scripts
+  ansible.builtin.find:
+    paths:
+      - '{{ __dovecot_sieve_before_dir }}'
+      - '{{ __dovecot_sieve_after_dir }}'
+      - '{{ __dovecot_sieve_imap_dir }}'
+    patterns:
+      - '*.svbin'
+  register: __dovecot_sieve_binaries
+  when: not __dovecot_check_mode_install | default(false) | bool
+
+- name: Configure | Compile the global Sieve scripts
+  ansible.builtin.command:
+    argv:
+      - sievec
+      - -c
+      - '{{ __dovecot_config_file }}'
+      - '{{ item }}'
+  loop: >-
+    {{ ((__dovecot_sieve_scripts_result.results | default([]) | selectattr('changed') | map(attribute='dest') | list)
+        + (__dovecot_imapsieve_result.results | default([]) | selectattr('changed') | map(attribute='dest') | list)
+        + (__dovecot_sieve_sources | reject('in', __dovecot_compiled_sources) | list))
+       | unique | list }}
+  vars:
+    __dovecot_sieve_sources: >-
+      {{ (__dovecot_sieve_files | map(attribute='dir')
+          | zip(__dovecot_sieve_files | map(attribute='file')) | map('join', '/') | list)
+         + ([__dovecot_sieve_imap_dir ~ '/report-spam.sieve', __dovecot_sieve_imap_dir ~ '/report-ham.sieve']
+            if dovecot_rspamd_learn_enabled | bool else []) }}
+    __dovecot_compiled_sources: >-
+      {{ __dovecot_sieve_binaries.files | default([]) | map(attribute='path')
+         | map('regex_replace', '\.svbin$', '.sieve') | list }}
+  changed_when: true
+  when: not __dovecot_check_mode_install | default(false) | bool

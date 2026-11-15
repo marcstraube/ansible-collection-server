@@ -1,0 +1,230 @@
+---
+# Targeted package update (docs/role-template.md, Package Updates): the
+# first play rolls the Dovecot packages back to an older build. A minimum
+# the repository does not offer must fail before any change, and a mapping
+# without a key for the host must fail. The converge playbook then runs
+# with dovecot_packages_state: latest and the full distribution version as
+# minimum; verify.yml checks that the service runs the new binary after
+# exactly one start.
+#
+# Only Debian has an older build to roll back to (trixie next to
+# trixie-security). The Dovecot CE repository on EL carries one build per
+# release, and dnf downgrade would fall back to Dovecot 2.3 of AppStream;
+# Arch Linux ignores the state. There the update run only checks the
+# minimum, and verify.yml skips the version comparison.
+- name: Side Effect — Roll back
+  hosts: all
+  gather_facts: true
+
+  vars:
+    # [epoch:]version-release of the core package from the latest package
+    # facts (Debian has no separate release field)
+    __side_effect_version: >-
+      {{ ((__side_effect_pkg.epoch ~ ':')
+          if ((__side_effect_pkg.epoch | default('', true) | string) not in ['', 'None', '0']) else '')
+         ~ (__side_effect_pkg.version | default(''))
+         ~ (('-' ~ __side_effect_pkg.release) if (__side_effect_pkg.release | default('', true)) else '') }}
+    __side_effect_pkg: "{{ ansible_facts['packages'][__dovecot_version_package] | default([{}]) | first }}"
+
+  tasks:
+    - name: Side Effect | Load OS-specific variables
+      ansible.builtin.include_vars: '{{ item }}'
+      with_first_found:
+        - files:
+            - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["distribution"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}.yml'
+          paths:
+            - '../../vars'
+
+    - name: Side Effect | Gather package facts before the rollback
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Record the current core package version
+      ansible.builtin.set_fact:
+        __side_effect_version_current: '{{ __side_effect_version }}'
+
+    # Debian: policy-rc.d keeps the maintainer scripts from restarting
+    # Dovecot, so only the role can restart it. The image may ship one
+    # already; it is kept aside and restored by the last play.
+    - name: Side Effect | Stat an existing policy-rc.d (Debian)
+      ansible.builtin.stat:
+        path: /usr/sbin/policy-rc.d
+      register: __side_effect_policy
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Side Effect | Keep an existing policy-rc.d aside (Debian)
+      ansible.builtin.copy:
+        src: /usr/sbin/policy-rc.d
+        dest: /root/policy-rc.d.molecule
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0755'
+      when:
+        - ansible_facts['os_family'] == 'Debian'
+        - __side_effect_policy.stat.exists
+
+    - name: Side Effect | Block service restarts by packages (Debian)
+      ansible.builtin.copy:
+        content: "#!/bin/sh\nexit 101\n"
+        dest: /usr/sbin/policy-rc.d
+        owner: root
+        group: root
+        mode: '0755'
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # Every installed dovecot-* package carries the core version and moves
+    # back with it. The modified dovecot.conf is kept (confold).
+    - name: Side Effect | Roll the Dovecot packages back (Debian)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          core='{{ __dovecot_version_package }}'
+          installed=$(dpkg-query -W -f '${Version}' "${core}")
+          # madison lists the newest build first; take the first older one
+          old=$(apt-cache madison "${core}" \
+            | awk -F' [|] ' -v cur="${installed}" '$2 != cur { print $2; exit }')
+          [ -n "${old}" ] || exit 0
+          pkgs=$(dpkg-query -W -f '${Package} ${Version} ${db:Status-Abbrev}\n' 'dovecot-*' \
+            | awk -v cur="${installed}" '$2 == cur && $3 == "ii" { print $1 }')
+          args=''
+          for pkg in ${pkgs}; do args="${args} ${pkg}=${old}"; done
+          # shellcheck disable=SC2086
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades \
+            -o Dpkg::Options::=--force-confold ${args}
+        executable: /bin/bash
+      changed_when: true
+      retries: 5
+      delay: 10
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Side Effect | Gather package facts after the rollback
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Record the rolled back core package version
+      ansible.builtin.set_fact:
+        __side_effect_version_rolled_back: '{{ __side_effect_version }}'
+
+    # verify.yml runs as a separate playbook; the versions before and after
+    # the rollback and the time of the update reach it through this file.
+    - name: Side Effect | Record the core package versions around the rollback
+      ansible.builtin.copy:
+        content: |
+          {{ __side_effect_version_current }}
+          {{ __side_effect_version_rolled_back }}
+        dest: /root/dovecot-update-versions
+        owner: root
+        group: root
+        mode: '0600'
+
+- name: Side Effect — Minimum
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - vars/main.yml
+
+  vars:
+    __side_effect_version: >-
+      {{ ((__side_effect_pkg.epoch ~ ':')
+          if ((__side_effect_pkg.epoch | default('', true) | string) not in ['', 'None', '0']) else '')
+         ~ (__side_effect_pkg.version | default(''))
+         ~ (('-' ~ __side_effect_pkg.release) if (__side_effect_pkg.release | default('', true)) else '') }}
+    __side_effect_pkg: "{{ ansible_facts['packages'][__dovecot_version_package] | default([{}]) | first }}"
+
+  tasks:
+    # The pre-check runs before the package task, so a minimum the
+    # repository does not offer leaves the rolled back packages in place.
+    - name: Side Effect | Run with a minimum the repository does not offer
+      block:
+        - name: Side Effect | Include dovecot role with an unmet minimum  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            dovecot_packages_state: 'latest'
+            dovecot_packages_minimum: "{{ {ansible_facts['os_family']: '99.0'} }}"
+      rescue:
+        - name: Side Effect | Record the minimum check failure
+          ansible.builtin.set_fact:
+            __side_effect_minimum_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Gather package facts after the unmet minimum
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Assert the unmet minimum failed without a change
+      ansible.builtin.assert:
+        that:
+          - __side_effect_minimum_error is defined
+          - "'requires 99.0' in __side_effect_minimum_error"
+          - "'nothing was changed' in __side_effect_minimum_error"
+          - __side_effect_version == __side_effect_version_rolled_back
+        fail_msg: >-
+          A minimum of 99.0 did not fail before the update (error:
+          {{ __side_effect_minimum_error | default('none') }},
+          {{ __dovecot_version_package }} {{ __side_effect_version_rolled_back }}
+          -> {{ __side_effect_version }})
+        success_msg: 'The pre-check rejects a minimum the repository does not offer'
+
+    - name: Side Effect | Run with a mapping without a key for the host
+      block:
+        - name: Side Effect | Include dovecot role with a mapping for another platform  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            dovecot_packages_state: 'latest'
+            dovecot_packages_minimum:
+              Solaris: '1.0'
+      rescue:
+        - name: Side Effect | Record the mapping failure
+          ansible.builtin.set_fact:
+            __side_effect_mapping_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Assert the mapping without a key failed
+      ansible.builtin.assert:
+        that:
+          - __side_effect_mapping_error is defined
+          - "'has no key for this host' in __side_effect_mapping_error"
+        fail_msg: 'A mapping without a key for the host did not fail the run'
+        success_msg: 'A mapping without a key for the host fails the run'
+
+# The full distribution version of the build before the rollback as
+# minimum. On Debian the role updates the packages and restarts Dovecot,
+# which still runs the replaced binary (policy-rc.d blocked the package).
+- name: Side Effect — Update
+  ansible.builtin.import_playbook: converge.yml
+  vars:
+    dovecot_packages_state: 'latest'
+    dovecot_packages_minimum: '{{ __side_effect_version_current }}'
+
+- name: Side Effect — Clean up
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Stat the kept policy-rc.d (Debian)
+      ansible.builtin.stat:
+        path: /root/policy-rc.d.molecule
+      register: __side_effect_kept_policy
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Side Effect | Restore the kept policy-rc.d (Debian)
+      ansible.builtin.copy:
+        src: /root/policy-rc.d.molecule
+        dest: /usr/sbin/policy-rc.d
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0755'
+      when:
+        - ansible_facts['os_family'] == 'Debian'
+        - __side_effect_kept_policy.stat.exists
+
+    - name: Side Effect | Allow service restarts by packages again (Debian)
+      ansible.builtin.file:
+        path: /usr/sbin/policy-rc.d
+        state: absent
+      when:
+        - ansible_facts['os_family'] == 'Debian'
+        - not __side_effect_kept_policy.stat.exists
