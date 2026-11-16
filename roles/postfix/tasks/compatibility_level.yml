@@ -1,0 +1,31 @@
+---
+# Compares the compatibility level with the installed Postfix release.
+# Postfix 3.5 knows the levels 0, 1 and 2. From Postfix 3.6 on a level is a
+# release number up to the installed one ('3.10' or '3.10.1' with Postfix
+# 3.10.4, compared with the full mail_version); a higher level is accepted
+# by Postfix silently and would change defaults with a later package update.
+#
+# Input:
+#   __postfix_mail_version_value  mail_version of the installed Postfix
+#   __postfix_level_stage         'pre' (before any change, main.yml) or
+#                                 'post' (after a first install, configure.yml)
+
+- name: Compatibility Level | Assert the level fits the installed release
+  ansible.builtin.assert:
+    that:
+      - >-
+        __postfix_compatibility_level_effective in ['0', '1', '2']
+        or (__postfix_release is version('3.6', '>=')
+            and __postfix_compatibility_level_effective is version('3.6', '>=')
+            and __postfix_compatibility_level_effective is version(__postfix_mail_version_value, '<='))
+    fail_msg: >-
+      compatibility_level {{ __postfix_compatibility_level_effective }} is above
+      the installed Postfix {{ __postfix_mail_version_value }}{{
+      ' (Postfix before 3.6 knows the levels 0, 1 and 2 only)' if __postfix_release is version('3.6', '<') else '' }}.
+      Set postfix_compatibility_level to {{ __postfix_release if __postfix_release is version('3.6', '>=') else '2' }}
+      or lower, or leave it empty for the default of the platform{{
+      '; nothing was changed' if __postfix_level_stage == 'pre' else '' }}.
+    quiet: true
+  vars:
+    # major.minor of the installed release
+    __postfix_release: "{{ __postfix_mail_version_value.split('.')[:2] | join('.') }}"

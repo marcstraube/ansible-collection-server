@@ -1,0 +1,44 @@
+---
+# Mail accounts of all scenarios, created by marcstraube.server.postfixadmin
+# in prepare and used by verify. example.org is an alias domain of
+# example.com; carol has a quota of 1 MB for the quota-status test; support
+# is the shared mailbox alice may send as (postfix_sender_permissions).
+
+__molecule_passwords:
+  alice@example.com: 'alice-Secret-42'
+  bob@example.com: 'bob-Secret-42'
+  carol@example.com: 'carol-Secret-42'
+  support@example.com: 'support-Secret-42'
+
+postfixadmin_domains:
+  - domain: 'example.com'
+  - domain: 'example.org'
+
+postfixadmin_admins:
+  - username: 'admin@example.com'
+    password: 'admin-Secret-42'
+    superadmin: true
+
+postfixadmin_mailboxes:
+  - username: 'alice@example.com'
+    password: "{{ __molecule_passwords['alice@example.com'] }}"
+  - username: 'bob@example.com'
+    password: "{{ __molecule_passwords['bob@example.com'] }}"
+  - username: 'carol@example.com'
+    password: "{{ __molecule_passwords['carol@example.com'] }}"
+    quota: 1
+  - username: 'support@example.com'
+    password: "{{ __molecule_passwords['support@example.com'] }}"
+
+postfixadmin_aliases:
+  - address: 'info@example.com'
+    goto: ['alice@example.com']
+
+postfixadmin_alias_domains:
+  - alias_domain: 'example.org'
+    target_domain: 'example.com'
+
+# The test domains under .example have no DNS records for PostfixAdmin's own
+# check of every domain and address
+postfixadmin_extra_config:
+  emailcheck_resolve_domain: 'NO'

@@ -1,0 +1,303 @@
+---
+# Test environment of the postgresql and mariadb scenarios, everything on one
+# instance as on a real mail host: the database server of postfix_db_type
+# and PostfixAdmin with the test accounts (roles of this collection, PHP
+# through marcstraube.common.php), the Postfix package, then Dovecot with
+# the defaults of the mail stack contract (unix sockets in the Postfix queue
+# directory, quota-status on 127.0.0.1:12340), the test certificate and the
+# test resolver.
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - vars/accounts.yml
+
+  vars:
+    __prepare_packages:
+      Archlinux:
+        - systemd
+        - dbus
+        - procps-ng
+        - iproute2
+        - openssl
+        - dnsmasq
+        - python-cryptography
+      Debian:
+        - systemd
+        - dbus
+        - procps
+        - iproute2
+        - locales
+        - openssl
+        - dnsmasq-base
+        - ca-certificates
+        - python3-cryptography
+      RedHat:
+        - systemd
+        - dbus
+        - procps-ng
+        - iproute
+        - glibc-langpack-en
+        - openssl
+        - dnsmasq
+        - python3-cryptography
+    # PHP extensions PostfixAdmin needs besides the PDO driver: Debian and
+    # EL compile iconv in, Arch Linux builds mbstring in
+    __prepare_php_extensions:
+      postgresql:
+        Archlinux: ['pdo_pgsql', 'iconv']
+        Debian: ['pdo_pgsql', 'mbstring']
+        RedHat: ['pdo_pgsql', 'mbstring']
+      mariadb:
+        Archlinux: ['pdo_mysql', 'iconv']
+        Debian: ['pdo_mysql', 'mbstring']
+        RedHat: ['pdo_mysql', 'mbstring']
+    # EL 9: the php:8.3 module stream, the first with Argon2
+    __prepare_php_version: >-
+      {{ '8.3' if ansible_facts['os_family'] == 'RedHat'
+                 and ansible_facts['distribution_major_version'] == '9' else 'auto' }}
+    # MariaDB: the server certificate for the lookups over TLS of verify,
+    # readable for the mysql user of the server; 'localhost' for the clients
+    # on the socket
+    __prepare_certificates: >-
+      {{ [{'name': 'mail', 'names': ['mail.example.com']}]
+         + ([{'name': 'db', 'names': ['db.example.com', 'localhost'], 'key_mode': '0644'}]
+            if postfix_db_type == 'mariadb' else []) }}
+    # Trust store anchors per platform (MariaDB)
+    __prepare_trust_anchor:
+      Archlinux: '/etc/ca-certificates/trust-source/anchors/postfix-molecule-ca.crt'
+      Debian: '/usr/local/share/ca-certificates/postfix-molecule-ca.crt'
+      RedHat: '/etc/pki/ca-trust/source/anchors/postfix-molecule-ca.crt'
+    __prepare_trust_update:
+      Archlinux: ['update-ca-trust']
+      Debian: ['update-ca-certificates']
+      RedHat: ['update-ca-trust']
+
+  tasks:
+    # Sudo PAM bypass — required for tasks using `become_user` on
+    # geerlingguy Rocky containers under GitHub-hosted runners
+    # (test container only).
+
+    - name: Prepare | Bypass sudo PAM stack (RedHat container)
+      ansible.builtin.copy:
+        content: |
+          #%PAM-1.0
+          auth       sufficient   pam_permit.so
+          account    sufficient   pam_permit.so
+          password   sufficient   pam_permit.so
+          session    sufficient   pam_permit.so
+        dest: /etc/pam.d/sudo
+        owner: root
+        group: root
+        mode: '0644'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Disable sudoers authentication (RedHat container)
+      ansible.builtin.copy:
+        content: 'Defaults !authenticate'
+        dest: /etc/sudoers.d/molecule-no-auth
+        owner: root
+        group: root
+        mode: '0440'
+        validate: 'visudo -cf %s'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Update package cache (Arch)
+      community.general.pacman:
+        update_cache: true
+        upgrade: true
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    # The pacman ignore drop-in setup of marcstraube.common.package_management
+    # that the database roles expect; pacman fails on an Include glob
+    # without a match, so a file is in place before the Include line
+    - name: Prepare | Create pacman ignore drop-in directory (Arch)
+      ansible.builtin.file:
+        path: /etc/pacman.d/ignore.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Create pacman ignore drop-in (Arch)
+      ansible.builtin.copy:
+        content: "# molecule\n"
+        dest: /etc/pacman.d/ignore.d/00-molecule.conf
+        owner: root
+        group: root
+        mode: '0644'
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Include pacman ignore drop-ins (Arch)
+      ansible.builtin.lineinfile:
+        path: /etc/pacman.conf
+        line: 'Include = /etc/pacman.d/ignore.d/*.conf'
+        insertafter: '^\[options\]'
+        firstmatch: true
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Update package cache (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Update package cache (RedHat)
+      ansible.builtin.dnf:
+        update_cache: true
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    # The upstream Dovecot packages for EL depend on libunwind from EPEL
+    # (README of the dovecot role)
+    - name: Prepare | Enable EPEL (RedHat)
+      ansible.builtin.dnf:
+        name: epel-release
+        state: present
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name: '{{ __prepare_packages[ansible_facts["os_family"]] }}'
+        state: present
+      retries: 3
+      delay: 5
+
+    # The PostgreSQL role sets the en_US.UTF-8 locale in the molecule vars
+    - name: Prepare | Generate en_US.UTF-8 locale (Debian)
+      community.general.locale_gen:
+        name: en_US.UTF-8
+        state: present
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Enable PostgreSQL 16 module stream (EL9)
+      ansible.builtin.dnf:
+        name: '@postgresql:16'
+        state: present
+      when:
+        - postfix_db_type == 'postgresql'
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['distribution_major_version'] == '9'
+
+    - name: Prepare | Create the test certificates
+      ansible.builtin.include_tasks: tasks/certificates.yml
+
+    # The MariaDB 11.8 clients verify the server certificate by default,
+    # also on the socket: without the test CA in the system trust store the
+    # local clients of the mariadb role (mariadb-upgrade) and of prepare
+    # fail. With it, the lookups over TLS of verify prove that Postfix uses
+    # TLS and verifies the certificate and host name, not that it trusts
+    # the CA through tls_CAfile alone (the system store would do as well).
+    - name: Prepare | Add the test CA to the trust store (MariaDB)
+      ansible.builtin.copy:
+        src: /etc/molecule-tls/ca.pem
+        dest: '{{ __prepare_trust_anchor[ansible_facts["os_family"]] }}'
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+      when: postfix_db_type == 'mariadb'
+
+    - name: Prepare | Update the trust store (MariaDB)
+      ansible.builtin.command:
+        argv: '{{ __prepare_trust_update[ansible_facts["os_family"]] }}'
+      changed_when: true
+      when: postfix_db_type == 'mariadb'
+
+    #
+    # Database and PostfixAdmin
+    #
+
+    - name: Prepare | Include php role
+      ansible.builtin.include_role:
+        name: marcstraube.common.php
+      vars:
+        php_versions:
+          - version: '{{ __prepare_php_version }}'
+            extensions: '{{ __prepare_php_extensions[postfix_db_type][ansible_facts["os_family"]] }}'
+            fpm: true
+        php_default_version: '{{ __prepare_php_version }}'
+
+    - name: Prepare | Include postgresql role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postgresql'
+      when: postfix_db_type == 'postgresql'
+
+    - name: Prepare | Include mariadb role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../mariadb'
+      when: postfix_db_type == 'mariadb'
+
+    # Creates the database, the schema, the read-only users of Postfix and
+    # Dovecot and the test accounts
+    - name: Prepare | Include postfixadmin role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postfixadmin'
+
+    # The Postfix user connecting over TCP (verify, lookups over TLS) may
+    # only connect with TLS: a lookup that answers proves the encryption
+    - name: Prepare | Require TLS for the Postfix user over TCP (MariaDB)
+      ansible.builtin.command:
+        argv: ['mariadb', '--execute', "ALTER USER 'postfix'@'127.0.0.1' REQUIRE SSL"]
+      changed_when: true
+      when: postfix_db_type == 'mariadb'
+
+    #
+    # Postfix package and Dovecot
+    #
+
+    # The mail stack contract: the Postfix package comes first, so the queue
+    # directory with private/ exists for the unix listeners of Dovecot (as
+    # when the postfix role runs before the dovecot role)
+    - name: Prepare | Preseed Postfix debconf selections (Debian)
+      ansible.builtin.debconf:
+        name: postfix
+        question: 'postfix/main_mailer_type'
+        value: 'Internet Site'
+        vtype: 'select'
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Install the Postfix package
+      ansible.builtin.package:
+        name: postfix
+        state: present
+      retries: 3
+      delay: 5
+
+    # The Debian package creates the queue directories (private/ for the
+    # Dovecot sockets) only when Postfix starts, which the policy-rc.d of
+    # the image prevents; postfix check creates them without a start, as
+    # the start by the postfix role would
+    - name: Prepare | Create the Postfix queue directories (Debian)
+      ansible.builtin.command:
+        argv: [postfix, check]
+        creates: /var/spool/postfix/private
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Include dovecot role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../dovecot'
+
+    #
+    # Test tools
+    #
+
+    - name: Prepare | Install the SMTP test client
+      ansible.builtin.copy:
+        src: '{{ playbook_dir }}/../shared/files/smtp_session.py'
+        dest: /usr/local/bin/molecule-smtp-session
+        owner: root
+        group: root
+        mode: '0755'
+
+    # Last: every download above went through the resolver of the image
+    - name: Prepare | Set up the test resolver
+      ansible.builtin.include_tasks: tasks/resolver.yml

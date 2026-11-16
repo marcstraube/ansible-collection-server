@@ -1,0 +1,24 @@
+---
+# Waits for every message of __verify_mail (user, subject) in the mailbox of
+# its user; delivery runs through the queue and LMTP. The Dovecot host is
+# __verify_dovecot_host (default: the host of the play).
+
+- name: Verify | Wait for the messages in the mailboxes
+  ansible.builtin.command:
+    argv:
+      - doveadm
+      - search
+      - '-u'
+      - '{{ item.user }}'
+      - 'header'
+      - 'subject'
+      - '{{ item.subject }}'
+  loop: '{{ __verify_mail }}'
+  loop_control:
+    label: '{{ item.user }}: {{ item.subject }}'
+  register: __verify_mail_found
+  until: __verify_mail_found.stdout | length > 0
+  retries: 20
+  delay: 3
+  changed_when: false
+  delegate_to: '{{ __verify_dovecot_host | default(inventory_hostname) }}'

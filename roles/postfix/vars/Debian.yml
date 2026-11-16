@@ -1,0 +1,50 @@
+---
+# Compatibility level of the Postfix release of Debian 13 (postfix 3.10);
+# the default of postfix_compatibility_level
+__postfix_compatibility_level: '3.10'
+
+# Directories and programs as compiled into the package (postconf -d)
+__postfix_command_directory: '/usr/sbin'
+__postfix_daemon_directory: '/usr/lib/postfix/sbin'
+__postfix_shlib_directory: '/usr/lib/postfix'
+__postfix_sendmail_path: '/usr/sbin/sendmail'
+__postfix_newaliases_path: '/usr/bin/newaliases'
+__postfix_mailq_path: '/usr/bin/mailq'
+__postfix_sample_directory: '/etc/postfix'
+__postfix_readme_directory: '/usr/share/doc/postfix'
+__postfix_html_directory: '/usr/share/doc/postfix/html'
+
+# Alias file of the package
+__postfix_alias_file: '/etc/aliases'
+
+# CA bundle of the system trust store (ca-certificates)
+__postfix_ca_bundle: '/etc/ssl/certs/ca-certificates.crt'
+
+# Chroot column of the shipped master.cf: Debian runs the services in the
+# queue directory as chroot (except the ones in __postfix_never_chroot) and
+# copies resolv.conf, hosts and nsswitch.conf into it on every start
+__postfix_chroot: 'y'
+
+# The package installs /usr/sbin/sendmail through dpkg-divert, without an
+# alternatives group
+__postfix_alternatives_path: ''
+
+# Other MTAs that would hold port 25 (the package replaces exim4 itself)
+__postfix_conflicting_services:
+  - 'exim4'
+  - 'opensmtpd'
+
+# Socket of a local MariaDB server ('localhost' with postfix_db_type mariadb)
+__postfix_mariadb_socket: '/run/mysqld/mysqld.sock'
+
+# Blocks the Postfix starts of the maintainer scripts while it exists
+__postfix_policy_rc_file: '/usr/sbin/policy-rc.d'
+
+# Marks the policy-rc.d as the role's own; a file with it is a leftover of an
+# interrupted first install. The dovecot role uses its own marker, so
+# neither role removes the file of the other.
+__postfix_policy_rc_marker: 'Managed by Ansible (marcstraube.server.postfix)'
+
+# Postfix 3.6 and later accept protocol ranges (">=TLSv1.2") besides the
+# exclusion syntax
+__postfix_tls_protocol_ranges: true
