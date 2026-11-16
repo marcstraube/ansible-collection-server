@@ -1,0 +1,137 @@
+---
+# The role owns main.cf and master.cf as a whole and renders one template
+# of each for all platforms. They are rendered into a staging directory
+# first and checked there together (postconf, postfix check); only a pair
+# that passes replaces the active files, so a broken setting never reaches
+# the running service. Check mode on a new host has no postconf.
+
+# First install: main.yml found no postconf and could not compare the
+# compatibility level before the install; the installed release is checked
+# here, before main.cf is written. Check mode on a new host has no postconf.
+- name: Configure | Read the release of the first install
+  ansible.builtin.command:
+    argv:
+      - postconf
+      - '-d'
+      - '-h'
+      - mail_version
+  register: __postfix_mail_version
+  changed_when: false
+  check_mode: false
+  when:
+    - not __postfix_check_mode_install | default(false) | bool
+    - (__postfix_mail_version_installed.rc | default(1)) != 0
+
+- name: Configure | Check the compatibility level against the first install
+  ansible.builtin.include_tasks:
+    file: compatibility_level.yml
+    apply:
+      tags:
+        - always
+  vars:
+    __postfix_level_stage: 'post'
+    __postfix_mail_version_value: '{{ __postfix_mail_version.stdout | trim }}'
+  when:
+    - not __postfix_check_mode_install | default(false) | bool
+    - (__postfix_mail_version_installed.rc | default(1)) != 0
+
+# Check mode writes nothing: the templates are compared with the active
+# files directly and report the change the real run would make.
+- name: Configure | Compare main.cf and master.cf in check mode
+  ansible.builtin.template:
+    src: '{{ item }}.j2'
+    dest: '{{ __postfix_config_dir }}/{{ item }}'
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - 'main.cf'
+    - 'master.cf'
+  when:
+    - ansible_check_mode
+    - not __postfix_check_mode_install | default(false) | bool
+
+- name: Configure | Validate and activate main.cf and master.cf
+  when: not ansible_check_mode
+  block:
+    - name: Configure | Create the staging directory
+      ansible.builtin.file:
+        path: '{{ __postfix_staging_dir }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Configure | Render main.cf and master.cf into the staging directory
+      ansible.builtin.template:
+        src: '{{ item }}.j2'
+        dest: '{{ __postfix_staging_dir }}/{{ item }}'
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - 'main.cf'
+        - 'master.cf'
+
+    # postconf -n fails on a syntax error and warns about unknown
+    # parameters (a typo in postfix_extra_main_cf or an -o of master.cf);
+    # postfix check fails on values it cannot use and on file problems.
+    # Every warning fails the run as well, except the one about chroot
+    # copies of system files (__postfix_chroot_differ_regex). The active
+    # files stay untouched.
+    - name: Configure | Check main.cf and master.cf in the staging directory
+      ansible.builtin.command:
+        argv: '{{ item }}'
+      loop:
+        - ['postconf', '-c', '{{ __postfix_staging_dir }}', '-n']
+        - ['postconf', '-c', '{{ __postfix_staging_dir }}', '-M']
+        - ['postfix', '-c', '{{ __postfix_staging_dir }}', 'check']
+      loop_control:
+        label: '{{ item | join(" ") }}'
+      register: __postfix_config_check
+      changed_when: false
+      failed_when: >-
+        __postfix_config_check.rc != 0
+        or __postfix_config_check.stderr_lines | default([])
+           | reject('match', __postfix_chroot_differ_regex)
+           | select('search', '(warning|fatal|error):') | list | length > 0
+
+    # inet_interfaces and inet_protocols take effect with a restart only
+    # (e.g. loopback-only of marcstraube.common.mta to all)
+    - name: Configure | Read the listener settings of the active and the new main.cf
+      ansible.builtin.command:
+        argv:
+          - postconf
+          - '-c'
+          - '{{ item }}'
+          - '-h'
+          - inet_interfaces
+          - inet_protocols
+      loop:
+        - '{{ __postfix_config_dir }}'
+        - '{{ __postfix_staging_dir }}'
+      register: __postfix_listeners
+      changed_when: false
+
+    - name: Configure | Decide on a restart for changed listeners
+      ansible.builtin.set_fact:
+        __postfix_restart_needed: >-
+          {{ (__postfix_listeners.results | map(attribute='stdout') | unique | list | length) > 1 }}
+
+    # backup: every change keeps the previous file next to it, so the first
+    # run over a hand-written main.cf does not lose it
+    - name: Configure | Activate main.cf and master.cf
+      ansible.builtin.copy:
+        src: '{{ __postfix_staging_dir }}/{{ item }}'
+        dest: '{{ __postfix_config_dir }}/{{ item }}'
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+        backup: true
+      loop:
+        - 'main.cf'
+        - 'master.cf'
+      notify:
+        - Reload Postfix server
+        - Restart Postfix server

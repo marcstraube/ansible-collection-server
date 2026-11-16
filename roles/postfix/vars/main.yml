@@ -1,0 +1,371 @@
+---
+#
+# Postfix — Shared Variables
+#
+
+# Packages on every platform; the lookup package of postfix_db_type comes
+# from __postfix_db_packages. lmdb is the table type of the role on every
+# platform: EL 10 builds Postfix without hash: and btree:.
+__postfix_packages:
+  - 'postfix'
+  - 'postfix-lmdb'
+__postfix_db_packages:
+  postgresql: 'postfix-pgsql'
+  mariadb: 'postfix-mysql'
+
+# Installed packages a targeted update moves along (lookup modules,
+# documentation, perl scripts)
+__postfix_update_pattern: '^postfix(-.+)?$'
+
+# Service unit; on Debian 13 the forking unit of the main instance itself
+# (ExecStartPre runs postfix check, ExecReload postfix reload)
+__postfix_service_name: 'postfix'
+
+# Fixed by the packages of every platform
+__postfix_config_dir: '/etc/postfix'
+__postfix_queue_directory: '/var/spool/postfix'
+__postfix_data_directory: '/var/lib/postfix'
+__postfix_manpage_directory: '/usr/share/man'
+__postfix_mail_owner: 'postfix'
+__postfix_setgid_group: 'postdrop'
+
+# PID file of the master process, read for the restart after an update
+__postfix_pid_file: '{{ __postfix_queue_directory }}/pid/master.pid'
+
+# Warning of postfix check (Debian) about a copy of a system file in the
+# chroot, e.g. "postfix/postlog: warning: /var/spool/postfix/etc/hosts and
+# /etc/hosts differ". The copies are refreshed when Postfix starts (and by
+# postfix check itself, unless SYNC_CHROOT is empty in
+# /etc/default/postfix); the warning says nothing about the configuration
+# and does not fail a check.
+__postfix_chroot_differ_regex: >-
+  ^postfix/[a-z-]+: warning: {{ __postfix_queue_directory }}/\S+ and /\S+ differ$
+
+# Rendered main.cf and master.cf are checked here before they replace the
+# active files; the directory keeps the last rendered pair
+__postfix_staging_dir: '{{ __postfix_config_dir }}/ansible-staging'
+
+# Lookup tables of the role
+__postfix_sql_dir: '{{ __postfix_config_dir }}/sql'
+__postfix_sender_permissions_file: '{{ __postfix_config_dir }}/sender_permissions'
+__postfix_relay_password_file: '{{ __postfix_config_dir }}/relay_password'
+__postfix_submission_header_checks_file: '{{ __postfix_config_dir }}/submission_header_checks'
+
+# Compatibility level written to main.cf
+__postfix_compatibility_level_effective: >-
+  {{ postfix_compatibility_level | string if postfix_compatibility_level | string | length > 0
+     else __postfix_compatibility_level }}
+
+# Services that never run chrooted (upstream and Debian alike): they need
+# files outside the queue directory or root privileges
+__postfix_never_chroot:
+  - 'qmgr'
+  - 'proxymap'
+  - 'proxywrite'
+  - 'local'
+  - 'virtual'
+  - 'postlog'
+
+#
+# Aliases
+#
+
+# Markers of the role's block in the alias file
+__postfix_aliases_marker: '# {mark} ANSIBLE MANAGED BLOCK marcstraube.server.postfix'
+__postfix_aliases_block_begin: "{{ __postfix_aliases_marker | replace('{mark}', 'BEGIN') }}"
+__postfix_aliases_block_end: "{{ __postfix_aliases_marker | replace('{mark}', 'END') }}"
+
+# Prefix of a package entry the role has commented out, because
+# postfix_aliases holds the same name (postalias keeps the first of two
+# entries and only warns about the second)
+__postfix_aliases_disabled_prefix: '# marcstraube.server.postfix: '
+
+# Lines of the alias file with the package entries of the names in
+# postfix_aliases commented out (outside the role's block) and every entry
+# commented out earlier whose name is no longer in postfix_aliases
+# restored. Names
+# compare case-insensitively (Postfix lowercases the lookup key); a line
+# starting with whitespace continues the entry above it and follows it.
+# Input: __postfix_aliases_text (the current file).
+__postfix_aliases_lines: >-
+  {%- set managed = postfix_aliases.keys() | map('string') | map('lower') | list -%}
+  {%- set prefix = __postfix_aliases_disabled_prefix -%}
+  {%- set ns = namespace(lines=[], block=false, disabled=false, restored=false) -%}
+  {%- for line in __postfix_aliases_text.split('\n') -%}
+  {%- if line == __postfix_aliases_block_begin -%}
+  {%- set ns.block = true -%}
+  {%- set ns.lines = ns.lines + [line] -%}
+  {%- elif ns.block -%}
+  {%- set ns.block = line != __postfix_aliases_block_end -%}
+  {%- set ns.lines = ns.lines + [line] -%}
+  {%- elif line.startswith(prefix) -%}
+  {%- set original = line[prefix | length:] -%}
+  {%- if original is match('[ \t]') -%}
+  {%- set ns.lines = ns.lines + [original if ns.restored else line] -%}
+  {%- else -%}
+  {%- set ns.restored = original.split(':') | first | trim | lower not in managed -%}
+  {%- set ns.lines = ns.lines + [original if ns.restored else line] -%}
+  {%- endif -%}
+  {%- set ns.disabled = false -%}
+  {%- elif line is match('[ \t]+\S') -%}
+  {%- set ns.lines = ns.lines + [(prefix ~ line) if ns.disabled else line] -%}
+  {%- elif line is match('[^#\s][^:]*:') -%}
+  {%- set ns.disabled = line.split(':') | first | trim | lower in managed -%}
+  {%- set ns.restored = false -%}
+  {%- set ns.lines = ns.lines + [(prefix ~ line) if ns.disabled else line] -%}
+  {%- else -%}
+  {%- set ns.disabled = false -%}
+  {%- set ns.restored = false -%}
+  {%- set ns.lines = ns.lines + [line] -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {{ ns.lines }}
+
+#
+# Database
+#
+
+# Postfix lookup type per postfix_db_type
+__postfix_db_map_types:
+  postgresql: 'pgsql'
+  mariadb: 'mysql'
+__postfix_db_map_type: '{{ __postfix_db_map_types[postfix_db_type] | default("") }}'
+
+# Connection through a unix socket: a socket path (PostgreSQL: the socket
+# directory), or 'localhost' with MariaDB (the convention of the MySQL
+# clients)
+__postfix_db_socket: >-
+  {{ postfix_db_host if postfix_db_host is match('/')
+     else (__postfix_mariadb_socket
+           if postfix_db_type == 'mariadb' and postfix_db_host == 'localhost'
+           else '') }}
+
+# PostgreSQL: one connection URI with every parameter in the query string,
+# so a socket directory, the port of a socket and TLS need no other syntax.
+# Postfix passes a postgresql:// URI to libpq unchanged (user, password and
+# dbname of the file are not used then) and writes it into the log on a
+# connection error, so the password stays in a libpq password file. The
+# values are percent-encoded. libpq reads the file as the postfix user
+# (proxymap) only without any group or other permission, so it belongs to
+# that user, in the data directory: postfix check (Debian) warns about
+# files below /etc/postfix not owned by root.
+__postfix_pgsql_passfile: '{{ __postfix_data_directory }}/pgpass'
+__postfix_pgsql_uri: >-
+  {{ 'postgresql:///' ~ postfix_db_name ~ '?'
+     ~ ([['host', postfix_db_host], ['port', postfix_db_port | string],
+         ['user', postfix_db_user], ['passfile', __postfix_pgsql_passfile]]
+        + ([['sslmode', 'verify-full'], ['sslrootcert', postfix_db_tls_ca_file]]
+           if postfix_db_tls | bool else [])) | map('map', 'urlencode') | map('join', '=') | join('&') }}
+
+# MariaDB: a unix socket or host:port
+__postfix_mysql_hosts: >-
+  {{ ('unix:' ~ __postfix_db_socket) if __postfix_db_socket | length > 0
+     else ('inet:' ~ postfix_db_host ~ ':' ~ postfix_db_port | string) }}
+
+# SQL lookup tables in the order of main.cf. Every query reads the
+# PostfixAdmin schema and only active rows of active domains.
+__postfix_sql_default_queries:
+  # Mail domains; backup MX domains are relayed by another setup, not
+  # delivered here
+  virtual_mailbox_domains: >-
+    SELECT domain FROM domain
+    WHERE domain = '%s' AND active = '1' AND backupmx = '0'
+  # Mailboxes; the value is not used, Dovecot owns the mail path
+  virtual_mailbox_maps: >-
+    SELECT mailbox.maildir FROM mailbox
+    JOIN domain ON domain.domain = mailbox.domain
+    WHERE mailbox.username = '%s' AND mailbox.active = '1' AND domain.active = '1'
+  # Aliases, including the alias of every mailbox to itself that
+  # PostfixAdmin writes and the catch-all '@domain'
+  virtual_alias_maps: >-
+    SELECT alias.goto FROM alias
+    JOIN domain ON domain.domain = alias.domain
+    WHERE alias.address = '%s' AND alias.active = '1' AND domain.active = '1'
+  # Addresses of an alias domain, rewritten to the target domain
+  virtual_alias_domain_maps: >-
+    SELECT alias.goto FROM alias_domain
+    JOIN alias ON alias.address = CONCAT('%u', '@', alias_domain.target_domain)
+    WHERE alias_domain.alias_domain = '%d' AND alias_domain.active = '1' AND alias.active = '1'
+  # Catch-all of the target domain for an alias domain
+  virtual_alias_domain_catchall_maps: >-
+    SELECT alias.goto FROM alias_domain
+    JOIN alias ON alias.address = CONCAT('@', alias_domain.target_domain)
+    WHERE alias_domain.alias_domain = '%d' AND alias_domain.active = '1' AND alias.active = '1'
+  # Owners of a sender address: the mailbox itself and the targets of an
+  # alias (an alias owner may send as the alias)
+  sender_login_maps: >-
+    SELECT goto FROM alias
+    WHERE address = '%s' AND active = '1'
+    AND domain IN (SELECT domain FROM domain WHERE active = '1')
+    UNION
+    SELECT username FROM mailbox
+    WHERE username = '%s' AND active = '1'
+    AND domain IN (SELECT domain FROM domain WHERE active = '1')
+  # The same for an address of an alias domain
+  sender_login_alias_domain_maps: >-
+    SELECT alias.goto FROM alias_domain
+    JOIN alias ON alias.address = CONCAT('%u', '@', alias_domain.target_domain)
+    WHERE alias_domain.alias_domain = '%d' AND alias_domain.active = '1' AND alias.active = '1'
+    UNION
+    SELECT mailbox.username FROM alias_domain
+    JOIN mailbox ON mailbox.username = CONCAT('%u', '@', alias_domain.target_domain)
+    WHERE alias_domain.alias_domain = '%d' AND alias_domain.active = '1' AND mailbox.active = '1'
+
+# Queries with the overrides of postfix_sql_queries
+__postfix_sql_queries: >-
+  {{ __postfix_sql_default_queries
+     | combine(postfix_sql_queries if postfix_sql_queries is mapping else {}) }}
+
+# Lookup table of one SQL file, read through proxymap: the services may run
+# chrooted (Debian) and proxymap keeps one connection pool
+__postfix_sql_table: 'proxy:{{ __postfix_db_map_type }}:{{ __postfix_sql_dir }}/'
+
+# Every role-written main.cf key that names an SQL table
+__postfix_sql_tables:
+  virtual_mailbox_domains:
+    - 'virtual_mailbox_domains'
+  virtual_mailbox_maps:
+    - 'virtual_mailbox_maps'
+  virtual_alias_maps:
+    - 'virtual_alias_maps'
+    - 'virtual_alias_domain_maps'
+    - 'virtual_alias_domain_catchall_maps'
+
+# Sender owners: the PostfixAdmin queries and postfix_sender_permissions in
+# one unionmap, so an address with an owner in the database (a shared
+# mailbox owns itself) still gets the extra logins of the local table
+__postfix_sender_login_maps: >-
+  unionmap:{{ '{' }}{{ __postfix_sql_table }}sender_login_maps.cf,
+  {{ __postfix_sql_table }}sender_login_alias_domain_maps.cf,
+  lmdb:{{ __postfix_sender_permissions_file }}{{ '}' }}
+
+#
+# Outbound
+#
+
+# A relay host with a password requires an authenticated connection: 'none',
+# 'may' and 'dane' (which falls back to 'may' without TLSA records) are
+# raised to 'secure', which verifies the certificate against the relay host
+# name (smtp_tls_secure_cert_match: nexthop, dot-nexthop). 'encrypt' would
+# not authenticate the relay host, an active attacker could take the
+# password. Any other level set explicitly ('encrypt' for a relay host with
+# a self-signed certificate, 'verify', 'dane-only', ...) stays.
+__postfix_relay_auth: '{{ postfix_relayhost_password | length > 0 }}'
+__postfix_smtp_tls_security_level: >-
+  {{ 'secure'
+     if __postfix_relay_auth | bool and postfix_smtp_tls_security_level in ['none', 'may', 'dane']
+     else postfix_smtp_tls_security_level }}
+
+#
+# Validation
+#
+
+__postfix_smtp_tls_security_levels:
+  - 'none'
+  - 'may'
+  - 'encrypt'
+  - 'dane'
+  - 'dane-only'
+  - 'fingerprint'
+  - 'verify'
+  - 'secure'
+__postfix_milter_default_actions:
+  - 'accept'
+  - 'reject'
+  - 'tempfail'
+  - 'quarantine'
+
+# 'inet:<host>:<port>' or 'unix:<path>' (milters, policy services, LMTP)
+__postfix_endpoint_regex: '^(inet:\S+:[0-9]{1,5}|unix:\S+)$'
+
+# Fully qualified host name: at least two labels of letters, digits and
+# hyphens, the last one starting with a letter
+__postfix_hostname_regex: >-
+  (?i)^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])$
+
+# IPv4 or IPv6 address (the form only)
+__postfix_address_regex: '^([0-9]{1,3}[.]){3}[0-9]{1,3}$|^[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*$'
+
+# A value written into main.cf, master.cf -o or a lookup table line: no
+# line breaks
+__postfix_line_regex: '^[^\r\n]*$'
+
+#
+# Milters
+#
+
+# Milters as endpoints to probe: inet milters on host and port, unix
+# milters as socket file (a relative path is below the queue directory)
+__postfix_milter_probes: >-
+  {%- set ns = namespace(probes=[]) -%}
+  {%- for milter in postfix_milters -%}
+  {%- if milter is match('^inet:') -%}
+  {%- set address = milter | regex_replace('^inet:', '') -%}
+  {%- set ns.probes = ns.probes + [{
+        'milter': milter, 'type': 'inet',
+        'host': address | regex_replace(':[0-9]+$', '') | regex_replace('^\[(.*)\]$', '\1'),
+        'port': address | regex_search('[0-9]+$') | int}] -%}
+  {%- else -%}
+  {%- set path = milter | regex_replace('^unix:', '') -%}
+  {%- set ns.probes = ns.probes + [{
+        'milter': milter, 'type': 'unix',
+        'path': path if path is match('/') else __postfix_queue_directory ~ '/' ~ path}] -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {{ ns.probes }}
+
+#
+# DNS
+#
+
+# Addresses the A, AAAA and PTR records must hold: postfix_dns_addresses, or
+# the default IPv4 and IPv6 address of the host
+__postfix_dns_addresses: >-
+  {{ postfix_dns_addresses if postfix_dns_addresses | length > 0
+     else ([ansible_facts['default_ipv4']['address'] | default('')]
+           + [ansible_facts['default_ipv6']['address'] | default('')]) | select | list }}
+
+# Expected records with their zone file line. Computed without any lookup,
+# so they are printed even when the check is off or fails. 'value' is the
+# expected answer: the MX target, the address, the PTR target or the SPF
+# text.
+__postfix_dns_records: >-
+  {%- set ns = namespace(records=[]) -%}
+  {%- set host = postfix_myhostname | lower -%}
+  {%- for domain in postfix_dns_domains -%}
+  {%- set ns.records = ns.records + [{
+        'name': domain, 'type': 'MX', 'query': domain, 'value': host,
+        'record': domain ~ '. IN MX 10 ' ~ host ~ '.'}] -%}
+  {%- if postfix_dns_spf | length > 0 -%}
+  {%- set ns.records = ns.records + [{
+        'name': domain, 'type': 'TXT', 'query': domain, 'value': postfix_dns_spf,
+        'record': domain ~ '. IN TXT "' ~ postfix_dns_spf ~ '"'}] -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {%- for address in __postfix_dns_addresses -%}
+  {%- set type = 'AAAA' if ':' in address else 'A' -%}
+  {%- set ns.records = ns.records + [{
+        'name': host, 'type': type, 'query': host, 'value': address | lower,
+        'record': host ~ '. IN ' ~ type ~ ' ' ~ address}] -%}
+  {%- endfor -%}
+  {%- for address in __postfix_dns_addresses -%}
+  {%- set ns.records = ns.records + [{
+        'name': address, 'type': 'PTR', 'query': address, 'value': host,
+        'record': address ~ ' IN PTR ' ~ host ~ '.'}] -%}
+  {%- endfor -%}
+  {{ ns.records }}
+
+# Arguments of the community.general.dig lookup. Missing records, empty
+# answers and a resolver that does not answer come back as values
+# ('NXDOMAIN', ''), never as a failure; the lookup only fails on its own
+# errors (dnspython missing, a resolver name that does not resolve). The
+# port option is only passed when it differs from 53, so community.general
+# releases older than 9.5.0 keep working with the default.
+__postfix_dns_servers: >-
+  {{ ['@' ~ postfix_dns_resolver] if postfix_dns_resolver | length > 0 else [] }}
+__postfix_dns_options: >-
+  {{
+    {'fail_on_error': false, 'real_empty': false}
+    | combine({'port': postfix_dns_resolver_port | int}
+              if postfix_dns_resolver_port | int != 53 else {})
+  }}
