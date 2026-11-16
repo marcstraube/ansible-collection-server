@@ -28,6 +28,11 @@ __apache_tools_packages:
 __apache_ssl_packages:
   - mod_ssl
 
+# HTTP/2 package, a weak dependency of httpd that is missing where weak
+# dependencies are not installed
+__apache_http2_packages:
+  - mod_http2
+
 # Ports the SELinux policy labels http_port_t out of the box; listen ports
 # outside this list get the label from the role.
 __apache_selinux_default_ports:

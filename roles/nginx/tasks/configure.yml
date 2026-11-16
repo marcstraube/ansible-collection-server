@@ -1,4 +1,73 @@
 ---
+# nginx 1.25.1 introduced the http2 directive and deprecated the http2
+# parameter of listen. The installed binary decides which of the two the
+# templates render. In check mode before the first install there is no
+# binary yet; the directive is assumed then.
+- name: Configure | Read the installed nginx version
+  ansible.builtin.command:
+    argv:
+      - nginx
+      - -v
+  register: __nginx_binary_version
+  changed_when: false
+  failed_when:
+    - __nginx_binary_version.rc != 0
+    - not ansible_check_mode
+  check_mode: false
+
+- name: Configure | Select the HTTP/2 syntax
+  ansible.builtin.set_fact:
+    __nginx_version_installed: '{{ __nginx_version_reported }}'
+    __nginx_http2_directive: >-
+      {{ __nginx_version_reported | length == 0
+         or __nginx_version_reported is version('1.25.1', '>=') }}
+  vars:
+    # nginx -v writes "nginx version: nginx/1.26.3" to stderr
+    __nginx_version_reported: >-
+      {{ (__nginx_binary_version.stderr | default('')
+          | regex_search('nginx/([0-9.]+)', '\1') or ['']) | first }}
+
+# Before 1.25.1 nginx merges the parameters of all listen directives on one
+# port, so the http2 parameter of one site switches HTTP/2 on for every
+# other site on that port, the default site included. Sites on one port
+# must agree; a disagreement fails here, before any configuration change.
+- name: Configure | Assert the sites on one port agree on HTTP/2 (nginx before 1.25.1)
+  ansible.builtin.assert:
+    that:
+      - __nginx_http2_conflicts | length == 0
+    fail_msg: >-
+      nginx {{ __nginx_version_installed }} predates the http2 directive
+      (1.25.1): the http2 parameter of listen applies to every site on a
+      port. {{ __nginx_http2_conflicts | join('; ') }}. Give the sites on
+      that port the same http2 value or move one to a listen_ssl port of
+      its own.
+    quiet: true
+  vars:
+    __nginx_http2_conflicts: >-
+      {%- set listeners = [] -%}
+      {%- if nginx_default_site_enabled | bool -%}
+        {%- set _ = listeners.append({'site': 'default site', 'port': '443',
+                                     'http2': nginx_http2_enabled | bool}) -%}
+      {%- endif -%}
+      {%- for site in nginx_sites
+         if site.enabled | default(true) | bool
+            and site.ssl is defined and site.ssl.enabled | default(false) | bool -%}
+        {%- set _ = listeners.append({'site': site.name,
+                                     'port': site.listen_ssl | default(443) | string,
+                                     'http2': site.http2 | default(nginx_http2_enabled) | bool}) -%}
+      {%- endfor -%}
+      {%- set result = [] -%}
+      {%- for port, group in listeners | groupby('port') -%}
+        {%- if group | map(attribute='http2') | unique | list | length > 1 -%}
+          {%- set _ = result.append('Port ' ~ port ~ ': HTTP/2 on for '
+                                   ~ group | selectattr('http2') | map(attribute='site') | join(', ')
+                                   ~ ', off for '
+                                   ~ group | rejectattr('http2') | map(attribute='site') | join(', ')) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ result }}
+  when: not (__nginx_http2_directive | bool)
+
 # nginx connects to a backend on any port only with httpd_can_network_connect;
 # without it the policy only allows ports in http_port_t. A proxy site reaches
 # its backend with or without an upstream definition, the Authentik location

@@ -127,6 +127,111 @@ certificate issued or renewed inside the same play takes effect in that run.
 Renewal through the certbot timer runs outside of Ansible — set
 `certbot_nginx_enabled` for that path.
 
+### HTTP/2
+
+| Variable              | Default | Description                        |
+| --------------------- | ------- | ---------------------------------- |
+| `nginx_http2_enabled` | `true`  | Default for HTTP/2 over TLS (`h2`) |
+
+`nginx_http2_enabled` sets the default for HTTP/2 over TLS (`h2`) of every
+HTTPS site and of the default site; plain HTTP ports never get HTTP/2. A site
+overrides it with `http2: true` or `http2: false`:
+
+```yaml
+nginx_http2_enabled: true
+nginx_sites:
+  - name: 'www.example.com'
+    server_names:
+      - 'www.example.com'
+    root: '/var/www/example.com'
+    ssl:
+      enabled: true
+      certificate: '/etc/letsencrypt/live/www.example.com/fullchain.pem'
+      certificate_key: '/etc/letsencrypt/live/www.example.com/privkey.pem'
+  - name: 'intranet.example.com'
+    server_names:
+      - 'intranet.example.com'
+    type: 'proxy'
+    proxy_pass: 'http://127.0.0.1:8080'
+    http2: false
+    ssl:
+      enabled: true
+      certificate: '/etc/letsencrypt/live/intranet.example.com/fullchain.pem'
+      certificate_key: '/etc/letsencrypt/live/intranet.example.com/privkey.pem'
+```
+
+A site without the key inherits the default; changing
+`nginx_http2_enabled` changes every such site. The key accepts `true` and
+`false` only. `nginx_http2_enabled` also accepts the strings `true`,
+`false`, `yes`, `no`, `on`, `off`, `1` and `0` in any case, which is what
+`-e` passes. Anything else fails the run before any change. How the setting
+is rendered depends on the installed nginx, which the role reads with
+`nginx -v` after the package install:
+
+- **nginx 1.25.1 and later:** the `http2` directive. Every HTTPS server block
+  of a site with HTTP/2 on (main block and www redirect) gets `http2 on;`,
+  the default site's 443 block when `nginx_http2_enabled` is on; nothing goes
+  into the `http` block. A directive there would also accept HTTP/2 with
+  prior knowledge (`h2c`) on plain HTTP ports, where nginx decides before it
+  knows the requested site. The deprecated `http2` parameter of `listen` is
+  no longer rendered, so server blocks on the same port that the role does
+  not write no longer get HTTP/2 from the role's sites; they need their own
+  `http2 on;`. The reverse holds as well: a server block of your own that
+  still uses `listen … http2` switches HTTP/2 on for the whole address and
+  port, so role sites there with `http2: false` lose their setting, and
+  `nginx -t` may warn about redefined protocol options. Drop the parameter
+  from such blocks and give them `http2 on;` instead. nginx selects the
+  server block by SNI before it negotiates the protocol, so sites on the
+  same port can differ; a client without SNI gets the setting of the default
+  server of that address and port: the default site on 443 while
+  `nginx_default_site_enabled` is on, otherwise the server block marked
+  `default_server` there, or the first one nginx loaded for it.
+- **Before nginx 1.25.1:** the `http2` parameter of `listen`, rendered for
+  every HTTPS listener of a site with HTTP/2 on. nginx merges the parameters
+  of all `listen` directives on one port, so a single site with `http2`
+  switches HTTP/2 on for every other site on that port, the default site
+  (port 443, follows `nginx_http2_enabled`) included. The role therefore
+  fails when enabled HTTPS sites on one port disagree, and names the port and
+  the sites. The check needs the installed binary, so it runs after the
+  package install and before any configuration change. Give the sites the
+  same value, or move one to a `listen_ssl` port of its own.
+
+The nginx version per platform at the time of writing:
+
+| Platform      | nginx                                       | HTTP/2 syntax                   |
+| ------------- | ------------------------------------------- | ------------------------------- |
+| Arch Linux    | 1.30 (`nginx`), 1.31 (`nginx-mainline`)     | directive                       |
+| Debian Trixie | 1.26                                        | directive                       |
+| EL 9          | 1.20 (AppStream default)                    | `listen` parameter              |
+| EL 9          | 1.22, 1.24, 1.26 (AppStream module streams) | parameter, parameter, directive |
+| EL 10         | 1.26                                        | directive                       |
+
+The role installs `nginx` as the package manager resolves it. On EL 9 a
+module stream enabled beforehand (`dnf module enable nginx:1.26`) is
+installed instead of the default 1.20, which brings the directive.
+
+Reasons to switch HTTP/2 off for a single site while the others keep it:
+
+- Connection-based authentication (NTLM, Negotiate) binds the login to the
+  client connection, which HTTP/2 shares between requests.
+- Backends or clients that do not cope with HTTP/2.
+- A vulnerability in the HTTP/2 implementation: set `nginx_http2_enabled:
+  false` with no site enabling HTTP/2 until an update is available. For an
+  immediate run, `--tags nginx -e nginx_http2_enabled=false` does the same.
+
+`http2: false` on a site that shares its port with a site with HTTP/2 on is
+no hard guarantee: a client can send the SNI of the other site, or none at
+all when the default server of that port has HTTP/2 on, and still speak
+HTTP/2 to nginx. Browsers also reuse an HTTP/2 connection for other names
+covered by the same certificate, so the site can be reached over HTTP/2 that
+way; nginx refuses such a request (421) only when the sites use
+`ssl_verify_client`. Only HTTP/2 off globally, with no site enabling it,
+removes the HTTP/2 attack surface.
+
+Client certificates checked per location, a reason to switch HTTP/2 off on
+Apache, do not apply: nginx never renegotiates TLS and checks client
+certificates per server block (`ssl_verify_client`) only.
+
 ### Security Headers
 
 | Variable                         | Default    | Description                    |
@@ -247,8 +352,10 @@ without it nginx cannot bind the port. A port of another type, such as 3306
 place when a port is removed from the configuration. Outbound connections
 are covered under [SELinux](#selinux).
 
-The default site listens on 80 and on `443 ssl http2`, the same options as
-the SSL sites, so the sites can share port 443 with it.
+The default site listens on 80 and on `443 ssl` (before nginx 1.25.1
+`443 ssl http2` while `nginx_http2_enabled` is on), the same options as the
+SSL sites, so the sites can share port 443 with it. Its HTTP/2 follows
+`nginx_http2_enabled` (see [HTTP/2](#http2)).
 
 ### Writable Paths
 
