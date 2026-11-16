@@ -191,6 +191,122 @@
         success_msg: 'The default site and the sites on port 443 use the same listen options'
 
     #
+    # HTTP/2 (default on, test-http2-off switches it off)
+    #
+
+    - name: Verify | Read the installed nginx version
+      ansible.builtin.command:
+        argv:
+          - nginx
+          - -v
+      register: __verify_nginx_version
+      changed_when: false
+
+    - name: Verify | Read the HTTP/2 relevant configuration files
+      ansible.builtin.slurp:
+        src: '{{ item }}'
+      loop:
+        - '{{ __nginx_config_file }}'
+        - '{{ __nginx_sites_dir }}/default.conf'
+        - '{{ __nginx_sites_dir }}/test-redirect-default.conf'
+        - '{{ __nginx_sites_dir }}/test-http2-off.conf'
+      register: __verify_http2_files
+
+    # From 1.25.1 every HTTPS server block with HTTP/2 on carries the
+    # directive and the http block none; before that the listen parameter
+    # marks every HTTPS listener with HTTP/2 on.
+    - name: Verify | Assert the HTTP/2 syntax matches the nginx version
+      ansible.builtin.assert:
+        that:
+          - __main is not search('http2 o')
+          - >-
+            (__default is search('(?m)^\s+http2 on;$') and __default is not search('ssl http2'))
+            if __directive else (__default is search('listen 443 ssl http2 default_server;'))
+          - >-
+            (__inherit is search('(?m)^\s+http2 on;$') and __inherit is not search(' ssl http2'))
+            if __directive else (__inherit is search('listen 443 ssl http2;'))
+          - >-
+            (__off is not search('http2 o') and __off is not search(' ssl http2'))
+            if __directive
+            else (__off is search('listen 8443 ssl;') and __off is not search('ssl http2|http2 o'))
+        fail_msg: >-
+          Unexpected HTTP/2 rendering for nginx {{ __version }}
+          (directive: {{ __directive }})
+        success_msg: >-
+          nginx {{ __version }} gets the {{ 'directive' if __directive else 'listen parameter' }}
+      vars:
+        __version: >-
+          {{ (__verify_nginx_version.stderr | regex_search('nginx/([0-9.]+)', '\1') or ['0']) | first }}
+        __directive: "{{ __version is version('1.25.1', '>=') }}"
+        __files: "{{ __verify_http2_files.results | map(attribute='content') | map('b64decode') | list }}"
+        __main: '{{ __files[0] }}'
+        __default: '{{ __files[1] }}'
+        __inherit: '{{ __files[2] }}'
+        __off: '{{ __files[3] }}'
+
+    # After an h2 handshake the server sends a binary SETTINGS frame, which
+    # is not valid text; only the ALPN line is kept.
+    - name: Verify | Negotiate the protocol with each HTTPS site
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          openssl s_client -connect 127.0.0.1:{{ item.port }} -servername {{ item.name }} \
+            -alpn h2,http/1.1 < /dev/null 2> /dev/null \
+            | grep -a -E '^(ALPN protocol|No ALPN)'
+        executable: /bin/bash
+      loop:
+        - name: 'redirect-default.example.com'
+          port: 443
+        - name: 'http2-off.example.com'
+          port: 8443
+      loop_control:
+        label: '{{ item.name }}'
+      register: __verify_alpn
+      changed_when: false
+
+    - name: Verify | Assert the ALPN result per site
+      ansible.builtin.assert:
+        that:
+          - __verify_alpn_result['redirect-default.example.com'] == 'h2'
+          - __verify_alpn_result['http2-off.example.com'] == 'http/1.1'
+        fail_msg: >-
+          Expected h2 for redirect-default.example.com and http/1.1 for
+          http2-off.example.com, got {{ __verify_alpn_result }}
+        success_msg: 'The inheriting site negotiates h2, the site with http2: false http/1.1'
+      vars:
+        __verify_alpn_result: >-
+          {{ dict(__verify_alpn.results | map(attribute='item') | map(attribute='name')
+                  | zip(__verify_alpn.results | map(attribute='stdout')
+                        | map('regex_search', 'ALPN protocol: (\S+)', '\1')
+                        | map('default', ['none'], true) | map('first'))) }}
+
+    # Plain HTTP ports must not speak HTTP/2 with prior knowledge (h2c): the
+    # connection preface must get an HTTP/1 error, not a SETTINGS frame.
+    - name: Verify | Send an HTTP/2 connection preface to port 80
+      ansible.builtin.command:
+        argv:
+          - '{{ ansible_facts["python"]["executable"] }}'
+          - '-c'
+          - |
+            import socket
+            s = socket.create_connection(('127.0.0.1', 80), timeout=5)
+            s.sendall(b'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n' + bytes([0, 0, 0, 4, 0, 0, 0, 0, 0]))
+            try:
+                data = s.recv(64)
+            except socket.timeout:
+                data = b''
+            print('h2' if len(data) >= 9 and data[3] == 4 else 'not h2: ' + repr(data[:20]))
+      register: __verify_h2c
+      changed_when: false
+
+    - name: Verify | Assert port 80 refuses HTTP/2 with prior knowledge
+      ansible.builtin.assert:
+        that:
+          - __verify_h2c.stdout is match('not h2')
+        fail_msg: 'Port 80 answered the HTTP/2 preface with HTTP/2: {{ __verify_h2c.stdout }}'
+        success_msg: '{{ __verify_h2c.stdout }}'
+
+    #
     # Service Verification
     #
 

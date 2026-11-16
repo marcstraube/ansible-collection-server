@@ -33,9 +33,9 @@
 
     # Security headers are set globally in security.conf
 
-{% if apache_http2_enabled %}
-    # HTTP/2
-    Protocols h2 http/1.1
+{% if item.http2 is defined %}
+    # HTTP/2 {{ 'on' if item.http2 | bool else 'off' }} for this vhost, whatever the server default
+    Protocols {{ 'h2 http/1.1' if item.http2 | bool else 'http/1.1' }}
 
 {% endif %}
 {% include 'vhost_php_fpm.conf.j2' %}

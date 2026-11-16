@@ -101,6 +101,42 @@
   tags:
     - always
 
+# The server default decides the Protocols line of the main configuration
+# and whether mod_http2 is loaded. Besides true and false it accepts the
+# strings the bool filter maps unambiguously, since -e apache_http2_enabled=false
+# passes a string; anything else, such as a typo, fails before any change.
+- name: Main | Validate the HTTP/2 server default
+  ansible.builtin.assert:
+    that:
+      - >-
+        apache_http2_enabled is boolean
+        or (apache_http2_enabled is integer and apache_http2_enabled in [0, 1])
+        or (apache_http2_enabled is string
+            and apache_http2_enabled | lower in ['true', 'false', 'yes', 'no', 'on', 'off', '1', '0'])
+    fail_msg: "apache_http2_enabled must be true or false, got '{{ apache_http2_enabled }}'"
+    quiet: true
+  when: apache_enabled | bool
+  tags:
+    - always
+
+# The per-vhost value decides the Protocols line of the vhost and whether
+# mod_http2 is loaded, so only true and false are accepted. Fails before any
+# change.
+- name: Main | Validate the HTTP/2 setting of the SSL vhosts
+  ansible.builtin.assert:
+    that:
+      - item.http2 is boolean
+    fail_msg: >-
+      apache_vhosts_ssl: http2 of vhost '{{ item.server_name | default('') }}'
+      must be true or false, got '{{ item.http2 }}'
+    quiet: true
+  loop: "{{ apache_vhosts_ssl | selectattr('http2', 'defined') | list }}"
+  loop_control:
+    label: '{{ item.server_name | default(item) }}'
+  when: apache_enabled | bool
+  tags:
+    - always
+
 - name: Main | Import install tasks
   ansible.builtin.import_tasks: install.yml
   when: apache_enabled | bool

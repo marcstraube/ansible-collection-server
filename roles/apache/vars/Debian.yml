@@ -53,6 +53,13 @@ __apache_modules_package_defaults:
   - 'setenvif'
   - 'status'
 
+# Feature modules the role disables again once no feature needs them. The
+# others stay enabled, since configuration outside the role may use them;
+# mod_http2 is listed so that HTTP/2 off unloads it, which is the only
+# complete way to remove the HTTP/2 attack surface.
+__apache_modules_feature_disable:
+  - 'http2'
+
 # Additional packages
 __apache_utils_packages:
   - apache2-utils

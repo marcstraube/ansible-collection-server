@@ -196,6 +196,17 @@
     - apache_ssl_enabled | bool
     - __apache_ssl_packages is defined
 
+- name: Install | HTTP/2 module (RedHat)
+  ansible.builtin.package:
+    name: '{{ __apache_http2_packages }}'
+    state: present
+  retries: 3
+  delay: 5
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - "'http2' in __apache_modules"
+    - __apache_http2_packages is defined
+
 - name: Install | SELinux management tools (RedHat)
   ansible.builtin.package:
     name: '{{ __apache_selinux_packages }}'

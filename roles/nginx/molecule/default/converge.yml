@@ -59,12 +59,26 @@
           enabled: true
           certificate: '/etc/nginx/ssl/test.crt'
           certificate_key: '/etc/nginx/ssl/test.key'
-      # HTTPS on 443: the redirect URL carries no port
+      # HTTPS on 443: the redirect URL carries no port. Inherits HTTP/2 from
+      # nginx_http2_enabled (default true).
       - name: 'test-redirect-default'
         server_names:
           - 'redirect-default.example.com'
         root: '/var/www/html'
         http_redirect: true
+        ssl:
+          enabled: true
+          certificate: '/etc/nginx/ssl/test.crt'
+          certificate_key: '/etc/nginx/ssl/test.key'
+      # Switches HTTP/2 off for itself. On a port of its own, since nginx
+      # before 1.25.1 (EL 9) applies the listen parameter to the whole port;
+      # side_effect.yml covers a shared port.
+      - name: 'test-http2-off'
+        server_names:
+          - 'http2-off.example.com'
+        root: '/var/www/html'
+        listen_ssl: 8443
+        http2: false
         ssl:
           enabled: true
           certificate: '/etc/nginx/ssl/test.crt'

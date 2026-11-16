@@ -197,6 +197,18 @@ nginx_ssl_stapling_verify: true
 nginx_ssl_dhparam: ''
 
 #
+# HTTP/2
+#
+
+# Default for HTTP/2 over TLS (h2) of the HTTPS sites and the default site;
+# plain HTTP ports never get HTTP/2. A site overrides it with its own http2 key
+# (true or false); without the key it inherits this value. From nginx 1.25.1
+# the role renders 'http2 on;' into every HTTPS server block with HTTP/2 on;
+# older nginx only knows the http2 parameter of listen, which applies to every
+# site on the same port, so sites on one port must agree there.
+nginx_http2_enabled: true
+
+#
 # Security Headers
 #
 
@@ -397,6 +409,7 @@ nginx_default_site_ssl_certificate_key: ''
 #       - 'full.example.com'
 #     listen: 80  # default: 80
 #     listen_ssl: 443  # default: 443
+#     http2: false  # default: nginx_http2_enabled
 #     root: '/var/www/full'
 #     index: 'index.html'
 #     type: 'static'  # static, proxy, php, custom

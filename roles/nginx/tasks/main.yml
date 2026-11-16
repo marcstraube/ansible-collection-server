@@ -101,6 +101,42 @@
   tags:
     - always
 
+# The default decides the http2 directive or listen parameter of every
+# inheriting site and of the default site. Besides true and false it accepts
+# the strings the bool filter maps unambiguously, since
+# -e nginx_http2_enabled=false passes a string; anything else, such as a
+# typo, fails before any change.
+- name: Main | Validate the HTTP/2 default
+  ansible.builtin.assert:
+    that:
+      - >-
+        nginx_http2_enabled is boolean
+        or (nginx_http2_enabled is integer and nginx_http2_enabled in [0, 1])
+        or (nginx_http2_enabled is string
+            and nginx_http2_enabled | lower in ['true', 'false', 'yes', 'no', 'on', 'off', '1', '0'])
+    fail_msg: "nginx_http2_enabled must be true or false, got '{{ nginx_http2_enabled }}'"
+    quiet: true
+  when: nginx_enabled | bool
+  tags:
+    - always
+
+# The per-site value decides the http2 directive or listen parameter of the
+# site, so only true and false are accepted. Fails before any change.
+- name: Main | Validate the HTTP/2 setting of the sites
+  ansible.builtin.assert:
+    that:
+      - item.http2 is boolean
+    fail_msg: >-
+      nginx_sites: http2 of site '{{ item.name | default('') }}' must be true
+      or false, got '{{ item.http2 }}'
+    quiet: true
+  loop: "{{ nginx_sites | selectattr('http2', 'defined') | list }}"
+  loop_control:
+    label: '{{ item.name | default(item) }}'
+  when: nginx_enabled | bool
+  tags:
+    - always
+
 - name: Main | Import install tasks
   ansible.builtin.import_tasks: install.yml
   when: nginx_enabled | bool

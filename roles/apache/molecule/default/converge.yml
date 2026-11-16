@@ -7,7 +7,9 @@
     apache_enabled: true
     apache_service_enabled: true
     apache_mpm_module: 'event'
-    apache_http2_enabled: false
+    # Server default on; php.example.local below switches it off for itself,
+    # present.example.local inherits it. verify.yml checks the ALPN result.
+    apache_http2_enabled: true
     apache_server_name: 'testsite.local'
     apache_server_admin: 'admin@testsite.local'
     # 127.0.0.2 is a loopback address distinct from 127.0.0.1: the bound vhost
@@ -120,12 +122,14 @@
         certificate_key_file: '/etc/ssl/test/missing.key'
         certificate_chain_file: ''
       # Exercises the PHP-FPM handler end to end; verify.yml requests a script
-      # from this vhost and asserts the response is output, not source.
+      # from this vhost and asserts the response is output, not source. It
+      # also overrides the HTTP/2 server default on the shared *:443.
       - server_name: 'php.example.local'
         document_root: '/var/www/php-test'
         certificate_file: '/etc/ssl/test/present.crt'
         certificate_key_file: '/etc/ssl/test/present.key'
         certificate_chain_file: ''
+        http2: false
     # Exclusive mode prunes the 'zz-orphan' fixture planted in prepare.yml;
     # the 'zz-foreign' (no managed header) and 'zz-keep' (keep-listed)
     # fixtures must survive.
@@ -295,18 +299,82 @@
     # Switching SSL off removes mod_ssl from the main configuration while the
     # SSL vhosts that use it are only pruned later in the same run (exclusive
     # mode). The configuration test must run after the prune, or this include
-    # fails on the stale vhosts.
-    - name: Converge | Switch SSL off and drop the SSL vhosts  # noqa: role-name[path]
+    # fails on the stale vhosts. With HTTP/2 off as well and no SSL vhost
+    # left, nothing enables HTTP/2 and mod_http2 must be unloaded. HTTP/2 is
+    # switched off with the string 'false', as -e apache_http2_enabled=false
+    # passes it; the next step covers the boolean.
+    - name: Converge | Switch SSL and HTTP/2 off and drop the SSL vhosts  # noqa: role-name[path]
       ansible.builtin.include_role:
         name: '{{ playbook_dir }}/../..'
       vars:
         apache_limit_nofile: ''
         apache_mpm_server_limit: 24
         apache_ssl_enabled: false
+        apache_http2_enabled: 'false'
         apache_vhosts_ssl: []
 
     - name: Converge | Run handlers for the SSL removal
       ansible.builtin.meta: flush_handlers
+
+    # The EL apachectl wrapper rejects -M; Debian's apache2 binary needs the
+    # environment apache2ctl sets up.
+    - name: Converge | Read the loaded modules without HTTP/2
+      ansible.builtin.command:
+        cmd: "{{ 'apache2ctl' if ansible_facts['os_family'] == 'Debian' else 'httpd' }} -M"
+      register: __converge_modules_without_http2
+      changed_when: false
+
+    # Server default off, only php.example.local enables HTTP/2: mod_http2
+    # must be loaded for that vhost alone, which then carries its own
+    # Protocols line and negotiates h2, while the inheriting vhost stays on
+    # HTTP/1.1.
+    - name: Converge | Enable HTTP/2 for one vhost only  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        apache_limit_nofile: ''
+        apache_mpm_server_limit: 24
+        apache_http2_enabled: false
+        apache_vhosts_ssl:
+          - server_name: 'present.example.local'
+            certificate_file: '/etc/ssl/test/present.crt'
+            certificate_key_file: '/etc/ssl/test/present.key'
+          - server_name: 'php.example.local'
+            document_root: '/var/www/php-test'
+            certificate_file: '/etc/ssl/test/present.crt'
+            certificate_key_file: '/etc/ssl/test/present.key'
+            http2: true
+
+    - name: Converge | Run handlers for the per-vhost HTTP/2
+      ansible.builtin.meta: flush_handlers
+
+    - name: Converge | Read the loaded modules with HTTP/2 for one vhost
+      ansible.builtin.command:
+        cmd: "{{ 'apache2ctl' if ansible_facts['os_family'] == 'Debian' else 'httpd' }} -M"
+      register: __converge_modules_vhost_http2
+      changed_when: false
+
+    - name: Converge | Read the vhost that enables HTTP/2
+      ansible.builtin.slurp:
+        src: "{{ {'Debian': '/etc/apache2/sites-available', 'RedHat': '/etc/httpd/conf.d',
+                  'Archlinux': '/etc/httpd/conf/vhosts'}[ansible_facts['os_family']] }}/php.example.local-ssl.conf"
+      register: __converge_vhost_http2_conf
+
+    # After an h2 handshake the server sends a binary SETTINGS frame, which
+    # is not valid text; only the ALPN line is kept.
+    - name: Converge | Negotiate the protocol with HTTP/2 for one vhost
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          openssl s_client -connect 127.0.0.1:443 -servername {{ item }} \
+            -alpn h2,http/1.1 < /dev/null 2> /dev/null \
+            | grep -a -E '^(ALPN protocol|No ALPN)'
+        executable: /bin/bash
+      loop:
+        - 'present.example.local'
+        - 'php.example.local'
+      register: __converge_alpn_vhost_http2
+      changed_when: false
 
     - name: Converge | Restore the converged configuration  # noqa: role-name[path]
       ansible.builtin.include_role:
@@ -337,3 +405,13 @@
           nofile_without_dropin: '{{ __converge_nofile_unlimited.stdout.split()[3] }}'
           unlimited: '{{ __converge_pid_unlimited.status.MainPID }}'
           server_limit: '{{ __converge_pid_server_limit.status.MainPID }}'
+          http2_loaded_without_users: "{{ 'http2_module' in __converge_modules_without_http2.stdout }}"
+          http2_loaded_for_vhost: "{{ 'http2_module' in __converge_modules_vhost_http2.stdout }}"
+          http2_vhost_protocols: >-
+            {{ (__converge_vhost_http2_conf.content | b64decode)
+               is search('(?m)^\s+Protocols h2 http/1\.1$') }}
+          http2_vhost_alpn: >-
+            {{ dict(__converge_alpn_vhost_http2.results | map(attribute='item')
+                    | zip(__converge_alpn_vhost_http2.results | map(attribute='stdout')
+                          | map('regex_search', 'ALPN protocol: (\S+)', '\1')
+                          | map('default', ['none'], true) | map('first'))) }}

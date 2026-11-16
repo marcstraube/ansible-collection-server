@@ -107,7 +107,7 @@ system-update,apache`) to restart Apache after it.
 | `apache_listen_ports`     | `[80]`                    | HTTP listen ports                 |
 | `apache_listen_ssl_ports` | `[443]`                   | HTTPS listen ports                |
 | `apache_ssl_enabled`      | `false`                   | Enable SSL/TLS                    |
-| `apache_http2_enabled`    | `false`                   | Enable HTTP/2                     |
+| `apache_http2_enabled`    | `false`                   | Server default for HTTP/2         |
 
 ### MPM Tuning
 
@@ -206,6 +206,79 @@ The patterns are rendered server-wide as one `<DirectoryMatch>`, anchored as
 applies the section to file paths as well, so files such as `.env` are covered
 too.
 
+### HTTP/2
+
+| Variable                           | Default | Description                       |
+| ---------------------------------- | ------- | --------------------------------- |
+| `apache_http2_enabled`             | `false` | Server default for HTTP/2 (`h2`)  |
+| `apache_http2_max_session_streams` | `100`   | `H2MaxSessionStreams`             |
+| `apache_http2_initial_window_size` | `65535` | `H2WindowSize`                    |
+
+`apache_http2_enabled` sets the server default, rendered as `Protocols` in
+the main configuration. An entry of `apache_vhosts_ssl` overrides it with
+`http2: true` or `http2: false`:
+
+```yaml
+apache_http2_enabled: true
+apache_vhosts_ssl:
+  - server_name: 'www.example.com'
+    certificate_file: '/etc/letsencrypt/live/www.example.com/fullchain.pem'
+    certificate_key_file: '/etc/letsencrypt/live/www.example.com/privkey.pem'
+  - server_name: 'intranet.example.com'
+    certificate_file: '/etc/letsencrypt/live/intranet.example.com/fullchain.pem'
+    certificate_key_file: '/etc/letsencrypt/live/intranet.example.com/privkey.pem'
+    http2: false
+```
+
+A vhost without the key inherits the server default, and its configuration
+carries no HTTP/2 line; changing `apache_http2_enabled` changes every such
+vhost. A vhost with the key gets its own `Protocols` line (`h2 http/1.1` or
+`http/1.1`), even when the value equals the server default, so its setting
+holds whatever the server default is, also in a run limited to
+`--tags apache:vhosts`. The key accepts `true` and `false` only.
+`apache_http2_enabled` also accepts the strings `true`, `false`, `yes`, `no`,
+`on`, `off`, `1` and `0` in any case, which is what `-e` passes. Anything
+else fails the run before any change.
+
+`mod_http2` is loaded while the server default or at least one SSL vhost
+enables HTTP/2, and dropped once none does; on Debian the role disables it
+with `a2dismod`. Debian's `mods-available/http2.conf` sets
+`Protocols h2 h2c http/1.1` server-wide, and `Protocols` lines in one context
+add up, so the role replaces that file with a neutral one. The file is a
+dpkg conffile: Ansible's `apt` module keeps the local version on updates
+(`--force-confold`), but when Debian changes the file, an interactive
+`apt upgrade` asks which version to keep and unattended-upgrades holds
+`apache2` back until it is updated by hand. Keeping the local version is the
+right answer; with the maintainer's version, the next run of the role writes
+the neutral file again. On EL the role installs
+`mod_http2`, which `httpd` only pulls in as a weak dependency. The `H2*`
+settings apply whenever the module is loaded.
+
+HTTP/2 is negotiated over TLS (ALPN) only; the role never enables `h2c`, so
+the key has no effect on `apache_vhosts` and `apache_reverse_proxies`. Apache
+selects the vhost for the negotiation by SNI: a client that sends no SNI gets
+the protocols of the first SSL vhost on that address and port (see
+[Default Vhost](#default-vhost)).
+
+Reasons to switch HTTP/2 off for a single vhost while the server keeps it:
+
+- Client certificates checked per directory (`SSLVerifyClient` inside a
+  `<Location>` or `<Directory>`) need a TLS renegotiation, which HTTP/2 does
+  not allow; those requests fail under HTTP/2.
+- Connection-based authentication (NTLM, Negotiate) binds the login to the
+  TCP connection, which HTTP/2 shares between requests.
+- Backends or clients that do not cope with HTTP/2.
+- A vulnerability in the HTTP/2 implementation: set
+  `apache_http2_enabled: false` with no vhost enabling it until an update is
+  available, which unloads `mod_http2` altogether. For an immediate run,
+  `--tags apache -e apache_http2_enabled=false` does the same.
+
+`http2: false` on a vhost that shares its address and port with a vhost
+with HTTP/2 on is no hard guarantee against the HTTP/2 attack surface: a
+client can send the SNI of the other vhost, or none at all when the first
+vhost has HTTP/2 on, and still speak HTTP/2 to `mod_http2`. Only HTTP/2 off
+for the server, with no vhost enabling it, removes it.
+
 ### Modules
 
 | Variable                  | Default | Description                                    |
@@ -219,19 +292,19 @@ The role loads only the modules its configuration needs. A fixed base set
 (`authz_core`, `authz_host`, `dir`, `log_config`, `mime`, `reqtimeout`,
 `unixd`) is always loaded. Every enabled feature adds its own modules:
 
-| Feature                                     | Modules                          |
-| ------------------------------------------- | -------------------------------- |
-| `apache_ssl_enabled`                        | `ssl`, `socache_shmcb`           |
-| `apache_security_headers_enabled`           | `headers`                        |
-| `apache_compression_enabled`                | `deflate`, `filter`, `setenvif`  |
-| `apache_caching_enabled`                    | `expires`                        |
-| `apache_acme_challenge_enabled`             | `alias`                          |
-| `apache_http2_enabled`                      | `http2`                          |
-| `apache_status_enabled`                     | `status`                         |
-| `apache_remoteip_header`                    | `remoteip`                       |
-| `apache_php_fpm_enabled`                    | `proxy`, `proxy_fcgi`            |
-| `apache_reverse_proxies`                    | `proxy`, `proxy_http`, `rewrite` |
-| a vhost with `redirect_to_https`            | `rewrite`                        |
+| Feature                                                   | Modules                          |
+| --------------------------------------------------------- | -------------------------------- |
+| `apache_ssl_enabled`                                      | `ssl`, `socache_shmcb`           |
+| `apache_security_headers_enabled`                         | `headers`                        |
+| `apache_compression_enabled`                              | `deflate`, `filter`, `setenvif`  |
+| `apache_caching_enabled`                                  | `expires`                        |
+| `apache_acme_challenge_enabled`                           | `alias`                          |
+| `apache_http2_enabled` or an SSL vhost with `http2: true` | `http2`                          |
+| `apache_status_enabled`                                   | `status`                         |
+| `apache_remoteip_header`                                  | `remoteip`                       |
+| `apache_php_fpm_enabled`                                  | `proxy`, `proxy_fcgi`            |
+| `apache_reverse_proxies`                                  | `proxy`, `proxy_http`, `rewrite` |
+| a vhost with `redirect_to_https`                          | `rewrite`                        |
 
 Modules an application needs beyond that go into `apache_modules_enabled`,
 for example `rewrite` for `.htaccess` rules, `auth_basic`, `authn_file` and
