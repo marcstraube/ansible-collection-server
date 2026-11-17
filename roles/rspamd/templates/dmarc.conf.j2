@@ -1,0 +1,13 @@
+{{ ansible_managed | comment }}
+{% if rspamd_dmarc_reporting_enabled | bool %}
+# Aggregate reports: rspamd collects the data in Valkey,
+# rspamd-dmarc-report.timer sends them
+reporting {
+  enabled = true;
+  email = {{ rspamd_dmarc_reporting_email | to_json }};
+  domain = {{ rspamd_dmarc_reporting_domain | to_json }};
+  org_name = {{ rspamd_dmarc_reporting_org_name | to_json }};
+  smtp = {{ rspamd_dmarc_reporting_smtp_host | string | to_json }};
+  smtp_port = {{ rspamd_dmarc_reporting_smtp_port | int }};
+}
+{% endif %}

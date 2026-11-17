@@ -1,0 +1,9 @@
+---
+# rspamd from the official repository (extra); service user of the package
+__rspamd_user: 'rspamd'
+__rspamd_group: 'rspamd'
+
+# Shell of the service user, should the role have to create it
+__rspamd_nologin_shell: '/usr/bin/nologin'
+
+__rspamd_rspamadm: '/usr/bin/rspamadm'

@@ -1,0 +1,93 @@
+---
+# Test environment, everything on one instance as on a single mail host:
+# EPEL on EL (the upstream packages need it), Valkey with the ACL user of
+# rspamd (marcstraube.server.valkey), clamd on the test signature database
+# (marcstraube.common.clamav), Postfix with the rspamd milter and the test
+# resolver.
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __prepare_packages:
+      Archlinux:
+        - systemd
+        - dbus
+        - procps-ng
+        - iproute2
+        - dnsmasq
+      Debian:
+        - systemd
+        - dbus
+        - procps
+        - iproute2
+        - dnsmasq-base
+        - ca-certificates
+      RedHat:
+        - systemd
+        - dbus
+        - procps-ng
+        - iproute
+        - dnsmasq
+    __prepare_milter: 'inet:127.0.0.1:11332'
+    __prepare_inet_interfaces: '127.0.0.1'
+
+  tasks:
+    - name: Prepare | Update package cache (Arch)
+      community.general.pacman:
+        update_cache: true
+        upgrade: true
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Update package cache (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # The upstream rspamd packages and clamd need EPEL (README)
+    - name: Prepare | Enable EPEL (RedHat)
+      ansible.builtin.dnf:
+        name: epel-release
+        state: present
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Update package cache (RedHat)
+      ansible.builtin.dnf:
+        update_cache: true
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name: '{{ __prepare_packages[ansible_facts["os_family"]] }}'
+        state: present
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Set up the test resolver
+      ansible.builtin.include_tasks: ../shared/tasks/resolver.yml
+
+    - name: Prepare | Include valkey role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../valkey'
+
+    - name: Prepare | Set up clamd
+      ansible.builtin.include_tasks: ../shared/tasks/clamd.yml
+
+    - name: Prepare | Set up Postfix
+      ansible.builtin.include_tasks: ../shared/tasks/mta.yml
+
+    - name: Prepare | Install the SMTP test client
+      ansible.builtin.copy:
+        src: '{{ playbook_dir }}/../shared/files/smtp_send.py'
+        dest: /usr/local/bin/molecule-smtp-send
+        owner: root
+        group: root
+        mode: '0755'
