@@ -1,0 +1,8 @@
+{{ ansible_managed | comment }}
+# Proxy worker in milter mode for Postfix. It does not scan itself
+# (no self_scan): it passes every message to the normal worker on
+# localhost:11333, the upstream "local" of the packaged worker-proxy.inc.
+bind_socket = {{ rspamd_milter_bind | to_json }};
+milter = yes;
+# Clients must not name files or shared memory for rspamd to read
+allow_file_and_shm_inputs = false;

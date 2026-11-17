@@ -1,0 +1,40 @@
+---
+# Check mode on a new host has no unit.
+- name: Service | Manage rspamd service
+  ansible.builtin.systemd_service:
+    name: '{{ __rspamd_service_name }}'
+    enabled: "{{ rspamd_service_enabled | bool }}"
+    state: "{{ rspamd_service_enabled | bool | ternary('started', 'stopped') }}"
+  when: not __rspamd_check_mode_install | default(false) | bool
+
+#
+# DMARC Reports
+#
+# The units are always deployed; the timer runs while reporting is enabled.
+# The report runs as the service user, which reads the configuration
+# (Valkey password) through its group.
+#
+
+- name: Service | Deploy the DMARC report units
+  ansible.builtin.template:
+    src: '{{ item }}.j2'
+    dest: '/etc/systemd/system/{{ item }}'
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - '{{ __rspamd_dmarc_report_service }}'
+    - '{{ __rspamd_dmarc_report_timer }}'
+  register: __rspamd_dmarc_units
+  notify: Reload rspamd systemd units
+
+# Check mode on a new host has no unit file to manage yet
+- name: Service | Manage DMARC report timer
+  ansible.builtin.systemd_service:
+    name: '{{ __rspamd_dmarc_report_timer }}'
+    enabled: "{{ rspamd_dmarc_reporting_enabled | bool and rspamd_dmarc_report_timer_enabled | bool }}"
+    state: >-
+      {{ (rspamd_dmarc_reporting_enabled | bool and rspamd_dmarc_report_timer_enabled | bool)
+         | ternary('started', 'stopped') }}
+    daemon_reload: '{{ __rspamd_dmarc_units is changed }}'
+  when: not (ansible_check_mode and __rspamd_dmarc_units is changed)

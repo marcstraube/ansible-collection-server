@@ -1,0 +1,261 @@
+---
+- name: Verify — Facts
+  hosts: all
+  gather_facts: true
+
+- name: Verify — rspamd host
+  hosts: filter
+  gather_facts: false
+
+  tasks:
+    # The overlay storage of the container can bring back the policy-rc.d
+    # of the image once a file renamed over its whiteout is removed again;
+    # what counts is that no policy-rc.d of the role is left
+    - name: Verify | Read the policy-rc.d
+      ansible.builtin.slurp:
+        src: /usr/sbin/policy-rc.d
+      register: __verify_policy_rc
+      failed_when: false
+
+    - name: Verify | Assert the leftover policy-rc.d of the role was removed
+      ansible.builtin.assert:
+        that:
+          - >-
+            'marcstraube.server.rspamd' not in
+            (__verify_policy_rc.content | default('') | b64decode)
+        fail_msg: '{{ __verify_policy_rc.content | default("") | b64decode }}'
+
+    - name: Verify | Read the listeners
+      ansible.builtin.command:
+        argv: [ss, --listening, --tcp, --numeric, --no-header]
+      register: __verify_listeners
+      changed_when: false
+
+    # The milter on the address of the container for the other host, the
+    # controller on the loopback interface only
+    - name: Verify | Assert the milter and the controller listen where configured
+      ansible.builtin.assert:
+        that:
+          - __verify_listeners.stdout is search(ansible_facts['default_ipv4']['address'] ~ ':11332\s')
+          - __verify_listeners.stdout is not search('0\.0\.0\.0:11332\s')
+          - __verify_listeners.stdout is search('127\.0\.0\.1:11334\s')
+        fail_msg: '{{ __verify_listeners.stdout }}'
+
+    - name: Verify | Read the Valkey settings
+      ansible.builtin.slurp:
+        src: /etc/rspamd/local.d/redis.conf
+      register: __verify_redis
+
+    - name: Verify | Assert rspamd connects to Valkey with TLS and its ACL user
+      ansible.builtin.assert:
+        that:
+          - __verify_redis_text is search('(?m)^servers = "rspamd-split-backend:6380";$')
+          - __verify_redis_text is search('(?m)^username = "rspamd";$')
+          - __verify_redis_text is search('(?m)^ssl = true;$')
+          - __verify_redis_text is search('(?m)^ssl_ca = "/etc/molecule-tls/ca.crt";$')
+        fail_msg: '{{ __verify_redis_text }}'
+      vars:
+        __verify_redis_text: '{{ __verify_redis.content | b64decode }}'
+
+    # Bayes writes to the Valkey of the other host
+    - name: Verify | Train Bayes with the enable password
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1:11334/learnspam'
+        method: POST
+        headers:
+          Password: 'split-Enable-42'
+        body: |
+          From: Spammer <offer@example.net>
+          To: molecule@localhost
+          Subject: split-learn
+          Message-ID: <split-learn.{{ 999999 | random }}@example.net>
+
+          Buy cheap watches and replica bags today, limited offer for all
+          customers, click the link below to claim your discount voucher now.
+        return_content: true
+        status_code: 200
+      register: __verify_learn
+
+    - name: Verify | Assert the controller learned the message
+      ansible.builtin.assert:
+        that:
+          - __verify_learn.json.success | default(false)
+        fail_msg: '{{ __verify_learn | to_json }}'
+
+- name: Verify — Backend host
+  hosts: backend
+  gather_facts: false
+
+  vars:
+    # RFC 5322 date, independent of the locale of the controller
+    __verify_date: >-
+      {{ __verify_weekdays[now(utc=true).weekday()] }},
+      {{ now(utc=true).strftime('%d') }}
+      {{ __verify_months[now(utc=true).month - 1] }}
+      {{ now(utc=true).strftime('%Y %H:%M:%S') }} +0000
+    __verify_weekdays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+    __verify_months: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    __verify_outside:
+      ADDR: '192.0.2.25'
+      NAME: 'mx.example.net'
+      HELO: 'mx.example.net'
+    __verify_body: |
+      Hello Molecule,
+
+      here are the notes from the project review of yesterday. The team agreed
+      on the schedule for the next release, the documentation will be updated
+      by the end of the week and the open questions go to the next meeting.
+
+      Best regards,
+      Bob
+    # The EICAR test file
+    __verify_eicar_base64: >-
+      WDVPIVAlQEFQWzRcUFpYNTQoUF4pN0NDKTd9JEVJQ0FSLVNUQU5EQVJELUFOVElWSVJVUy1URVNULUZJTEUhJEgrSCo=
+
+  tasks:
+    - name: Verify | Read the Bayes spam counter in Valkey over TLS
+      ansible.builtin.command:
+        argv:
+          - valkey-cli
+          - --tls
+          - --cacert
+          - /etc/molecule-tls/ca.crt
+          - -h
+          - rspamd-split-backend
+          - -p
+          - '6380'
+          - --user
+          - rspamd
+          - --pass
+          - 'split-Valkey-42'
+          - --no-auth-warning
+          - hget
+          - RS
+          - learns_spam
+      register: __verify_bayes_learns
+      changed_when: false
+
+    - name: Verify | Assert Valkey holds the message the other host learned
+      ansible.builtin.assert:
+        that:
+          - __verify_bayes_learns.stdout | int >= 1
+        fail_msg: '{{ __verify_bayes_learns | to_json }}'
+
+    # Postfix of this host passes the mail to the milter on the other host
+    - name: Verify | Send GTUBE from outside
+      ansible.builtin.include_tasks: ../shared/tasks/send.yml
+      vars:
+        __send_name: __verify_gtube
+        __send:
+          xclient: '{{ __verify_outside }}'
+          mail_from: 'bob@example.net'
+          rcpt: ['molecule@localhost']
+          data: |
+            From: Bob <bob@example.net>
+            To: molecule@localhost
+            Subject: split-gtube
+            Date: {{ __verify_date }}
+            Message-ID: <split-gtube.{{ 999999 | random }}@example.net>
+
+            XJS*C4JDBQADN1.NSBN3*2IDNEN*GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X
+
+    - name: Verify | Assert GTUBE was rejected
+      ansible.builtin.assert:
+        that:
+          - __verify_gtube.error_code | default(0) >= 500
+          - __verify_gtube.error_code | default(0) < 600
+        fail_msg: '{{ __verify_gtube | to_json }}'
+
+    # clamd of this host scans for the rspamd of the other one over TCP
+    - name: Verify | Send EICAR from outside
+      ansible.builtin.include_tasks: ../shared/tasks/send.yml
+      vars:
+        __send_name: __verify_eicar
+        __send:
+          xclient: '{{ __verify_outside }}'
+          mail_from: 'bob@example.net'
+          rcpt: ['molecule@localhost']
+          data: |
+            From: Bob <bob@example.net>
+            To: molecule@localhost
+            Subject: split-eicar
+            Date: {{ __verify_date }}
+            Message-ID: <split-eicar.{{ 999999 | random }}@example.net>
+            MIME-Version: 1.0
+            Content-Type: multipart/mixed; boundary="molecule-boundary"
+
+            --molecule-boundary
+            Content-Type: text/plain; charset=utf-8
+
+            {{ __verify_body }}
+            --molecule-boundary
+            Content-Type: application/octet-stream; name="eicar.com"
+            Content-Disposition: attachment; filename="eicar.com"
+            Content-Transfer-Encoding: base64
+
+            {{ __verify_eicar_base64 }}
+            --molecule-boundary--
+
+    - name: Verify | Assert EICAR was rejected
+      ansible.builtin.assert:
+        that:
+          - __verify_eicar.error_code | default(0) >= 500
+          - __verify_eicar.error_code | default(0) < 600
+        fail_msg: '{{ __verify_eicar | to_json }}'
+
+    - name: Verify | Send a message from the local network of Postfix
+      ansible.builtin.include_tasks: ../shared/tasks/send.yml
+      vars:
+        __send_name: __verify_signed
+        __send:
+          mail_from: 'alice@example.com'
+          rcpt: ['molecule@localhost']
+          data: |
+            From: Alice <alice@example.com>
+            To: Molecule <molecule@localhost>
+            Subject: split-signed
+            Date: {{ __verify_date }}
+            Message-ID: <split-signed.{{ 999999 | random }}@example.com>
+            MIME-Version: 1.0
+            Content-Type: text/plain; charset=utf-8
+
+            {{ __verify_body }}
+
+    - name: Verify | Assert the message was accepted
+      ansible.builtin.assert:
+        that:
+          - __verify_signed.data[0] | default(0) == 250
+        fail_msg: '{{ __verify_signed | to_json }}'
+
+    - name: Verify | Read the signed message
+      ansible.builtin.include_tasks: ../shared/tasks/delivered.yml
+      vars:
+        __delivered_subject: 'split-signed'
+        __delivered_name: __verify_signed_text
+
+    - name: Verify | Assert the message carries the DKIM signature of example.com
+      ansible.builtin.assert:
+        that:
+          - __verify_signed_text is search('(?m)^DKIM-Signature:\s')
+          - __verify_signed_text is search('d=example\.com;')
+          - __verify_signed_text is search('s=split;')
+        fail_msg: '{{ __verify_signed_text }}'
+
+- name: Verify — clamd scan on the rspamd host
+  hosts: filter
+  gather_facts: false
+
+  tasks:
+    - name: Verify | Read the rspamd log
+      ansible.builtin.slurp:
+        src: /var/log/rspamd/rspamd.log
+      register: __verify_log
+
+    - name: Verify | Assert clamd of the other host found EICAR
+      ansible.builtin.assert:
+        that:
+          - __verify_log_text is search('CLAM_VIRUS\(')
+          - __verify_log_text is search('Eicar-Test-Signature')
+        fail_msg: "{{ __verify_log_text.splitlines() | select('search', 'CLAM|clam|redis') | list | to_json }}"
+      vars:
+        __verify_log_text: '{{ __verify_log.content | b64decode }}'

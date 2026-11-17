@@ -1,0 +1,9 @@
+{{ ansible_managed | comment }}
+bind_socket = {{ rspamd_controller_bind | to_json }};
+# Hashes of rspamd_controller_password and rspamd_controller_enable_password
+password = {{ __rspamd_controller_hashes.password | to_json }};
+enable_password = {{ __rspamd_controller_hashes.enable_password | to_json }};
+# Addresses trusted without a password
+secure_ip = {{ rspamd_controller_secure_ips | to_json }};
+# Clients must not name files or shared memory for rspamd to read
+allow_file_and_shm_inputs = false;

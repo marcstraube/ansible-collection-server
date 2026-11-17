@@ -1,0 +1,411 @@
+---
+- name: Main | Load OS-specific variables
+  ansible.builtin.include_vars: '{{ item }}'
+  with_first_found:
+    - files:
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}.yml'
+      paths:
+        - 'vars'
+  tags:
+    - always
+
+# Every validation collects one message per failed check, so a run names
+# exactly what is wrong. The checks run before any change.
+- name: Main | Validate package update settings
+  ansible.builtin.assert:
+    that:
+      - __rspamd_errors | length == 0
+    fail_msg: '{{ __rspamd_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __rspamd_errors: >-
+      {{ [
+           ("rspamd_packages_state must be 'present' or 'latest' (got '" ~ rspamd_packages_state ~ "').")
+             if rspamd_packages_state not in ['present', 'latest'] else '',
+           ("rspamd_packages_minimum must be a version string, e.g. '4.3.0', or a mapping per platform (got '"
+            ~ rspamd_packages_minimum ~ "').")
+             if not (rspamd_packages_minimum is string or rspamd_packages_minimum is mapping) else '',
+           "rspamd_repo_uris, rspamd_repo_signed_by, rspamd_repo_baseurl and rspamd_repo_gpgkey must be set."
+             if [rspamd_repo_uris, rspamd_repo_signed_by, rspamd_repo_baseurl, rspamd_repo_gpgkey]
+                | map('string') | reject('match', '^\S+$') | list | length > 0 else ''
+         ] | select | list }}
+  when: rspamd_enabled | bool
+  tags:
+    - always
+
+# A mapping selects the minimum by '<os_family>-<major>', then
+# '<os_family>'. A host without a matching key fails here, before any
+# change, so a platform left out of the mapping cannot pass unchecked.
+- name: Main | Select the minimum version for this platform
+  ansible.builtin.set_fact:
+    __rspamd_minimum: >-
+      {{ (rspamd_packages_minimum[__rspamd_minimum_key] if __rspamd_minimum_key | length > 0 else '')
+         if rspamd_packages_minimum is mapping
+         else rspamd_packages_minimum }}
+    __rspamd_minimum_key_found: '{{ rspamd_packages_minimum is not mapping or __rspamd_minimum_key | length > 0 }}'
+  vars:
+    __rspamd_minimum_key: >-
+      {{ ([ansible_facts['os_family'] ~ '-' ~ ansible_facts['distribution_major_version'],
+           ansible_facts['os_family']]
+          | select('in', rspamd_packages_minimum) | list + [''])
+         | first
+         if rspamd_packages_minimum is mapping
+         else '' }}
+  when: rspamd_enabled | bool
+  tags:
+    - always
+
+# The value reaches dpkg, rpm and vercmp as an argument; only characters of
+# a package version are accepted.
+- name: Main | Validate the minimum version for this platform
+  ansible.builtin.assert:
+    that:
+      - __rspamd_minimum_key_found | bool
+      - __rspamd_minimum | string is match('^[0-9A-Za-z.+~:_-]*$')
+    fail_msg: >-
+      {{ ('rspamd_packages_minimum has no key for this host (expected '
+          ~ ansible_facts['os_family'] ~ '-' ~ ansible_facts['distribution_major_version']
+          ~ ' or ' ~ ansible_facts['os_family'] ~ ')')
+         if not (__rspamd_minimum_key_found | bool)
+         else ('rspamd_packages_minimum ' ~ __rspamd_minimum ~ ' is not a package version') }}
+    quiet: true
+  when: rspamd_enabled | bool
+  tags:
+    - always
+
+# The listeners need an explicit address: an unauthenticated milter must not
+# bind every interface by accident.
+- name: Main | Validate the worker and controller settings
+  ansible.builtin.assert:
+    that:
+      - __rspamd_errors | length == 0
+    fail_msg: '{{ __rspamd_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __rspamd_errors: >-
+      {{ [
+           ("rspamd_milter_bind must be '<address>:<port>', e.g. '127.0.0.1:11332' (got '"
+            ~ rspamd_milter_bind ~ "').")
+             if rspamd_milter_bind is not match(__rspamd_bind_regex) else '',
+           ("rspamd_controller_bind must be '<address>:<port>', e.g. '127.0.0.1:11334' (got '"
+            ~ rspamd_controller_bind ~ "').")
+             if rspamd_controller_bind is not match(__rspamd_bind_regex) else '',
+           'rspamd_milter_bind and rspamd_controller_bind must use different ports.'
+             if (rspamd_milter_bind | string).split(':') | last == (rspamd_controller_bind | string).split(':') | last
+             else '',
+           ('rspamd_controller_password and rspamd_controller_enable_password are required'
+            ~ ' (store them in the vault), each on one line.')
+             if not (rspamd_controller_password is string and rspamd_controller_password | length > 0
+                     and rspamd_controller_password is not search('[\r\n]')
+                     and rspamd_controller_enable_password is string
+                     and rspamd_controller_enable_password | length > 0
+                     and rspamd_controller_enable_password is not search('[\r\n]')) else '',
+           'rspamd_controller_password and rspamd_controller_enable_password must differ.'
+             if rspamd_controller_password == rspamd_controller_enable_password else '',
+           "rspamd_controller_secure_ips must be a list of addresses or networks (e.g. '192.0.2.10/32')."
+             if rspamd_controller_secure_ips is string or rspamd_controller_secure_ips is mapping
+                or rspamd_controller_secure_ips | map('string')
+                   | reject('match', __rspamd_network_regex) | list | length > 0 else '',
+           ("rspamd_controller_secure_ips must not contain a /0 network, which trusts every address"
+            ~ " without a password (got " ~ rspamd_controller_secure_ips | map('string') | select('match', '.*/0+$')
+            | join(', ') ~ ").")
+             if rspamd_controller_secure_ips is not string and rspamd_controller_secure_ips is not mapping
+                and rspamd_controller_secure_ips | map('string') | select('match', '.*/0+$') | list | length > 0
+             else ''
+         ] | select | list }}
+  when: rspamd_enabled | bool
+  tags:
+    - always
+
+# A web server in front of the controller connects from the loopback
+# interface: a trusted loopback address passes every visitor without a
+# password. A network trusts every host in it.
+- name: Main | Warn about controller addresses trusted without a password
+  ansible.builtin.debug:
+    msg: >-
+      rspamd_controller_secure_ips trusts {{ __rspamd_secure_risky | join(', ') }}
+      without a password. A web server or another program on the loopback
+      interface passes every request it forwards without a password, and a
+      network trusts every host in it. Prefer single host addresses of
+      trusted hosts, or an empty list.
+  register: __rspamd_secure_ips_warning
+  vars:
+    # Loopback: 127.0.0.0/8, ::1 in any notation (only zero groups before
+    # the final 1) and IPv4-mapped 127.0.0.0/8 (dotted or hex). A network:
+    # a prefix below /32 for IPv4 or below /128 for IPv6 (leading zeros of
+    # the prefix count as written).
+    __rspamd_secure_risky: >-
+      {{ (rspamd_controller_secure_ips | map('string')
+          | select('match', '(?i)^(127[.]|[0:]*:0{0,3}1(/[0-9]+)?$|[0:]*:ffff:(127[.]|0{0,2}7f[0-9a-f]{2}:))')
+          | list
+          + (rspamd_controller_secure_ips | map('string')
+             | reject('search', ':') | select('match', '^.*/[0-9]+$')
+             | reject('match', '^.*/0*32$') | list)
+          + (rspamd_controller_secure_ips | map('string')
+             | select('search', ':') | select('match', '^.*/[0-9]+$')
+             | reject('match', '^.*/0*128$') | list))
+         | unique }}
+  when:
+    - rspamd_enabled | bool
+    - rspamd_controller_secure_ips is not string
+    - rspamd_controller_secure_ips is not mapping
+    - __rspamd_secure_risky | length > 0
+  tags:
+    - always
+
+- name: Main | Validate the Valkey settings
+  ansible.builtin.assert:
+    that:
+      - __rspamd_errors | length == 0
+    fail_msg: '{{ __rspamd_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __rspamd_errors: >-
+      {{ [
+           "rspamd_redis_servers must be a non-empty list of '<host>:<port>' or unix socket paths."
+             if rspamd_redis_servers is string or rspamd_redis_servers is mapping
+                or rspamd_redis_servers | length == 0
+                or rspamd_redis_servers | map('string')
+                   | reject('match', '^(/\S+|' ~ __rspamd_bind_regex[1:-1] ~ ')$') | list | length > 0 else '',
+           'rspamd_redis_username and rspamd_redis_password must not contain whitespace.'
+             if rspamd_redis_username is not match('^\S*$') or rspamd_redis_password is not match('^\S*$') else '',
+           ("rspamd_redis_db must be a number (got '" ~ rspamd_redis_db ~ "').")
+             if rspamd_redis_db | string is not match('^[0-9]+$') else '',
+           ("rspamd_redis_tls_ca_file must be an absolute path (got '" ~ rspamd_redis_tls_ca_file ~ "').")
+             if rspamd_redis_tls_ca_file | length > 0 and rspamd_redis_tls_ca_file is not match('^/\S+$') else '',
+           'rspamd_redis_tls needs servers as <host>:<port>, not a unix socket.'
+             if rspamd_redis_tls | bool
+                and rspamd_redis_servers | map('string') | select('match', '^/') | list | length > 0 else ''
+         ] | select | list }}
+  when: rspamd_enabled | bool
+  tags:
+    - always
+
+# A unix socket and the loopback interface never leave the host
+- name: Main | Warn about a Valkey connection without TLS over the network
+  ansible.builtin.debug:
+    msg: >-
+      rspamd_redis_tls is false: the connection to
+      {{ __rspamd_redis_remote | join(', ') }} is not encrypted, the Valkey
+      password and the data cross the network in cleartext. Reach it only
+      over a private network or WireGuard, or enable rspamd_redis_tls.
+  vars:
+    __rspamd_redis_remote: >-
+      {{ rspamd_redis_servers | map('string') | reject('match', '^/')
+         | reject('match', '^(127[.][0-9.]+|localhost|\[::1\]):') | list }}
+  when:
+    - rspamd_enabled | bool
+    - not rspamd_redis_tls | bool
+    - __rspamd_redis_remote | length > 0
+  tags:
+    - always
+
+- name: Main | Validate the classification settings
+  ansible.builtin.assert:
+    that:
+      - __rspamd_errors | length == 0
+    fail_msg: '{{ __rspamd_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __rspamd_errors: >-
+      {{ [
+           ("rspamd_actions must be a mapping of " ~ __rspamd_action_names | join(', ')
+            ~ " to a score or null.")
+             if rspamd_actions is not mapping
+                or rspamd_actions.keys() | reject('in', __rspamd_action_names) | list | length > 0
+                or rspamd_actions.values() | reject('none') | map('string')
+                   | reject('match', '^-?[0-9]+([.][0-9]+)?$') | list | length > 0 else '',
+           "rspamd_ratelimits must be a mapping of a rate name to its settings."
+             if rspamd_ratelimits is not mapping
+                or rspamd_ratelimits.values() | reject('mapping') | list | length > 0
+                or rspamd_ratelimits.keys() | map('string') | reject('match', '^[A-Za-z0-9_-]+$') | list | length > 0
+             else '',
+           "rspamd_milter_headers must be a list of milter_headers routines, e.g. ['x-spam-status']."
+             if rspamd_milter_headers is string or rspamd_milter_headers is mapping
+                or rspamd_milter_headers | map('string') | reject('match', '^[a-z0-9-]+$') | list | length > 0
+             else '',
+           "rspamd_dns_nameservers must be a list of '<address>' or '<address>:<port>'."
+             if rspamd_dns_nameservers is string or rspamd_dns_nameservers is mapping
+                or rspamd_dns_nameservers | map('string')
+                   | reject('match', '^[0-9A-Za-z.:\[\]_-]+$') | list | length > 0
+             else ''
+         ] | select | list }}
+  when: rspamd_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate the signing settings
+  ansible.builtin.assert:
+    that:
+      - __rspamd_errors | length == 0
+    fail_msg: '{{ __rspamd_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __rspamd_domains: >-
+      {{ rspamd_dkim_domains if (rspamd_dkim_domains is sequence and rspamd_dkim_domains is not string) else [] }}
+    __rspamd_errors: >-
+      {{ [
+           ("rspamd_dkim_domains must be a list of entries with domain, selector (letters, digits, '.', '_', '-')"
+            ~ " and optional key_size (1024-4096).")
+             if rspamd_dkim_domains is string or rspamd_dkim_domains is mapping
+                or __rspamd_domains | reject('mapping') | list | length > 0
+                or __rspamd_domains | map(attribute='domain', default='') | map('string')
+                   | reject('match', __rspamd_hostname_regex) | list | length > 0
+                or __rspamd_domains | map(attribute='selector', default='') | map('string')
+                   | reject('match', __rspamd_selector_regex) | list | length > 0
+                or __rspamd_domains | map(attribute='key_size', default=2048) | map('string')
+                   | reject('match', '^[0-9]{4}$') | list | length > 0
+                or __rspamd_domains | map(attribute='key_size', default=2048) | map('int')
+                   | reject('ge', 1024) | list | length > 0
+                or __rspamd_domains | map(attribute='key_size', default=2048) | map('int')
+                   | reject('le', 4096) | list | length > 0
+             else '',
+           "rspamd_dkim_domains lists a domain twice; each domain signs with one selector."
+             if __rspamd_domains | map(attribute='domain', default='') | map('lower') | list | length
+                != __rspamd_domains | map(attribute='domain', default='') | map('lower') | unique | list | length
+             else '',
+           "rspamd_signing_networks must be a list of addresses or networks (e.g. '192.0.2.0/24')."
+             if rspamd_signing_networks is string or rspamd_signing_networks is mapping
+                or rspamd_signing_networks | map('string')
+                   | reject('match', __rspamd_network_regex) | list | length > 0 else ''
+         ] | select | list }}
+  when: rspamd_enabled | bool
+  tags:
+    - always
+
+# RFC 8301 sets 1024 bits as the minimum a verifier accepts and asks
+# signers for at least 2048
+- name: Main | Warn about DKIM keys below 2048 bits
+  ansible.builtin.debug:
+    msg: >-
+      rspamd_dkim_domains: {{ __rspamd_short_keys | join(', ') }} use a key
+      below 2048 bits. 1024 bits is only the minimum that verifiers accept
+      (RFC 8301); use 2048 for new keys (a new selector creates one).
+  vars:
+    __rspamd_short_keys: >-
+      {%- set ns = namespace(domains=[]) -%}
+      {%- for entry in rspamd_dkim_domains if (entry.key_size | default(2048) | int) < 2048 -%}
+      {%- set ns.domains = ns.domains + [entry.domain] -%}
+      {%- endfor -%}
+      {{ ns.domains }}
+  when:
+    - rspamd_enabled | bool
+    - __rspamd_short_keys | length > 0
+  tags:
+    - always
+
+- name: Main | Validate the antivirus and DMARC report settings
+  ansible.builtin.assert:
+    that:
+      - __rspamd_errors | length == 0
+    fail_msg: '{{ __rspamd_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __rspamd_errors: >-
+      {{ [
+           ("rspamd_clamd_address must be a unix socket path or '<host>:<port>' (got '"
+            ~ rspamd_clamd_address ~ "').")
+             if rspamd_clamd_address is not match('^(/\S+|' ~ __rspamd_bind_regex[1:-1] ~ ')$') else '',
+           "rspamd_socket_groups must be a list of group names."
+             if rspamd_socket_groups is string or rspamd_socket_groups is mapping
+                or rspamd_socket_groups | map('string') | reject('match', '^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+                   | list | length > 0 else '',
+           ("rspamd_antivirus_action must be one of " ~ __rspamd_antivirus_actions | join(', ')
+            ~ " (got '" ~ rspamd_antivirus_action ~ "').")
+             if rspamd_antivirus_action not in __rspamd_antivirus_actions else '',
+           ("rspamd_antivirus_max_size must be a number of bytes (got '" ~ rspamd_antivirus_max_size ~ "').")
+             if rspamd_antivirus_max_size | string is not match('^[0-9]+$') else '',
+           ('rspamd_dmarc_reporting_enabled needs rspamd_dmarc_reporting_email, rspamd_dmarc_reporting_domain'
+            ~ ' and rspamd_dmarc_reporting_org_name, each on one line.')
+             if rspamd_dmarc_reporting_enabled | bool
+                and [rspamd_dmarc_reporting_email, rspamd_dmarc_reporting_domain, rspamd_dmarc_reporting_org_name]
+                    | map('string') | reject('match', '^[^\r\n]+$') | list | length > 0 else '',
+           ("rspamd_dmarc_reporting_smtp_host must be a host name or address, rspamd_dmarc_reporting_smtp_port"
+            ~ " 1-65535 (got '" ~ rspamd_dmarc_reporting_smtp_host ~ "', '" ~ rspamd_dmarc_reporting_smtp_port ~ "').")
+             if rspamd_dmarc_reporting_smtp_host is not match('^[0-9A-Za-z.:_-]+$')
+                or not (rspamd_dmarc_reporting_smtp_port | string is match('^[0-9]+$')
+                        and rspamd_dmarc_reporting_smtp_port | int > 0
+                        and rspamd_dmarc_reporting_smtp_port | int <= 65535) else '',
+           ("rspamd_dmarc_report_on_calendar must be a systemd calendar expression on one line (got '"
+            ~ rspamd_dmarc_report_on_calendar ~ "').")
+             if rspamd_dmarc_report_on_calendar is not match('^[^\r\n]+$') else ''
+         ] | select | list }}
+  when: rspamd_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate the DNS check and extra configuration settings
+  ansible.builtin.assert:
+    that:
+      - __rspamd_errors | length == 0
+    fail_msg: '{{ __rspamd_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __rspamd_errors: >-
+      {{ [
+           ("rspamd_dns_resolver_port must be 1-65535 (got '" ~ rspamd_dns_resolver_port ~ "').")
+             if not (rspamd_dns_resolver_port | string is match('^[0-9]+$')
+                     and rspamd_dns_resolver_port | int > 0 and rspamd_dns_resolver_port | int <= 65535) else '',
+           "rspamd_dns_dmarc must be on one line without double quotes."
+             if rspamd_dns_dmarc is not match('^[^\r\n"]*$') else '',
+           ("rspamd_local_config must be a mapping of file names in local.d to their content; the files of"
+            ~ " the role (" ~ __rspamd_local_files | map(attribute='name') | join(', ') ~ ") are not allowed.")
+             if rspamd_local_config is not mapping
+                or rspamd_local_config.keys() | map('string') | reject('match', '^[A-Za-z0-9][A-Za-z0-9._-]*$')
+                   | list | length > 0
+                or rspamd_local_config.keys() | select('in', __rspamd_local_files | map(attribute='name') | list)
+                   | list | length > 0
+                or rspamd_local_config.values() | reject('string') | list | length > 0
+             else ''
+         ] | select | list }}
+  when: rspamd_enabled | bool
+  tags:
+    - always
+
+- name: Main | Import repository tasks
+  ansible.builtin.import_tasks: repos.yml
+  when:
+    - rspamd_enabled | bool
+    - ansible_facts['os_family'] in ['Debian', 'RedHat']
+  tags:
+    - rspamd
+    - rspamd:install
+
+- name: Main | Import install tasks
+  ansible.builtin.import_tasks: install.yml
+  when: rspamd_enabled | bool
+  tags:
+    - rspamd
+    - rspamd:install
+
+- name: Main | Import DKIM tasks
+  ansible.builtin.import_tasks: dkim.yml
+  when: rspamd_enabled | bool
+  tags:
+    - rspamd
+    - rspamd:dkim
+
+- name: Main | Import configure tasks
+  ansible.builtin.import_tasks: configure.yml
+  when: rspamd_enabled | bool
+  tags:
+    - rspamd
+    - rspamd:configure
+
+- name: Main | Import service tasks
+  ansible.builtin.import_tasks: service.yml
+  when: rspamd_enabled | bool
+  tags:
+    - rspamd
+    - rspamd:service
+
+- name: Main | Import DNS tasks
+  ansible.builtin.import_tasks: dns.yml
+  when: rspamd_enabled | bool
+  tags:
+    - rspamd
+    - rspamd:dns

@@ -1,0 +1,20 @@
+{{ ansible_managed | comment }}
+[Unit]
+Description=Send the DMARC aggregate reports of rspamd
+Documentation=https://docs.rspamd.com/modules/dmarc
+After=network-online.target {{ __rspamd_service_name }}.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User={{ __rspamd_user }}
+Group={{ __rspamd_group }}
+ExecStart={{ __rspamd_rspamadm }} dmarc_report
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
