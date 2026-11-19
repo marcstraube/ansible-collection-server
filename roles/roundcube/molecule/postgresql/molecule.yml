@@ -1,0 +1,102 @@
+---
+# PostgreSQL scenario: nginx, PHP-FPM with a dedicated roundcube pool,
+# PostgreSQL, PostfixAdmin with the test mailboxes and Dovecot with
+# ManageSieve run on the instance (prepare); the role creates the Roundcube
+# database and its schema. A check run on the fresh instance precedes
+# converge, another one on the configured instance follows idempotence.
+# Verify logs in through nginx, saves a Sieve filter, shares a folder,
+# changes a password and checks the failure cases. The playbooks are
+# shared with the mariadb scenario.
+driver:
+  name: podman
+platforms:
+  - name: roundcube-postgresql-archlinux
+    image: docker.io/marcstraube/archlinux-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: roundcube-postgresql-debian-trixie
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: roundcube-postgresql-rocky-9
+    image: docker.io/geerlingguy/docker-rockylinux9-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: roundcube-postgresql-rocky-10
+    image: docker.io/geerlingguy/docker-rockylinux10-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: ../shared/prepare.yml
+    converge: ../shared/converge.yml
+    verify: ../shared/verify.yml
+  inventory:
+    group_vars:
+      all:
+        # Shared by prepare, converge and verify; the test data is in
+        # ../shared/vars/main.yml
+        __molecule_db_type: 'postgresql'
+        # PostgreSQL over TCP on the loopback address
+        dovecot_db_host: '127.0.0.1'
+        roundcube_password_db_host: '127.0.0.1'
+        # PostgreSQL on the instance, listening on localhost only
+        postgresql_enabled: true
+        postgresql_ssl_enabled: false
+        postgresql_firewalld_enabled: false
+        postgresql_shared_buffers: '64MB'
+        postgresql_effective_cache_size: '128MB'
+        postgresql_lc_messages: 'en_US.UTF-8'
+        postgresql_lc_monetary: 'en_US.UTF-8'
+        postgresql_lc_numeric: 'en_US.UTF-8'
+        postgresql_lc_time: 'en_US.UTF-8'
+    host_vars:
+      roundcube-postgresql-archlinux:
+        ansible_python_interpreter: /usr/bin/python
+      roundcube-postgresql-debian-trixie:
+        ansible_python_interpreter: /usr/bin/python3
+      roundcube-postgresql-rocky-9:
+        ansible_python_interpreter: /usr/bin/python3
+      roundcube-postgresql-rocky-10:
+        ansible_python_interpreter: /usr/bin/python3
+  config_options:
+    defaults:
+      allow_broken_conditionals: true
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - check
+    - converge
+    - idempotence
+    - check
+    - verify
+    - destroy

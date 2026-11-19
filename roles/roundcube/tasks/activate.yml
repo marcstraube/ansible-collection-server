@@ -1,0 +1,45 @@
+---
+# 'current' switches to the release of this run once its schema is in
+# place. The release that was active before stays for a rollback; older
+# releases are removed.
+
+# Check mode on a host without the release: the link would point to a
+# directory that the check run did not create
+- name: Activate | Point current to the release
+  ansible.builtin.file:
+    src: '{{ __roundcube_release_dir }}'
+    dest: '{{ __roundcube_current_link }}'
+    state: link
+    force: true
+    owner: root
+    group: root
+  register: __roundcube_activate
+  when: not __roundcube_check_mode or __roundcube_release_present | bool
+
+- name: Activate | Report the release change
+  ansible.builtin.debug:
+    msg: >-
+      Roundcube {{ __roundcube_release_previous }} → {{ __roundcube_release }}
+      (the previous release stays in {{ __roundcube_releases_dir }} for a rollback)
+  when:
+    - __roundcube_release_changed | bool
+    - __roundcube_release_previous | length > 0
+
+- name: Activate | Find the releases
+  ansible.builtin.find:
+    paths: '{{ __roundcube_releases_dir }}'
+    file_type: directory
+    hidden: false
+  register: __roundcube_releases
+  when: __roundcube_release_changed | bool
+
+- name: Activate | Remove releases older than the previous one
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: absent
+  loop: >-
+    {{ __roundcube_releases.files | default([]) | map(attribute='path')
+       | reject('in', [__roundcube_release_dir,
+                       __roundcube_releases_dir ~ '/' ~ __roundcube_release_previous])
+       | list }}
+  when: __roundcube_release_changed | bool

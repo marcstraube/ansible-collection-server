@@ -1,0 +1,30 @@
+---
+galaxy_info:
+  author: Marc Straube
+  description: Install Roundcube Webmail as the webmail client of the mail stack
+  license: MIT
+  min_ansible_version: '2.19'
+
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+
+    - name: Debian
+      versions:
+        - trixie
+
+    - name: EL
+      versions:
+        - all
+
+  galaxy_tags:
+    - mail
+    - webmail
+    - roundcube
+    - dovecot
+    - php
+    - postgresql
+    - mariadb
+
+dependencies: []

@@ -1,0 +1,11 @@
+{{ ansible_managed | comment }}
+[Unit]
+Description=Roundcube database cleanup and garbage collection
+
+[Timer]
+OnCalendar={{ roundcube_maintenance_on_calendar }}
+Persistent=true
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target

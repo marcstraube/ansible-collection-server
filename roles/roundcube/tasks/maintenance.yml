@@ -1,0 +1,26 @@
+---
+# roundcube-maintenance.timer runs bin/cleandb.sh and bin/gc.sh of the
+# active release as the PHP-FPM user. The units are always deployed; the
+# toggle only starts or stops the timer.
+
+- name: Maintenance | Deploy the maintenance units
+  ansible.builtin.template:
+    src: '{{ item }}.j2'
+    dest: '{{ __roundcube_systemd_dir }}/{{ item }}'
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - '{{ __roundcube_maintenance_service }}'
+    - '{{ __roundcube_maintenance_timer }}'
+  register: __roundcube_units
+  notify: Restart Roundcube maintenance timer
+
+# A check run on a fresh host has not written the units
+- name: Maintenance | Manage the roundcube-maintenance timer
+  ansible.builtin.systemd_service:
+    name: '{{ __roundcube_maintenance_timer }}'
+    enabled: '{{ roundcube_timer_enabled | bool }}'
+    state: "{{ roundcube_timer_enabled | bool | ternary('started', 'stopped') }}"
+    daemon_reload: '{{ __roundcube_units is changed }}'
+  when: not (__roundcube_check_mode and __roundcube_units is changed)
