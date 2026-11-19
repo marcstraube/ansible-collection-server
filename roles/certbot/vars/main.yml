@@ -1,0 +1,42 @@
+---
+#
+# Shared Variables
+#
+
+# Services reloaded after a renewal run and after an issuance in a play
+__certbot_reload_services: >-
+  {{
+    (['postfix'] if certbot_postfix_enabled | bool else []) +
+    (['dovecot'] if certbot_dovecot_enabled | bool else []) +
+    (['nginx'] if certbot_nginx_enabled | bool else []) +
+    ([__certbot_apache_service_name] if certbot_apache_enabled | bool else []) +
+    certbot_reload_services
+  }}
+
+# Script that reloads them. The renewal unit passes it as --post-hook, so the
+# path must not contain spaces: EL expands $POST_HOOK unquoted.
+__certbot_reload_script: '/usr/local/sbin/certbot-reload-services'
+
+# Post hook value the role writes on EL (POST_HOOK in the environment file)
+__certbot_post_hook_arg: '--post-hook={{ __certbot_reload_script }}'
+
+# Marker the script leaves after a failed check or reload; root only
+__certbot_reload_marker_dir: '/var/lib/certbot-reload-services'
+__certbot_reload_marker: '{{ __certbot_reload_marker_dir }}/pending'
+
+# Role-created units that retry a failed reload while the marker exists
+__certbot_reload_retry_service: 'certbot-reload-retry.service'
+__certbot_reload_retry_timer: 'certbot-reload-retry.timer'
+
+# The retry units exist with reload services and the systemd timer; with
+# cron a cron job retries. certbot_reload_retry_timer_enabled switches either.
+__certbot_reload_retry_units_present: >-
+  {{ __certbot_reload_services | length > 0 and certbot_use_systemd_timer | bool }}
+
+# Hourly cron job that retries a failed reload (cron fallback)
+__certbot_reload_retry_cron_job: '{{ __certbot_reload_script }} --retry'
+
+# Certificates of certbot_certificates with a post hook of their own
+__certbot_certificate_post_hooks: >-
+  {{ certbot_certificates | selectattr('post_hook', 'defined')
+     | map(attribute='post_hook') | select | list }}

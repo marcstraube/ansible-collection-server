@@ -8,14 +8,19 @@
       Archlinux:
         - systemd
         - which
+        - procps-ng
+        - cronie
+        - nginx
       Debian:
         - systemd
         - procps
         - cron
+        - nginx
       RedHat:
         - systemd
         - procps-ng
         - cronie
+        - nginx
 
   tasks:
     - name: Prepare | Update package cache (Arch)
@@ -40,3 +45,104 @@
         state: present
       retries: 3
       delay: 5
+
+    # nginx is the reloaded service with a configuration check. The minimal
+    # configuration is the same on every platform and includes a directory
+    # where verify.yml drops a broken file to make `nginx -t` fail.
+    - name: Prepare | Create the nginx test include directory
+      ansible.builtin.file:
+        path: /etc/nginx/molecule.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Deploy a minimal nginx configuration
+      ansible.builtin.copy:
+        content: |
+          worker_processes 1;
+          pid /run/nginx.pid;
+
+          events {
+              worker_connections 64;
+          }
+
+          http {
+              access_log off;
+              include /etc/nginx/molecule.d/*.conf;
+
+              server {
+                  listen 127.0.0.1:8080;
+                  return 204;
+              }
+          }
+        dest: /etc/nginx/nginx.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Restart nginx
+      ansible.builtin.systemd_service:
+        name: nginx
+        state: restarted
+        enabled: true
+
+    # A service without a configuration check that records every reload, so
+    # verify.yml sees that the script tries it after a failed nginx check
+    - name: Prepare | Deploy the reload test unit
+      ansible.builtin.copy:
+        content: |
+          [Unit]
+          Description=certbot reload test service
+
+          [Service]
+          ExecStart=/usr/bin/sleep infinity
+          ExecReload=/bin/sh -c 'echo reloaded >> /run/molecule-reload-test.log'
+        dest: /etc/systemd/system/molecule-reload-test.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Start the reload test unit
+      ansible.builtin.systemd_service:
+        name: molecule-reload-test.service
+        state: started
+        daemon_reload: true
+
+    # An existing unit that is not running; the script skips it
+    - name: Prepare | Deploy the stopped test unit
+      ansible.builtin.copy:
+        content: |
+          [Unit]
+          Description=certbot reload test service that stays stopped
+
+          [Service]
+          ExecStart=/usr/bin/sleep infinity
+          ExecReload=/bin/true
+        dest: /etc/systemd/system/molecule-stopped.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Load the stopped test unit
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+    # The deploy hook of earlier role versions, which the role removes
+    - name: Prepare | Create the certbot deploy hook directory
+      ansible.builtin.file:
+        path: /etc/letsencrypt/renewal-hooks/deploy
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Plant the former service reload deploy hook
+      ansible.builtin.copy:
+        content: |
+          #!/bin/bash
+          systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+        dest: /etc/letsencrypt/renewal-hooks/deploy/reload-services.sh
+        owner: root
+        group: root
+        mode: '0755'

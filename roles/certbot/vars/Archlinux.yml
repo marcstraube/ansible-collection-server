@@ -26,7 +26,13 @@ __certbot_log_dir: '/var/log/letsencrypt'
 __certbot_timer_name: 'certbot-renew.timer'
 __certbot_service_name: 'certbot-renew.service'
 
-# Apache service reloaded by the renewal deploy hook (certbot_apache_enabled)
+# Renew command of the packaged renewal unit (ExecStart of
+# certbot-renew.service). The role's drop-in replaces ExecStart with this
+# command plus the post hook, so keep it equal to the package; Molecule
+# verify compares both.
+__certbot_renew_command: '/usr/bin/certbot -q renew'
+
+# Apache service reloaded after a renewal (certbot_apache_enabled)
 __certbot_apache_service_name: 'httpd'
 
 __certbot_cron_file: '/etc/cron.d/certbot'

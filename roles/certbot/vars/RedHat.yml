@@ -22,7 +22,12 @@ __certbot_log_dir: '/var/log/letsencrypt'
 __certbot_timer_name: 'certbot-renew.timer'
 __certbot_service_name: 'certbot-renew.service'
 
-# Apache service reloaded by the renewal deploy hook (certbot_apache_enabled)
+# Environment file of certbot-renew.service. Its ExecStart passes $POST_HOOK
+# to the renew command, so the role sets the post hook there instead of
+# replacing ExecStart.
+__certbot_sysconfig_file: '/etc/sysconfig/certbot'
+
+# Apache service reloaded after a renewal (certbot_apache_enabled)
 __certbot_apache_service_name: 'httpd'
 
 __certbot_cron_file: '/etc/cron.d/certbot'

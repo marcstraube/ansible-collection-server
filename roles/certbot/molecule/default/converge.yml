@@ -30,8 +30,12 @@
     certbot_monitoring_script: true
     certbot_expiry_warning_days: 14
 
-    # Test deploy hook
-    certbot_deploy_hook: 'echo "Certificate renewed"'
+    # Services reloaded after a renewal run: nginx (configuration check), a
+    # test unit without a check, and a stopped test unit that is skipped
+    certbot_nginx_enabled: true
+    certbot_reload_services:
+      - 'molecule-reload-test.service'
+      - 'molecule-stopped.service'
 
     # Don't actually request certificates in test
     certbot_certificates: []

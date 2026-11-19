@@ -1,0 +1,473 @@
+---
+# Runs after verify.yml. The first play checks the refusal of a certificate
+# post hook and of a foreign POST_HOOK (EL), the read-only check of saved post
+# hooks, the cron job with post hook and retry, and a configured unit that
+# does not exist. The second play removes all reload services, the third
+# checks that the role removed the script and every reference to it, and the
+# last one that a foreign POST_HOOK survives the removal (EL).
+- name: Side Effect — Post hook guard and cron job
+  hosts: all
+  gather_facts: true
+
+  vars:
+    certbot_enabled: true
+    certbot_email: 'test@example.com'
+    certbot_staging: true
+    certbot_nginx_enabled: true
+    certbot_reload_services:
+      - 'molecule-reload-test.service'
+      - 'molecule-stopped.service'
+
+  tasks:
+    - name: Side Effect | Include certbot with a per-certificate post hook
+      block:
+        - name: Side Effect | Include certbot role with a certificate post hook  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            certbot_certificates:
+              - domains:
+                  - 'www.example.com'
+                authenticator: 'standalone'
+                post_hook: 'systemctl start nginx'
+
+        - name: Side Effect | Fail when the certificate post hook was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a certificate post hook next to the reload services'
+
+      rescue:
+        - name: Side Effect | Assert the role refused the certificate post hook
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search('certbot_certificates sets post_hook')
+            fail_msg: '{{ ansible_failed_result.msg | default(ansible_failed_result) }}'
+            quiet: true
+
+    - name: Side Effect | Refuse a foreign POST_HOOK (EL)
+      when: ansible_facts['os_family'] == 'RedHat'
+      block:
+        - name: Side Effect | Set a foreign POST_HOOK (EL)
+          ansible.builtin.lineinfile:
+            path: /etc/sysconfig/certbot
+            regexp: '^POST_HOOK='
+            line: 'POST_HOOK="--post-hook=/usr/bin/true"'
+
+        - name: Side Effect | Include certbot role with a foreign POST_HOOK (EL)  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+
+        - name: Side Effect | Fail when the foreign POST_HOOK was accepted (EL)
+          ansible.builtin.fail:
+            msg: 'The role accepted a foreign POST_HOOK'
+
+      rescue:
+        - name: Side Effect | Read the environment file after the refusal (EL)
+          ansible.builtin.slurp:
+            src: /etc/sysconfig/certbot
+          register: __side_effect_sysconfig_foreign
+
+        - name: Side Effect | Assert the role refused the foreign POST_HOOK and kept it (EL)
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search('POST_HOOK in /etc/sysconfig/certbot is set to')
+              - >-
+                'POST_HOOK="--post-hook=/usr/bin/true"'
+                in (__side_effect_sysconfig_foreign.content | b64decode).splitlines()
+            fail_msg: '{{ ansible_failed_result.msg | default(ansible_failed_result) }}'
+            quiet: true
+
+        - name: Side Effect | Restore the POST_HOOK of the role (EL)
+          ansible.builtin.lineinfile:
+            path: /etc/sysconfig/certbot
+            regexp: '^POST_HOOK='
+            line: 'POST_HOOK="--post-hook=/usr/local/sbin/certbot-reload-services"'
+
+    # systemd uses the last of several assignments; a foreign one on any line
+    # is refused, an empty one with a trailing space is not foreign
+    - name: Side Effect | Refuse a foreign POST_HOOK on a second line (EL)
+      when: ansible_facts['os_family'] == 'RedHat'
+      block:
+        - name: Side Effect | Add an empty and a foreign POST_HOOK line (EL)
+          ansible.builtin.blockinfile:
+            path: /etc/sysconfig/certbot
+            marker: '# {mark} MOLECULE POST_HOOK'
+            insertbefore: '^POST_HOOK='
+            # The trailing space of the empty value is part of the test
+            block: "POST_HOOK=\"\" \nPOST_HOOK=\"--post-hook=/usr/bin/false\""
+
+        - name: Side Effect | Include certbot role with two extra POST_HOOK lines (EL)  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+
+        - name: Side Effect | Fail when the second POST_HOOK line was accepted (EL)
+          ansible.builtin.fail:
+            msg: 'The role accepted a foreign POST_HOOK on another line'
+
+      rescue:
+        - name: Side Effect | Assert the role refused only the foreign line (EL)
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search('is set to --post-hook=/usr/bin/false, which')
+            fail_msg: '{{ ansible_failed_result.msg | default(ansible_failed_result) }}'
+            quiet: true
+
+        - name: Side Effect | Remove the extra POST_HOOK lines (EL)
+          ansible.builtin.blockinfile:
+            path: /etc/sysconfig/certbot
+            marker: '# {mark} MOLECULE POST_HOOK'
+            state: absent
+
+    # Saved post hooks of certificates: one of another owner, one of the role
+    - name: Side Effect | Create the renewal configuration directory
+      ansible.builtin.file:
+        path: /etc/letsencrypt/renewal
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Side Effect | Create a nested renewal directory
+      ansible.builtin.file:
+        path: /etc/letsencrypt/renewal/nested
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Side Effect | Plant renewal configurations with saved post hooks
+      ansible.builtin.copy:
+        content: "[renewalparams]\npost_hook = {{ item.hook }}\n"
+        dest: '/etc/letsencrypt/renewal/{{ item.name }}.conf'
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - {name: 'foreign.example.com', hook: 'systemctl start nginx'}
+        - {name: 'own.example.com', hook: '/usr/local/sbin/certbot-reload-services'}
+        - {name: 'nested/ignored.example.com', hook: 'systemctl start apache2'}
+
+    # certbot reads only the top level, and follows symlinks there
+    - name: Side Effect | Link a renewal configuration
+      ansible.builtin.file:
+        src: /etc/letsencrypt/renewal/foreign.example.com.conf
+        dest: /etc/letsencrypt/renewal/link.example.com.conf
+        state: link
+
+    - name: Side Effect | Include certbot role with the cron job  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        certbot_use_systemd_timer: false
+        certbot_reload_services:
+          - 'molecule-reload-test.service'
+          - 'molecule-missing.service'
+
+    - name: Side Effect | Read the planted renewal configurations
+      ansible.builtin.slurp:
+        src: /etc/letsencrypt/renewal/foreign.example.com.conf
+      register: __side_effect_planted
+
+    # The role found both, warned about the foreign one and changed nothing
+    - name: Side Effect | Assert the role read the saved post hooks without changing them
+      ansible.builtin.assert:
+        that:
+          - __certbot_saved_post_hooks.stdout_lines | length == 3
+          - >-
+            __certbot_saved_post_hooks.stdout_lines
+            | select('search', 'foreign.example.com.conf:post_hook = systemctl start nginx') | list | length == 1
+          - >-
+            __certbot_saved_post_hooks.stdout_lines
+            | select('search', 'link.example.com.conf:post_hook = systemctl start nginx') | list | length == 1
+          - "'apache2' not in __certbot_saved_post_hooks.stdout"
+          - (__side_effect_planted.content | b64decode) == "[renewalparams]\npost_hook = systemctl start nginx\n"
+        fail_msg: '{{ __certbot_saved_post_hooks.stdout_lines }}'
+        quiet: true
+
+    # certbot renew would refuse the incomplete files later in side_effect
+    - name: Side Effect | Remove the planted renewal configurations
+      ansible.builtin.file:
+        path: '/etc/letsencrypt/renewal/{{ item }}'
+        state: absent
+      loop:
+        - 'link.example.com.conf'
+        - 'foreign.example.com.conf'
+        - 'own.example.com.conf'
+        - 'nested'
+
+    - name: Side Effect | Read the crontab of root
+      ansible.builtin.command:
+        cmd: crontab -l -u root
+      register: __side_effect_crontab
+      changed_when: false
+
+    - name: Side Effect | Check the reload retry timer in cron mode
+      ansible.builtin.stat:
+        path: /etc/systemd/system/certbot-reload-retry.timer
+      register: __side_effect_retry_timer_cron
+
+    - name: Side Effect | Assert the cron jobs pass the post hook and retry the reload
+      ansible.builtin.assert:
+        that:
+          - >-
+            '0 3 * * * certbot renew --quiet --post-hook=/usr/local/sbin/certbot-reload-services'
+            in __side_effect_crontab.stdout_lines
+          - "'30 * * * * /usr/local/sbin/certbot-reload-services --retry' in __side_effect_crontab.stdout_lines"
+          - not __side_effect_retry_timer_cron.stat.exists
+        fail_msg: '{{ __side_effect_crontab.stdout_lines }}'
+        quiet: true
+
+    - name: Side Effect | Run the service reload script with a unit that does not exist
+      ansible.builtin.command:
+        cmd: /usr/local/sbin/certbot-reload-services
+      register: __side_effect_reload_missing
+      changed_when: false
+      failed_when: false
+
+    - name: Side Effect | Check the retry marker after the missing unit
+      ansible.builtin.stat:
+        path: /var/lib/certbot-reload-services/pending
+      register: __side_effect_marker_missing
+
+    - name: Side Effect | Assert a missing unit fails the script and leaves the marker
+      ansible.builtin.assert:
+        that:
+          - __side_effect_reload_missing.rc == 1
+          - "'certbot-reload-services: molecule-missing.service: unit not found, not reloaded'
+            in __side_effect_reload_missing.stderr_lines"
+          - "'certbot-reload-services: nginx reloaded' in __side_effect_reload_missing.stdout_lines"
+          - __side_effect_marker_missing.stat.exists
+        fail_msg: '{{ __side_effect_reload_missing.stdout_lines + __side_effect_reload_missing.stderr_lines }}'
+        quiet: true
+
+    # Back to the systemd timer, with the retry timer switched off: both cron
+    # jobs go away, the retry units stay but the timer does not run
+    - name: Side Effect | Include certbot role with the systemd timer and no retry timer  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        certbot_reload_retry_timer_enabled: false
+
+    - name: Side Effect | Read the crontab of root after the switch
+      ansible.builtin.command:
+        cmd: crontab -l -u root
+      register: __side_effect_crontab_switched
+      changed_when: false
+      # crontab -l exits with 1 when root has no crontab left
+      failed_when: __side_effect_crontab_switched.rc > 1
+
+    - name: Side Effect | Read the reload retry timer with the toggle off
+      ansible.builtin.systemd_service:
+        name: certbot-reload-retry.timer
+      register: __side_effect_retry_timer_off
+
+    - name: Side Effect | Assert the switch removed the cron jobs and the toggle stopped the retry timer
+      ansible.builtin.assert:
+        that:
+          - "'certbot renew' not in __side_effect_crontab_switched.stdout"
+          - "'--retry' not in __side_effect_crontab_switched.stdout"
+          - __side_effect_retry_timer_off.status.LoadState == 'loaded'
+          - __side_effect_retry_timer_off.status.ActiveState == 'inactive'
+          - __side_effect_retry_timer_off.status.UnitFileState == 'disabled'
+        fail_msg: >-
+          {{ __side_effect_crontab_switched.stdout_lines }},
+          timer {{ __side_effect_retry_timer_off.status.ActiveState }}
+          {{ __side_effect_retry_timer_off.status.UnitFileState }}
+        quiet: true
+
+- name: Side Effect — No reload services
+  hosts: all
+  gather_facts: false
+
+  vars:
+    certbot_enabled: true
+    certbot_email: 'test@example.com'
+    certbot_staging: true
+    certbot_use_systemd_timer: false
+    certbot_deploy_hook: 'echo "Certificate renewed"'
+
+  tasks:
+    - name: Side Effect | Include certbot role without reload services  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+
+# A separate play, so the checks read the state after the removal run
+- name: Side Effect — Check the removal
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Load the OS variables of the role
+      ansible.builtin.include_vars:
+        file: '{{ playbook_dir }}/../../vars/{{ ansible_facts["os_family"] }}.yml'
+
+    - name: Side Effect | Check the service reload script
+      ansible.builtin.stat:
+        path: /usr/local/sbin/certbot-reload-services
+      register: __side_effect_script
+
+    - name: Side Effect | Find files in the renewal deploy hook directory
+      ansible.builtin.find:
+        paths: /etc/letsencrypt/renewal-hooks/deploy
+        hidden: true
+        file_type: any
+      register: __side_effect_deploy_hooks
+
+    - name: Side Effect | Check the global deploy hook
+      ansible.builtin.stat:
+        path: /etc/letsencrypt/renewal-hooks/deploy/global-deploy-hook.sh
+      register: __side_effect_global_deploy_hook
+
+    - name: Side Effect | Check the retry marker directory
+      ansible.builtin.stat:
+        path: /var/lib/certbot-reload-services
+      register: __side_effect_marker_dir
+
+    - name: Side Effect | Check the reload retry units
+      ansible.builtin.stat:
+        path: '/etc/systemd/system/{{ item }}'
+      loop:
+        - certbot-reload-retry.service
+        - certbot-reload-retry.timer
+      register: __side_effect_retry_units
+
+    - name: Side Effect | Assert the script is removed and the global deploy hook is kept
+      ansible.builtin.assert:
+        that:
+          - not __side_effect_script.stat.exists
+          - not __side_effect_marker_dir.stat.exists
+          - __side_effect_retry_units.results | selectattr('stat.exists') | list | length == 0
+          - >-
+            __side_effect_deploy_hooks.files | map(attribute='path') | map('basename') | list
+            == ['global-deploy-hook.sh']
+          - __side_effect_global_deploy_hook.stat.mode == '0755'
+        fail_msg: >-
+          Deploy hooks: {{ __side_effect_deploy_hooks.files | map(attribute='path') | list }}
+        quiet: true
+
+    - name: Side Effect | Check the post hook drop-in
+      ansible.builtin.stat:
+        path: '/etc/systemd/system/{{ __certbot_service_name }}.d/post-hook.conf'
+      register: __side_effect_dropin
+
+    - name: Side Effect | Read the state of the renewal unit
+      ansible.builtin.systemd_service:
+        name: '{{ __certbot_service_name }}'
+      register: __side_effect_renew_unit
+
+    - name: Side Effect | Assert the drop-in is removed and the packaged command runs
+      ansible.builtin.assert:
+        that:
+          - not __side_effect_dropin.stat.exists
+          - __side_effect_renew_unit.status.ExecStart.count('argv[]=') == 1
+          - ('argv[]=' ~ __certbot_renew_command ~ ' ;') in __side_effect_renew_unit.status.ExecStart
+        fail_msg: 'ExecStart: {{ __side_effect_renew_unit.status.ExecStart }}'
+        quiet: true
+      when: ansible_facts['os_family'] in ['Archlinux', 'Debian']
+
+    - name: Side Effect | Read the environment file of the renewal unit (EL)
+      ansible.builtin.slurp:
+        src: /etc/sysconfig/certbot
+      register: __side_effect_sysconfig
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Side Effect | Assert POST_HOOK is empty again (EL)
+      ansible.builtin.assert:
+        that:
+          - "'POST_HOOK=\"\"' in __side_effect_lines"
+          - __side_effect_lines | select('match', '^POST_HOOK=') | list | length == 1
+        fail_msg: '/etc/sysconfig/certbot: {{ __side_effect_lines }}'
+        quiet: true
+      vars:
+        __side_effect_lines: '{{ (__side_effect_sysconfig.content | b64decode).splitlines() }}'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Side Effect | Read the crontab of root
+      ansible.builtin.command:
+        cmd: crontab -l -u root
+      register: __side_effect_crontab
+      changed_when: false
+
+    - name: Side Effect | Assert the cron job no longer passes the post hook
+      ansible.builtin.assert:
+        that:
+          - "'0 3 * * * certbot renew --quiet' in __side_effect_crontab.stdout_lines"
+          - "'post-hook' not in __side_effect_crontab.stdout"
+          - "'--retry' not in __side_effect_crontab.stdout"
+        fail_msg: '{{ __side_effect_crontab.stdout_lines }}'
+        quiet: true
+
+    # The renewal unit still runs without the hook. Not on Debian, where
+    # certbot cannot start in the test image (see verify.yml).
+    - name: Side Effect | Run the renewal unit
+      ansible.builtin.systemd_service:
+        name: '{{ __certbot_service_name }}'
+        state: started
+      changed_when: false
+      when: ansible_facts['os_family'] != 'Debian'
+
+    - name: Side Effect | Read the result of the renewal unit
+      ansible.builtin.systemd_service:
+        name: '{{ __certbot_service_name }}'
+      register: __side_effect_renew_result
+      when: ansible_facts['os_family'] != 'Debian'
+
+    - name: Side Effect | Read the arguments certbot received
+      ansible.builtin.command:
+        cmd: grep -m1 'Arguments:' /var/log/letsencrypt/letsencrypt.log
+      register: __side_effect_renew_args
+      changed_when: false
+      when: ansible_facts['os_family'] != 'Debian'
+
+    - name: Side Effect | Assert the renewal unit ran without a post hook
+      ansible.builtin.assert:
+        that:
+          - __side_effect_renew_result.status.Result == 'success'
+          - "'post-hook' not in __side_effect_renew_args.stdout"
+        fail_msg: >-
+          Result {{ __side_effect_renew_result.status.Result }}, {{ __side_effect_renew_args.stdout }}
+        quiet: true
+      when: ansible_facts['os_family'] != 'Debian'
+
+# Without reload services the role resets only its own POST_HOOK value
+- name: Side Effect — Foreign POST_HOOK survives the removal (EL)
+  hosts: all
+  gather_facts: true
+
+  vars:
+    certbot_enabled: true
+    certbot_email: 'test@example.com'
+    certbot_staging: true
+
+  tasks:
+    - name: Side Effect | Keep a foreign POST_HOOK without reload services (EL)
+      when: ansible_facts['os_family'] == 'RedHat'
+      block:
+        - name: Side Effect | Set a foreign POST_HOOK without reload services (EL)
+          ansible.builtin.lineinfile:
+            path: /etc/sysconfig/certbot
+            regexp: '^POST_HOOK='
+            line: 'POST_HOOK="--post-hook=/usr/bin/true"'
+
+        - name: Side Effect | Include certbot role without reload services (EL)  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+
+        - name: Side Effect | Read the environment file after the removal run (EL)
+          ansible.builtin.slurp:
+            src: /etc/sysconfig/certbot
+          register: __side_effect_sysconfig_kept
+
+        - name: Side Effect | Assert the foreign POST_HOOK is kept (EL)
+          ansible.builtin.assert:
+            that:
+              - >-
+                'POST_HOOK="--post-hook=/usr/bin/true"'
+                in (__side_effect_sysconfig_kept.content | b64decode).splitlines()
+            quiet: true
+
+        # Leaves kept instances ready for another converge
+        - name: Side Effect | Reset the foreign POST_HOOK (EL)
+          ansible.builtin.lineinfile:
+            path: /etc/sysconfig/certbot
+            regexp: '^POST_HOOK='
+            line: 'POST_HOOK=""'
