@@ -85,6 +85,8 @@ apache_modules_enabled:
 The server-wide `Protocols` line the role then writes follows
 `apache_http2_enabled`, so set `Protocols` in your own vhosts.
 
+## v1.1.4 - 2026-11-19
+
 ### `certbot` — services reload once per renewal run, without a restart
 
 The services of `certbot_postfix_enabled`, `certbot_dovecot_enabled`,

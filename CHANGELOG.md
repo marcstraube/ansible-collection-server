@@ -2,6 +2,17 @@
 
 All notable changes to this collection will be documented in this file.
 
+## 1.1.4 (2026-11-19)
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+## What's Changed
+### Bug Fixes
+* fix(certbot): reload the services once per renewal run by @marcstraube in https://github.com/marcstraube/ansible-collection-server/pull/177
+
+
+**Full Changelog**: https://github.com/marcstraube/ansible-collection-server/compare/v1.1.3...v1.1.4
+
 ## 1.1.3 (2026-11-12)
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
