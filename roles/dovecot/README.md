@@ -366,8 +366,9 @@ exist and fails before any change when one is missing.
 
 The role reloads Dovecot on the handler topic `Reload cert services` of
 `marcstraube.common.pki` and `marcstraube.server.certbot`. Renewals by the
-certbot timer outside Ansible reload Dovecot through the deploy hook of
-`certbot_dovecot_enabled`.
+certbot timer outside Ansible reload Dovecot once per renewal run through the
+post hook of `marcstraube.server.certbot`, which `certbot_dovecot_enabled`
+adds Dovecot to.
 
 ### Mailboxes
 
