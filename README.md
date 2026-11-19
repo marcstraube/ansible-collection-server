@@ -43,6 +43,18 @@ for the base system (podman, pki, firewalld, fail2ban).
 | -------------- | ----------------------------------------------------------- |
 | **postgresql** | PostgreSQL server with TLS and the PGDG repository option   |
 | **mariadb**    | MariaDB server with TLS and the upstream repository option  |
+| **valkey**     | Valkey key-value store with ACL users, unix socket and TLS  |
+
+### Mail
+
+| Role                | Description                                                     |
+| ------------------- | --------------------------------------------------------------- |
+| **postfixadmin**    | PostfixAdmin with its schema, read-only users and mail accounts |
+| **dovecot**         | Dovecot 2.4: IMAP, LMTP, SASL, ManageSieve and shared mailboxes |
+| **postfix**         | Postfix MTA with PostfixAdmin lookups, Dovecot LMTP and SASL    |
+| **rspamd**          | rspamd mail filter: milter, DKIM/ARC signing, clamd, Valkey     |
+| **roundcube**       | Roundcube webmail with Sieve filters, sharing, password change  |
+| **mail_autoconfig** | Mail client autoconfiguration (Autoconfig, Autodiscover, Apple) |
 
 ### Applications
 

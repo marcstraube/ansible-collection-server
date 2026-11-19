@@ -1,0 +1,60 @@
+---
+# A Dovecot that already runs (started by the Debian package with its own
+# configuration, or by an earlier run) keeps its old configuration until a
+# reload. The tasks after this file talk to it through doveadm, which reads
+# the configuration of the running service (shared mailbox ACLs need the
+# acl plugin and the SQL userdb of the new configuration), so the change is
+# applied here, not only by the handler at the end of the play. A service
+# the next task starts reads the new configuration anyway.
+#
+# A reload is not enough after packages were added while Dovecot ran: the
+# master rereads dovecot.conf in-process with the settings of the modules it
+# loaded at its start, so a section of a new module (e.g. 'pgsql' of
+# dovecot-pgsql) fails the reload ("Unknown section name: pgsql - doveconf
+# execution fallback is disabled"). Dovecot logs the error and keeps the old
+# configuration, while systemctl reload still succeeds. The service is
+# restarted then. Only with packages_state 'present' (always on Arch Linux),
+# where a changed package task means added packages: a targeted update
+# ('latest') restarts a replaced binary in install.yml already, and a
+# second start here would restart the service twice.
+- name: Service | Check whether Dovecot runs
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-active
+      - '{{ __dovecot_service_name }}'
+  register: __dovecot_service_active
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# Check mode on a new host has not installed the unit
+- name: Service | Manage Dovecot service
+  ansible.builtin.systemd_service:
+    name: '{{ __dovecot_service_name }}'
+    enabled: "{{ dovecot_service_enabled | bool }}"
+    state: "{{ dovecot_service_enabled | bool | ternary('started', 'stopped') }}"
+  when: not __dovecot_check_mode_install | default(false) | bool
+
+- name: Service | Restart Dovecot for packages added while it ran
+  ansible.builtin.systemd_service:
+    name: '{{ __dovecot_service_name }}'
+    state: restarted
+  when:
+    - dovecot_service_enabled | bool
+    - not __dovecot_check_mode_install | default(false) | bool
+    - (__dovecot_service_active.stdout | default('') | trim) == 'active'
+    - (__dovecot_packages_result | default({})) is changed
+    - dovecot_packages_state == 'present' or ansible_facts['os_family'] == 'Archlinux'
+
+- name: Service | Reload Dovecot for the changed configuration
+  ansible.builtin.systemd_service:
+    name: '{{ __dovecot_service_name }}'
+    state: reloaded
+  when:
+    - dovecot_service_enabled | bool
+    - not __dovecot_check_mode_install | default(false) | bool
+    - (__dovecot_service_active.stdout | default('') | trim) == 'active'
+    - __dovecot_config_changed | default(false) | bool
+    - not ((__dovecot_packages_result | default({})) is changed
+           and (dovecot_packages_state == 'present' or ansible_facts['os_family'] == 'Archlinux'))

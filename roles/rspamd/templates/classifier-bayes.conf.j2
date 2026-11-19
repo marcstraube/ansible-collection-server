@@ -1,0 +1,4 @@
+{{ ansible_managed | comment }}
+# Bayes keeps its statistics in Valkey (redis.conf)
+backend = "redis";
+autolearn = {{ rspamd_bayes_autolearn | bool | to_json }};

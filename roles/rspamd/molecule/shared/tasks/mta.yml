@@ -1,0 +1,56 @@
+---
+# Postfix as the MTA in front of rspamd: the package with a few postconf
+# settings, enough to pass mail through the milter and deliver it to the
+# Maildir of the local user 'molecule'. XCLIENT from the loopback interface
+# lets verify.yml send as an outside client (another address than the
+# local connection), so the milter sees that client. The milter is not up
+# yet when Postfix starts; mail only flows in verify.yml.
+# Input: __prepare_milter ('inet:<host>:<port>'), __prepare_inet_interfaces.
+
+- name: Prepare | Preseed Postfix debconf selections (Debian)
+  ansible.builtin.debconf:
+    name: postfix
+    question: 'postfix/main_mailer_type'
+    value: 'Local only'
+    vtype: 'select'
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Prepare | Install Postfix
+  ansible.builtin.package:
+    name: postfix
+    state: present
+  retries: 3
+  delay: 5
+
+- name: Prepare | Create the mail user
+  ansible.builtin.user:
+    name: molecule
+    shell: /bin/sh
+    create_home: true
+    state: present
+
+- name: Prepare | Configure Postfix
+  ansible.builtin.command:
+    argv: ['postconf', '-e', '{{ item }}']
+  loop:
+    - 'myhostname = mail.example.com'
+    - 'mydomain = example.com'
+    - 'inet_interfaces = {{ __prepare_inet_interfaces }}'
+    - 'inet_protocols = ipv4'
+    - 'mydestination = localhost, $myhostname'
+    - 'mynetworks = 127.0.0.0/8'
+    - 'home_mailbox = Maildir/'
+    - 'alias_maps ='
+    - 'alias_database ='
+    - 'smtpd_authorized_xclient_hosts = 127.0.0.0/8'
+    - 'smtpd_milters = {{ __prepare_milter }}'
+    - 'non_smtpd_milters = {{ __prepare_milter }}'
+    - 'milter_default_action = tempfail'
+    - 'smtpd_relay_restrictions = permit_mynetworks, reject_unauth_destination'
+  changed_when: true
+
+- name: Prepare | Start Postfix
+  ansible.builtin.systemd_service:
+    name: postfix
+    state: restarted
+    enabled: true

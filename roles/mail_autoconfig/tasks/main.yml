@@ -1,0 +1,156 @@
+---
+- name: Main | Validate settings
+  when: mail_autoconfig_enabled | bool
+  tags:
+    - always
+  block:
+    - name: Main | Assert mail domains
+      ansible.builtin.assert:
+        that:
+          - mail_autoconfig_domains is sequence
+          - mail_autoconfig_domains is not string
+          - mail_autoconfig_domains is not mapping
+          - mail_autoconfig_domains | length > 0
+          - mail_autoconfig_domains | reject('string') | list | length == 0
+          - mail_autoconfig_domains | reject('match', __mail_autoconfig_hostname_regex) | list | length == 0
+        fail_msg: >-
+          mail_autoconfig_domains must be a non-empty list of domain names
+          (e.g. ['example.com']).
+        quiet: true
+
+    - name: Main | Assert server host names
+      ansible.builtin.assert:
+        that:
+          - mail_autoconfig_imap_host is string
+          - mail_autoconfig_imap_host is match(__mail_autoconfig_hostname_regex)
+          - mail_autoconfig_submission_host is string
+          - mail_autoconfig_submission_host is match(__mail_autoconfig_hostname_regex)
+          - not mail_autoconfig_pop3_enabled | bool
+            or (mail_autoconfig_pop3_host is string
+                and mail_autoconfig_pop3_host is match(__mail_autoconfig_hostname_regex))
+        fail_msg: >-
+          mail_autoconfig_imap_host, mail_autoconfig_submission_host and, with
+          POP3 enabled, mail_autoconfig_pop3_host must be fully qualified host
+          names (e.g. 'mail.example.com').
+        quiet: true
+
+    - name: Main | Assert submission mode
+      ansible.builtin.assert:
+        that:
+          - mail_autoconfig_submission_implicit_tls_enabled | bool
+            or mail_autoconfig_submission_starttls_enabled | bool
+        fail_msg: >-
+          At least one of mail_autoconfig_submission_implicit_tls_enabled and
+          mail_autoconfig_submission_starttls_enabled must be true.
+        quiet: true
+
+    # Digits only: an extra variable from the command line arrives as a
+    # string, a float or a boolean would be cut to a different port
+    - name: Main | Assert ports
+      ansible.builtin.assert:
+        that:
+          - __mail_autoconfig_ports | map('string') | reject('match', '^[0-9]+$') | list | length == 0
+          - __mail_autoconfig_ports | map('int') | select('lt', 1) | list | length == 0
+          - __mail_autoconfig_ports | map('int') | select('gt', 65535) | list | length == 0
+        fail_msg: >-
+          The ports of the enabled services (mail_autoconfig_imap_port,
+          mail_autoconfig_submission_implicit_tls_port,
+          mail_autoconfig_submission_starttls_port, mail_autoconfig_pop3_port)
+          and, with the DNS check enabled, mail_autoconfig_dns_resolver_port must
+          be integers from 1 to 65535.
+        quiet: true
+      vars:
+        __mail_autoconfig_ports: >-
+          {{
+            [mail_autoconfig_imap_port]
+            + ([mail_autoconfig_submission_implicit_tls_port]
+               if mail_autoconfig_submission_implicit_tls_enabled | bool else [])
+            + ([mail_autoconfig_submission_starttls_port]
+               if mail_autoconfig_submission_starttls_enabled | bool else [])
+            + ([mail_autoconfig_pop3_port] if mail_autoconfig_pop3_enabled | bool else [])
+            + ([mail_autoconfig_dns_resolver_port] if mail_autoconfig_dns_check_enabled | bool else [])
+          }}
+
+    - name: Main | Assert web root
+      ansible.builtin.assert:
+        that:
+          - mail_autoconfig_web_root is string
+          - mail_autoconfig_web_root is match('^/.+')
+        fail_msg: >-
+          mail_autoconfig_web_root must be an absolute path.
+        quiet: true
+
+    # Read-only, so it also runs in check mode; on a fresh host the web root
+    # does not exist yet and the role creates it (files.yml)
+    - name: Main | Check web root
+      ansible.builtin.stat:
+        path: '{{ mail_autoconfig_web_root }}'
+        follow: true
+        get_checksum: false
+        get_mime: false
+        get_attributes: false
+      register: __mail_autoconfig_web_root_stat
+
+    # The files tell the clients where to send the passwords: whoever can
+    # replace them redirects the logins. The role never changes the owner or
+    # mode of an existing web root, it refuses one that others than root can
+    # write to.
+    - name: Main | Assert web root permissions
+      ansible.builtin.assert:
+        that:
+          - not __mail_autoconfig_web_root_stat.stat.exists
+            or (__mail_autoconfig_web_root_stat.stat.isdir
+                and __mail_autoconfig_web_root_stat.stat.uid == 0
+                and not __mail_autoconfig_web_root_stat.stat.wgrp
+                and not __mail_autoconfig_web_root_stat.stat.woth)
+        fail_msg: >-
+          mail_autoconfig_web_root ({{ mail_autoconfig_web_root }}) must be a
+          directory owned by root and not writable by group or others (found:
+          {{ 'directory' if __mail_autoconfig_web_root_stat.stat.isdir | default(false) else 'not a directory' }},
+          owner {{ __mail_autoconfig_web_root_stat.stat.pw_name | default('unknown') }},
+          group {{ __mail_autoconfig_web_root_stat.stat.gr_name | default('unknown') }},
+          mode {{ __mail_autoconfig_web_root_stat.stat.mode | default('unknown') }}).
+          The files in it tell the mail clients where to send their passwords,
+          so the web root has to be a directory of its own for these files, served
+          by a site of its own for autoconfig.<domain> and
+          autodiscover.<domain>, and must not be writable by the web server or
+          deploy users, otherwise a compromised web server could swap the files
+          and redirect the logins. The role does not change the owner or mode
+          of an existing web root: fix it (root-owned, e.g. root:root 0755) or
+          use a path that does not exist yet, which the role creates.
+        quiet: true
+
+    # The web host is the target of the printed autoconfig and autodiscover
+    # records, which are shown on every run. Its default, the fqdn fact, is
+    # missing without gathered facts and a bare host name in many setups.
+    - name: Main | Assert web host
+      ansible.builtin.assert:
+        that:
+          - mail_autoconfig_web_host | default('', true) is string
+          - mail_autoconfig_web_host | default('', true) is match(__mail_autoconfig_hostname_regex)
+        fail_msg: >-
+          mail_autoconfig_web_host must be the fully qualified name of the web
+          host that serves the files (e.g. 'web.example.com'); its default, the
+          fqdn fact, is missing or not fully qualified on this host.
+        quiet: true
+
+- name: Main | Import files tasks
+  ansible.builtin.import_tasks: files.yml
+  when: mail_autoconfig_enabled | bool
+  tags:
+    - mail-autoconfig
+    - mail-autoconfig:files
+
+- name: Main | Import DNS tasks
+  ansible.builtin.import_tasks: dns.yml
+  when: mail_autoconfig_enabled | bool
+  tags:
+    - mail-autoconfig
+    - mail-autoconfig:dns
+
+- name: Main | Import HTTP tasks
+  ansible.builtin.import_tasks: http.yml
+  when: mail_autoconfig_enabled | bool
+  tags:
+    - mail-autoconfig
+    - mail-autoconfig:http

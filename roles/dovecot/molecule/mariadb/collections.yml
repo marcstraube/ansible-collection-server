@@ -1,0 +1,5 @@
+---
+collections:
+  - name: ansible.mariadb
+  - name: ansible.posix
+  - name: community.general

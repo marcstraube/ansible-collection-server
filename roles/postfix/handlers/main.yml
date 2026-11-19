@@ -1,0 +1,27 @@
+---
+# postfix reload rereads main.cf, master.cf and the lookup files and lets
+# the running services finish their sessions. The handler also subscribes
+# to the 'Reload cert services' topic of marcstraube.common.pki: smtpd reads
+# certificate and key when it starts, and a reload starts new ones. While a
+# restart is pending for the same run (changed listeners), the restart
+# below covers it. A host where the service was not started yet (check mode
+# on a new host) has nothing to reload or restart.
+- name: Reload Postfix server
+  ansible.builtin.systemd_service:
+    name: '{{ __postfix_service_name }}'
+    state: reloaded
+  listen: Reload cert services
+  when:
+    - postfix_service_enabled | bool
+    - not __postfix_check_mode_install | default(false) | bool
+    - not __postfix_restart_needed | default(false) | bool
+
+# inet_interfaces and inet_protocols take effect with a restart only
+- name: Restart Postfix server
+  ansible.builtin.systemd_service:
+    name: '{{ __postfix_service_name }}'
+    state: restarted
+  when:
+    - postfix_service_enabled | bool
+    - not __postfix_check_mode_install | default(false) | bool
+    - __postfix_restart_needed | default(false) | bool

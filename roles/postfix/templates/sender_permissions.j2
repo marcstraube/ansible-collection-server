@@ -1,0 +1,6 @@
+{{ ansible_managed | comment }}
+# Sender address, then the logins allowed to send as it in addition to the
+# owners of the PostfixAdmin database (postfix_sender_permissions)
+{% for address, logins in postfix_sender_permissions.items() | sort %}
+{{ address | lower }} {{ logins | join(',') }}
+{% endfor %}

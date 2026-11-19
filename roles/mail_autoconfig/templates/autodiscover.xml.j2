@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+{{ ansible_managed | comment('xml') }}
+<Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/responseschema/2006">
+  <Response xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a">
+    <Account>
+      <AccountType>email</AccountType>
+      <Action>settings</Action>
+      <Protocol>
+        <Type>IMAP</Type>
+        <Server>{{ mail_autoconfig_imap_host | e }}</Server>
+        <Port>{{ mail_autoconfig_imap_port | int }}</Port>
+        <DomainRequired>off</DomainRequired>
+        <SPA>off</SPA>
+        <SSL>on</SSL>
+        <AuthRequired>on</AuthRequired>
+      </Protocol>
+{% if mail_autoconfig_pop3_enabled | bool %}
+      <Protocol>
+        <Type>POP3</Type>
+        <Server>{{ mail_autoconfig_pop3_host | e }}</Server>
+        <Port>{{ mail_autoconfig_pop3_port | int }}</Port>
+        <DomainRequired>off</DomainRequired>
+        <SPA>off</SPA>
+        <SSL>on</SSL>
+        <AuthRequired>on</AuthRequired>
+      </Protocol>
+{% endif %}
+{% set submission = __mail_autoconfig_submission | first %}
+      <Protocol>
+        <Type>SMTP</Type>
+        <Server>{{ mail_autoconfig_submission_host | e }}</Server>
+        <Port>{{ submission.port }}</Port>
+        <DomainRequired>off</DomainRequired>
+        <SPA>off</SPA>
+        <SSL>on</SSL>
+{% if submission.socket == 'STARTTLS' %}
+        <Encryption>TLS</Encryption>
+{% endif %}
+        <AuthRequired>on</AuthRequired>
+        <UsePOPAuth>on</UsePOPAuth>
+        <SMTPLast>off</SMTPLast>
+      </Protocol>
+    </Account>
+  </Response>
+</Autodiscover>

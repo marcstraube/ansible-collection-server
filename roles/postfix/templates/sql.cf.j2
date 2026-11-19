@@ -1,0 +1,17 @@
+{{ ansible_managed | comment }}
+# {{ item }}: PostfixAdmin lookup through {{ postfix_db_type }}
+{% if postfix_db_type == 'postgresql' %}
+hosts = {{ __postfix_pgsql_uri }}
+# Required by Postfix, the URI above names the database for libpq
+dbname = {{ postfix_db_name }}
+{% else %}
+hosts = {{ __postfix_mysql_hosts }}
+user = {{ postfix_db_user }}
+password = {{ postfix_db_password }}
+dbname = {{ postfix_db_name }}
+{% if postfix_db_tls | bool %}
+tls_CAfile = {{ postfix_db_tls_ca_file }}
+tls_verify_cert = yes
+{% endif %}
+{% endif %}
+query = {{ __postfix_sql_query | trim | regex_replace('\s+', ' ') }}

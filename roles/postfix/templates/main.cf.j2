@@ -1,0 +1,149 @@
+{%- macro value(v) -%}
+{%- if v is boolean -%}
+{{ 'yes' if v else 'no' }}
+{%- elif v is iterable and v is not string and v is not mapping -%}
+{{ v | join(', ') }}
+{%- else -%}
+{{ v }}
+{%- endif -%}
+{%- endmacro -%}
+{%- set sql = __postfix_sql_table -%}
+{%- set sections = [
+  ['Compatibility', [
+    ['compatibility_level', __postfix_compatibility_level_effective],
+  ]],
+  ['Directories, programs and owners of the platform', [
+    ['queue_directory', __postfix_queue_directory],
+    ['command_directory', __postfix_command_directory],
+    ['daemon_directory', __postfix_daemon_directory],
+    ['data_directory', __postfix_data_directory],
+    ['meta_directory', __postfix_config_dir],
+    ['shlib_directory', __postfix_shlib_directory],
+    ['mail_owner', __postfix_mail_owner],
+    ['setgid_group', __postfix_setgid_group],
+    ['sendmail_path', __postfix_sendmail_path],
+    ['newaliases_path', __postfix_newaliases_path],
+    ['mailq_path', __postfix_mailq_path],
+    ['manpage_directory', __postfix_manpage_directory],
+    ['sample_directory', __postfix_sample_directory],
+    ['readme_directory', __postfix_readme_directory],
+    ['html_directory', __postfix_html_directory],
+    ['default_database_type', 'lmdb'],
+  ]],
+  ['Identity', [
+    ['myhostname', postfix_myhostname],
+    ['mydomain', postfix_mydomain],
+    ['myorigin', postfix_myorigin],
+    ['smtpd_banner', postfix_smtpd_banner],
+    ['biff', false],
+    ['append_dot_mydomain', false],
+  ]],
+  ['Network', [
+    ['inet_interfaces', postfix_inet_interfaces],
+    ['inet_protocols', postfix_inet_protocols],
+    ['mynetworks', postfix_mynetworks],
+  ]],
+  ['Local mail: the names of the host only, every mail domain is virtual', [
+    ['mydestination', '$myhostname, localhost.$mydomain, localhost'],
+    ['alias_maps', 'lmdb:' ~ __postfix_alias_file],
+    ['alias_database', 'lmdb:' ~ __postfix_alias_file],
+    ['mailbox_size_limit', 0],
+  ]],
+  ['Virtual domains from PostfixAdmin, delivered to Dovecot over LMTP', [
+    ['virtual_mailbox_domains', __postfix_sql_tables.virtual_mailbox_domains | map('regex_replace', '^', sql) | map('regex_replace', '$', '.cf') | list],
+    ['virtual_mailbox_maps', __postfix_sql_tables.virtual_mailbox_maps | map('regex_replace', '^', sql) | map('regex_replace', '$', '.cf') | list],
+    ['virtual_alias_maps', __postfix_sql_tables.virtual_alias_maps | map('regex_replace', '^', sql) | map('regex_replace', '$', '.cf') | list],
+    ['virtual_transport', 'lmtp:' ~ postfix_lmtp_address],
+    ['lmtp_host_lookup', 'dns, native'],
+  ]],
+  ['SASL authentication through Dovecot (enabled on submission only)', [
+    ['smtpd_sasl_type', 'dovecot'],
+    ['smtpd_sasl_path', postfix_sasl_path],
+    ['smtpd_sasl_auth_enable', false],
+    ['smtpd_sasl_security_options', 'noanonymous, noplaintext'],
+    ['smtpd_sasl_tls_security_options', 'noanonymous'],
+    ['smtpd_sender_login_maps', __postfix_sender_login_maps],
+  ]],
+  ['Restrictions on port 25; submission overrides them in master.cf', [
+    ['smtpd_helo_required', true],
+    ['disable_vrfy_command', true],
+    ['smtpd_helo_restrictions', ['permit_mynetworks', 'reject_invalid_helo_hostname', 'reject_non_fqdn_helo_hostname']],
+    ['smtpd_sender_restrictions', ['reject_non_fqdn_sender', 'reject_unknown_sender_domain']],
+    ['smtpd_relay_restrictions', ['permit_mynetworks', 'reject_unauth_destination']],
+    ['smtpd_recipient_restrictions',
+     ['reject_non_fqdn_recipient', 'reject_unknown_recipient_domain', 'reject_unlisted_recipient']
+     + (postfix_policy_services | map('regex_replace', '^', 'check_policy_service ') | list)
+     + ['permit']],
+  ]],
+  ['postscreen', [
+    ['postscreen_access_list', 'permit_mynetworks' if postfix_postscreen_enabled | bool else none],
+    ['postscreen_greet_action', 'enforce' if postfix_postscreen_enabled | bool else none],
+    ['postscreen_dnsbl_sites', postfix_postscreen_dnsbl_sites
+                               if postfix_postscreen_enabled | bool and postfix_postscreen_dnsbl_sites | length > 0 else none],
+    ['postscreen_dnsbl_action', 'enforce'
+                                if postfix_postscreen_enabled | bool and postfix_postscreen_dnsbl_sites | length > 0 else none],
+  ]],
+  ['Caches: lmdb, EL 10 has no btree', [
+    ['postscreen_cache_map', 'lmdb:$data_directory/postscreen_cache'],
+    ['address_verify_map', 'lmdb:$data_directory/verify_cache'],
+  ]],
+  ['Milter', [
+    ['smtpd_milters', postfix_milters],
+    ['non_smtpd_milters', '$smtpd_milters'],
+    ['milter_default_action', postfix_milter_default_action],
+  ]],
+  ['TLS of the server', [
+    ['smtpd_tls_cert_file', postfix_tls_cert_file],
+    ['smtpd_tls_key_file', postfix_tls_key_file],
+    ['smtpd_tls_CAfile', postfix_tls_ca_file if postfix_tls_ca_file | length > 0 else none],
+    ['smtpd_tls_security_level', 'may'],
+    ['smtpd_tls_auth_only', true],
+    ['smtpd_tls_protocols', postfix_tls_protocols],
+    ['smtpd_tls_mandatory_protocols', postfix_tls_mandatory_protocols],
+    ['smtpd_tls_loglevel', 1],
+    ['smtpd_tls_received_header', true],
+  ]],
+  ['TLS of outbound connections', [
+    ['smtp_tls_security_level', __postfix_smtp_tls_security_level],
+    ['smtp_dns_support_level', 'dnssec' if __postfix_smtp_tls_security_level in ['dane', 'dane-only'] else none],
+    ['smtp_tls_CAfile', __postfix_ca_bundle],
+    ['smtp_tls_protocols', postfix_tls_protocols],
+    ['smtp_tls_mandatory_protocols', postfix_tls_mandatory_protocols],
+    ['smtp_tls_loglevel', 1],
+  ]],
+  ['Relay host', [
+    ['relayhost', postfix_relayhost],
+    ['smtp_sasl_auth_enable', __postfix_relay_auth | bool],
+    ['smtp_sasl_password_maps', ('lmdb:' ~ __postfix_relay_password_file) if __postfix_relay_auth | bool else none],
+    ['smtp_sasl_security_options', 'noanonymous' if __postfix_relay_auth | bool else none],
+    ['smtp_sasl_tls_security_options', 'noanonymous' if __postfix_relay_auth | bool else none],
+  ]],
+  ['Limits', [
+    ['message_size_limit', postfix_message_size_limit],
+    ['smtpd_recipient_limit', postfix_smtpd_recipient_limit],
+    ['smtpd_client_connection_rate_limit', postfix_smtpd_client_connection_rate_limit],
+    ['smtpd_client_message_rate_limit', postfix_smtpd_client_message_rate_limit],
+    ['smtpd_client_recipient_rate_limit', postfix_smtpd_client_recipient_rate_limit],
+  ]],
+] -%}
+{{ ansible_managed | comment }}
+#
+# main.cf of marcstraube.server.postfix. Parameters of postfix_extra_main_cf
+# replace the ones of the role and are listed at the end.
+{% for title, params in sections %}
+{% set active = params | selectattr('1', 'ne', none) | rejectattr('0', 'in', postfix_extra_main_cf) | list %}
+{% if active | length > 0 %}
+
+# {{ title }}
+{% for name, setting in active %}
+{{ name }} = {{ value(setting) }}
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% if postfix_extra_main_cf | length > 0 %}
+
+# Extra configuration (postfix_extra_main_cf)
+{% for name, setting in postfix_extra_main_cf.items() %}
+{{ name }} = {{ value(setting) }}
+{% endfor %}
+{% endif %}

@@ -1,0 +1,86 @@
+---
+# Accounts of the first converge run. side_effect.yml changes the database
+# behind the role's back and runs the role with accounts_changed.yml;
+# verify.yml checks the result of both.
+
+postfixadmin_default_aliases:
+  abuse: 'postmaster@example.com'
+
+postfixadmin_domains:
+  # managed: side_effect resets the description in the database
+  - domain: 'example.com'
+    description: 'Example'
+    maxquota: 2048
+  # initial: the changed description stays
+  - domain: 'example.net'
+    description: 'Initial'
+    mode: 'initial'
+    default_aliases: false
+  - domain: 'example.org'
+    default_aliases: false
+  - domain: 'remove.example'
+    default_aliases: false
+
+postfixadmin_admins:
+  - username: 'admin@example.com'
+    password: 'admin-Secret-42'
+    superadmin: true
+  # initial: deactivated in the database by side_effect, stays inactive
+  - username: 'helpdesk@example.com'
+    password: 'helpdesk-Secret-42'
+    domains: ['example.com']
+    mode: 'initial'
+  - username: 'remove-admin@example.com'
+    password: 'remove-Secret-42'
+    domains: ['example.com', 'example.net']
+  # managed: becomes a superadmin with a new password in accounts_changed.yml
+  - username: 'ops@example.com'
+    password: 'ops-Secret-42'
+    domains: ['example.com']
+
+postfixadmin_mailboxes:
+  # managed: name and password are reset after side_effect changed them,
+  # quota and password change with accounts_changed.yml
+  - username: 'alice@example.com'
+    password: 'alice-Secret-42'
+    name: 'Alice'
+    quota: 1024
+  # initial: name and password changed by side_effect stay
+  - username: 'bob@example.com'
+    password: 'bob-Secret-42'
+    name: 'Bob'
+    quota: 512
+    mode: 'initial'
+  - username: 'carol@example.com'
+    password: 'carol-Secret-42'
+    name: 'Carol'
+    quota: 256
+  # Not in the SOGo view; side_effect stores a SHA512-CRYPT hash of the
+  # same password, which the role replaces with an ARGON2ID hash
+  - username: 'inactive@example.com'
+    password: 'inactive-Secret-42'
+    name: 'Inactive'
+    quota: 256
+    active: false
+  # disabled: never created, needs no password
+  - username: 'dave@example.com'
+    name: 'Dave'
+    mode: 'disabled'
+
+postfixadmin_aliases:
+  # managed: the targets are reset after side_effect changed them
+  - address: 'info@example.com'
+    goto: ['alice@example.com', 'bob@example.com']
+  # initial: the changed target stays
+  - address: 'sales@example.com'
+    goto: ['bob@example.com']
+    mode: 'initial'
+  - address: 'remove@example.com'
+    goto: ['alice@example.com']
+
+postfixadmin_alias_domains:
+  # managed: points to example.net in accounts_changed.yml
+  - alias_domain: 'example.org'
+    target_domain: 'example.com'
+  - alias_domain: 'remove.example'
+    target_domain: 'example.com'

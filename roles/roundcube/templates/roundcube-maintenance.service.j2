@@ -1,0 +1,47 @@
+{{ ansible_managed | comment }}
+[Unit]
+Description=Roundcube database cleanup and garbage collection
+Documentation=https://github.com/roundcube/roundcubemail/blob/master/docs/INSTALL.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User={{ __roundcube_fpm_user }}
+Group={{ __roundcube_fpm_group }}
+WorkingDirectory={{ __roundcube_current_link }}
+# Records marked as deleted more than {{ roundcube_cleandb_days | int }} days ago
+ExecStart={{ roundcube_php_cli }} {{ __roundcube_current_link }}/bin/cleandb.sh {{ roundcube_cleandb_days | int }}
+# Expired sessions in the database, caches and old files in temp
+ExecStart={{ roundcube_php_cli }} {{ __roundcube_current_link }}/bin/gc.sh
+
+# Hardening: everything is read-only except temp and logs of the active
+# release (systemd resolves the 'current' link when the job starts), the
+# file logs and an SQLite database
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+ReadWritePaths={{ __roundcube_current_link }}/temp {{ __roundcube_current_link }}/logs
+{% if roundcube_log_driver == 'file' %}
+ReadWritePaths={{ __roundcube_log_dir }}
+{% endif %}
+{% if roundcube_db_type == 'sqlite' %}
+ReadWritePaths={{ roundcube_db_path | dirname }}
+{% endif %}

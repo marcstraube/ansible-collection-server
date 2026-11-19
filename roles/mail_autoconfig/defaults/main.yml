@@ -1,0 +1,130 @@
+---
+#
+# Role Control
+#
+
+# Enable the mail_autoconfig role
+mail_autoconfig_enabled: false
+
+#
+# Files
+#
+# Static files rendered into the web root: Mozilla Autoconfig, Microsoft
+# Autodiscover and, optionally, one Apple configuration profile per domain.
+# The role does not manage the web server; see the README for nginx and
+# Apache sites.
+
+# Directory the files are rendered into (document root of the
+# autoconfig.<domain> and autodiscover.<domain> sites, holding nothing
+# else). Created as root:root 0755 when missing; an existing one is left as
+# it is and must be owned by root and not writable by group or others, or
+# the role fails before any change.
+mail_autoconfig_web_root: '/var/www/mail-autoconfig'
+
+# Mail domains the files and DNS records are published for
+# Example:
+#   - 'example.com'
+#   - 'example.org'
+mail_autoconfig_domains: []
+
+# Provider name shown by the clients (Mozilla displayName, Apple profile
+# name). Empty: the first entry of mail_autoconfig_domains.
+mail_autoconfig_display_name: ''
+
+# Short provider name (Mozilla displayShortName). Empty: the display name.
+mail_autoconfig_display_short_name: ''
+
+#
+# IMAP
+#
+# IMAP with implicit TLS. The login name is always the full email address.
+
+# Host name of the IMAP server (must match its certificate)
+mail_autoconfig_imap_host: ''
+
+# IMAP port (implicit TLS)
+mail_autoconfig_imap_port: 993
+
+#
+# Submission
+#
+
+# Host name of the submission server (must match its certificate)
+mail_autoconfig_submission_host: '{{ mail_autoconfig_imap_host }}'
+
+# Offer submission with implicit TLS (RFC 8314, preferred by the clients
+# when both are offered)
+mail_autoconfig_submission_implicit_tls_enabled: true
+mail_autoconfig_submission_implicit_tls_port: 465
+
+# Offer submission with STARTTLS
+mail_autoconfig_submission_starttls_enabled: true
+mail_autoconfig_submission_starttls_port: 587
+
+#
+# POP3
+#
+
+# Offer POP3 with implicit TLS in addition to IMAP (listed after IMAP)
+mail_autoconfig_pop3_enabled: false
+
+# Host name of the POP3 server
+mail_autoconfig_pop3_host: '{{ mail_autoconfig_imap_host }}'
+
+# POP3 port (implicit TLS)
+mail_autoconfig_pop3_port: 995
+
+#
+# Apple Configuration Profile
+#
+
+# Render a generic, unsigned .mobileconfig per domain into
+# <web_root>/apple/<domain>.mobileconfig. It carries no user address: the
+# device asks for the address and the user name on import.
+mail_autoconfig_apple_profile_enabled: false
+
+#
+# DNS
+#
+
+# Check the records the clients look up and report each one as present,
+# missing or different. A missing record never fails the run. The expected
+# records are printed either way.
+mail_autoconfig_dns_check_enabled: true
+
+# Resolver for the check (IPv4 address, several separated by commas).
+# Empty: the system resolver of the controller.
+mail_autoconfig_dns_resolver: ''
+
+# Port of the resolver. A port other than 53 needs community.general 9.5.0
+# or later.
+mail_autoconfig_dns_resolver_port: 53
+
+# Host name of the web server that serves the files: the expected target of
+# the autoconfig.<domain> and autodiscover.<domain> records (CNAME, or A/AAAA
+# records with the addresses of this host)
+mail_autoconfig_web_host: '{{ ansible_facts["fqdn"] }}'
+
+#
+# HTTP
+#
+
+# Request every published file over HTTPS the way the clients do (GET on
+# the Mozilla files and the Apple profiles, POST on the Autodiscover file)
+# and report each one as reachable or unreachable. An unreachable file never
+# fails the run.
+mail_autoconfig_http_check_enabled: true
+
+# Host the requests are sent from. Default: the controller, like the DNS
+# check. Set it to an inventory host (e.g. the web host itself) when the
+# controller cannot reach the sites.
+mail_autoconfig_http_check_delegate: 'localhost'
+
+# Verify the certificates of the sites. Keep it on: the clients verify them
+# as well. For certificates of an internal CA set the CA file instead of
+# turning verification off.
+mail_autoconfig_http_check_validate_certs: true
+
+# CA certificate file (PEM) on the delegate host to verify the sites with.
+# Empty: the system trust store of the delegate host.
+mail_autoconfig_http_check_ca_path: ''

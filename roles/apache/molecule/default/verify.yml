@@ -151,6 +151,108 @@
                   | zip(__apache_docroot_stat.results | map(attribute='stat'))) }}
 
     #
+    # Writable Paths
+    #
+    # Owner and mode on every platform. The SELinux part needs a host with
+    # SELinux enabled; in containers it is disabled and the role skips it.
+    #
+
+    - name: Verify | Stat the writable paths
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+        - '/var/www/writable.example.local/var/cache'
+        - '/var/log/molecule-writable'
+        - '/var/www/writable.example.local/uploads'
+      register: __verify_writable_stat
+
+    - name: Verify | Assert the writable path directories
+      ansible.builtin.assert:
+        that:
+          # mode only: owner and group default to the web server user
+          - __writable['/var/www/writable.example.local/var/cache'].pw_name == __apache_user
+          - __writable['/var/www/writable.example.local/var/cache'].gr_name == __apache_group
+          - __writable['/var/www/writable.example.local/var/cache'].mode == '0750'
+          - __writable['/var/log/molecule-writable'].isdir
+          - __writable['/var/log/molecule-writable'].pw_name == 'root'
+          - __writable['/var/log/molecule-writable'].gr_name == 'root'
+          - __writable['/var/log/molecule-writable'].mode == '0770'
+          # label only: left as prepare.yml planted it
+          - __writable['/var/www/writable.example.local/uploads'].pw_name == 'root'
+          - __writable['/var/www/writable.example.local/uploads'].mode == '0755'
+        fail_msg: 'The writable paths do not have the expected state: {{ __writable }}'
+        success_msg: 'Writable paths are created and corrected, label-only paths are left alone'
+      vars:
+        __writable: >-
+          {{ dict(__verify_writable_stat.results | map(attribute='item')
+                  | zip(__verify_writable_stat.results | map(attribute='stat'))) }}
+
+    # Installed on RedHat whether SELinux is enabled or not
+    - name: Verify | Check the SELinux management tools are installed (RedHat)
+      ansible.builtin.package:
+        name: '{{ __apache_selinux_packages }}'
+        state: present
+      check_mode: true
+      register: __verify_selinux_packages
+      failed_when: __verify_selinux_packages is changed
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Verify | Read the local SELinux file contexts
+      ansible.builtin.command:
+        cmd: semanage fcontext -l -C
+      register: __verify_writable_fcontexts
+      changed_when: false
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    - name: Verify | Read the SELinux labels of the writable paths
+      ansible.builtin.command:
+        argv:
+          - stat
+          - '--format=%n %C'
+          - '/var/www/writable.example.local/var/cache'
+          - '/var/www/writable.example.local/var/cache/existing.txt'
+          - '/var/log/molecule-writable'
+          - '/var/www/writable.example.local/uploads'
+          - '/var/www/writable.example.local/uploads/existing.txt'
+      register: __verify_writable_labels
+      changed_when: false
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    # Each line is "<regex> <file type> <context>": first and last field
+    - name: Verify | Assert the SELinux file contexts and labels
+      ansible.builtin.assert:
+        that:
+          - __fcontexts[__fc_cache] | default('') is search(':httpd_sys_rw_content_t:')
+          - __fcontexts[__fc_log] | default('') is search(':httpd_log_t:')
+          - __fcontexts[__fc_uploads] | default('') is search(':httpd_sys_rw_content_t:')
+          - __labels['/var/www/writable.example.local/var/cache'] is search(':httpd_sys_rw_content_t:')
+          - __labels['/var/www/writable.example.local/var/cache/existing.txt'] is search(':httpd_sys_rw_content_t:')
+          - __labels['/var/log/molecule-writable'] is search(':httpd_log_t:')
+          - __labels['/var/www/writable.example.local/uploads'] is search(':httpd_sys_rw_content_t:')
+          - __labels['/var/www/writable.example.local/uploads/existing.txt'] is search(':httpd_sys_rw_content_t:')
+        fail_msg: >-
+          Unexpected SELinux state. File contexts: {{ __fcontexts }}, labels: {{ __labels }}
+        success_msg: 'The writable paths, and the files in them, carry the type of their entry'
+      vars:
+        # The role escapes the dots of a path in the file context regex
+        __fc_cache: '/var/www/writable\.example\.local/var/cache(/.*)?'
+        __fc_log: '/var/log/molecule-writable(/.*)?'
+        __fc_uploads: '/var/www/writable\.example\.local/uploads(/.*)?'
+        __fcontexts: >-
+          {{ dict(__verify_writable_fcontexts.stdout_lines | map('split') | map('first')
+                  | zip(__verify_writable_fcontexts.stdout_lines | map('split') | map('last'))) }}
+        __labels: >-
+          {{ dict(__verify_writable_labels.stdout_lines | map('split') | map('first')
+                  | zip(__verify_writable_labels.stdout_lines | map('split') | map('last'))) }}
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    #
     # ACME Challenge Verification
     #
 
@@ -508,6 +610,7 @@
           - 'proxy_fcgi'
           - 'auth_basic'
           - 'remoteip'
+          - 'http2'
         __apache_unwanted:
           - 'autoindex'
           - 'access_compat'
@@ -517,7 +620,124 @@
           - 'authn_file'
           - 'authz_user'
           - 'authz_groupfile'
-          - 'http2'
+
+    #
+    # HTTP/2 (server default on, php.example.local switches it off)
+    #
+    # Both SSL vhosts share *:443 and the certificate; SNI selects the vhost
+    # and with it the protocols offered in the ALPN negotiation.
+    #
+
+    - name: Verify | Read the main configuration for the HTTP/2 default
+      ansible.builtin.slurp:
+        src: '{{ __apache_config_file }}'
+      register: __verify_http2_main
+
+    - name: Verify | Read the SSL vhost configurations
+      ansible.builtin.slurp:
+        src: '{{ __apache_vhosts_dir }}/{{ item }}-ssl.conf'
+      loop:
+        - 'present.example.local'
+        - 'php.example.local'
+      register: __verify_http2_vhosts
+
+    - name: Verify | Assert only the overriding vhost carries a Protocols line
+      ansible.builtin.assert:
+        that:
+          - (__verify_http2_main.content | b64decode) is search('(?m)^Protocols h2 http/1\.1$')
+          - "'Protocols' not in __verify_http2_conf['present.example.local']"
+          - __verify_http2_conf['php.example.local'] is search('(?m)^\s+Protocols http/1\.1$')
+        fail_msg: >-
+          Expected 'Protocols h2 http/1.1' in the main configuration, no
+          Protocols line in the inheriting vhost and 'Protocols http/1.1' in
+          php.example.local
+        success_msg: 'The server default is inherited, the override is rendered into its vhost only'
+      vars:
+        __verify_http2_conf: >-
+          {{ dict(__verify_http2_vhosts.results | map(attribute='item')
+                  | zip(__verify_http2_vhosts.results | map(attribute='content') | map('b64decode'))) }}
+
+    # After an h2 handshake the server sends a binary SETTINGS frame, which
+    # is not valid text; only the ALPN line is kept.
+    - name: Verify | Negotiate the protocol with each SSL vhost
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          openssl s_client -connect 127.0.0.1:443 -servername {{ item }} \
+            -alpn h2,http/1.1 < /dev/null 2> /dev/null \
+            | grep -a -E '^(ALPN protocol|No ALPN)'
+        executable: /bin/bash
+      loop:
+        - 'present.example.local'
+        - 'php.example.local'
+      register: __verify_alpn
+      changed_when: false
+
+    - name: Verify | Assert the ALPN result per vhost
+      ansible.builtin.assert:
+        that:
+          - __verify_alpn_result['present.example.local'] == 'h2'
+          - __verify_alpn_result['php.example.local'] == 'http/1.1'
+        fail_msg: >-
+          Expected h2 for present.example.local and http/1.1 for
+          php.example.local, got {{ __verify_alpn_result }}
+        success_msg: 'The inheriting vhost negotiates h2, the vhost with http2: false http/1.1'
+      vars:
+        __verify_alpn_result: >-
+          {{ dict(__verify_alpn.results | map(attribute='item')
+                  | zip(__verify_alpn.results | map(attribute='stdout')
+                        | map('regex_search', 'ALPN protocol: (\S+)', '\1')
+                        | map('default', ['none'], true) | map('first'))) }}
+
+    # HTTP/2 is on server-wide here, yet plain HTTP must not speak HTTP/2 with
+    # prior knowledge (h2c): the connection preface must get an HTTP/1 error,
+    # not a SETTINGS frame. On Debian this also covers the neutralized
+    # http2.conf, which would add h2c.
+    - name: Verify | Send an HTTP/2 connection preface to port 80
+      ansible.builtin.command:
+        argv:
+          - '{{ ansible_facts["python"]["executable"] }}'
+          - '-c'
+          - |
+            import socket
+            s = socket.create_connection(('127.0.0.1', 80), timeout=5)
+            s.sendall(b'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n' + bytes([0, 0, 0, 4, 0, 0, 0, 0, 0]))
+            try:
+                data = s.recv(64)
+            except socket.timeout:
+                data = b''
+            print('h2' if len(data) >= 9 and data[3] == 4 else 'not h2: ' + repr(data[:20]))
+      register: __verify_h2c
+      changed_when: false
+
+    - name: Verify | Assert port 80 refuses HTTP/2 with prior knowledge
+      ansible.builtin.assert:
+        that:
+          - __verify_h2c.stdout is match('not h2')
+        fail_msg: 'Port 80 answered the HTTP/2 preface with HTTP/2: {{ __verify_h2c.stdout }}'
+        success_msg: '{{ __verify_h2c.stdout }}'
+
+    - name: Verify | Read the module state recorded without HTTP/2
+      ansible.builtin.slurp:
+        src: /root/apache-handler-test.json
+      register: __verify_http2_record
+
+    - name: Verify | Assert mod_http2 follows the server default and the vhosts
+      ansible.builtin.assert:
+        that:
+          - not (__verify_http2_recorded.http2_loaded_without_users | bool)
+          - __verify_http2_recorded.http2_loaded_for_vhost | bool
+          - __verify_http2_recorded.http2_vhost_protocols | bool
+          - __verify_http2_recorded.http2_vhost_alpn['php.example.local'] == 'h2'
+          - __verify_http2_recorded.http2_vhost_alpn['present.example.local'] == 'http/1.1'
+        fail_msg: >-
+          Expected mod_http2 unloaded with nothing enabling HTTP/2, and with the
+          server default off and php.example.local on: loaded, 'Protocols h2
+          http/1.1' in that vhost, h2 there and http/1.1 for present.example.local.
+          Recorded: {{ __verify_http2_recorded }}
+        success_msg: 'mod_http2 is loaded exactly while the server default or a vhost enables HTTP/2'
+      vars:
+        __verify_http2_recorded: "{{ __verify_http2_record.content | b64decode | from_json }}"
 
     #
     # Handler Behaviour (recorded by the second converge play)

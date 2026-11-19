@@ -1,0 +1,77 @@
+---
+# The helper applies the entries with the handler classes of
+# postfixadmin-cli; the request goes through stdin, so passwords never show
+# up in the process list. Entries are created in dependency order (domains
+# before their admins, mailboxes and aliases, alias domains last) and
+# removed in reverse order. Entries that are not listed stay untouched.
+
+# The task logs nothing, since its request holds the passwords; a failing
+# entry type fails the task, and the rescue reports the helper's message
+# (which never carries a password) instead of the censored result.
+- name: Accounts | Apply the entries
+  block:
+    - name: Accounts | Apply the entries of each type
+      ansible.builtin.command:
+        argv:
+          - '{{ postfixadmin_php_cli }}'
+          - '{{ __postfixadmin_helper }}'
+          - '{{ postfixadmin_install_dir }}'
+        stdin: >-
+          {{ {'action': 'accounts', 'type': item.0.type, 'check': __postfixadmin_check_mode,
+              'entries': __postfixadmin_request} | to_json }}
+      register: __postfixadmin_accounts
+      changed_when: >-
+        __postfixadmin_accounts.rc == 0
+        and (__postfixadmin_accounts.stdout | from_json).changed
+      check_mode: false
+      loop: >-
+        {{ __postfixadmin_account_types | product(['present']) | list
+           + __postfixadmin_account_types | reverse | product(['absent']) | list }}
+      loop_control:
+        label: '{{ item.0.variable }} ({{ item.1 }})'
+      vars:
+        __postfixadmin_request: >-
+          {%- set ns = namespace(entries=[]) -%}
+          {%- for entry in lookup('vars', item.0.variable) -%}
+          {%- set mode = entry.mode | default(postfixadmin_account_mode) -%}
+          {%- if entry.state | default('present') == item.1 and mode != 'disabled' -%}
+          {%- set request = {
+                'id': entry[item.0.key], 'state': item.1, 'mode': mode,
+                'values': entry | dict2items | selectattr('key', 'in', item.0.fields) | items2dict} -%}
+          {%- if item.0.password and item.1 == 'present' -%}
+          {%- set request = request | combine({'password': entry.password}) -%}
+          {%- endif -%}
+          {%- set ns.entries = ns.entries + [request] -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ ns.entries }}
+      when:
+        - __postfixadmin_request | length > 0
+        # A check run before the first install has no release to run
+        - not (__postfixadmin_check_mode and __postfixadmin_release_changed | default(false) | bool)
+      no_log: true
+
+  rescue:
+    - name: Accounts | Fail with the errors of the entries
+      ansible.builtin.fail:
+        msg: |
+          Applying the accounts failed:
+          {% for report in __postfixadmin_account_reports | rejectattr('rc', 'eq', 0) %}
+          - {{ report.variable }} ({{ report.state }}): {{ report.response.msg | default(report.stderr) }}
+          {% else %}
+          - {{ ansible_failed_result.msg | default('no result') }}
+          {% endfor %}
+
+# The reports name the entries and what happened to them, never a
+# password, so they are shown outside of no_log.
+- name: Accounts | Report the changes
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.response.results | rejectattr('action', 'eq', 'unchanged') | map(attribute='id')
+         | zip(item.response.results | rejectattr('action', 'eq', 'unchanged') | map(attribute='action'))
+         | map('join', ': ') | list }}
+  loop: >-
+    {{ __postfixadmin_account_reports | selectattr('response.changed', 'defined')
+       | selectattr('response.changed') | list }}
+  loop_control:
+    label: '{{ item.variable }} ({{ item.state }})'

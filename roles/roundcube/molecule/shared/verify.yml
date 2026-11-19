@@ -1,0 +1,626 @@
+---
+# Checks of the postgresql and mariadb scenarios: the release layout and
+# permissions, the schema, the dedicated pool, the web interface through
+# nginx (login page, blocked paths, login, wrong password, folders), a
+# Sieve filter through ManageSieve, a folder shared through the acl
+# plugin, a password change through the password plugin with the
+# {ARGON2ID} hash and an IMAP login against Dovecot with it, the sessions
+# in the database, the maintenance timer and the failure cases of the
+# role. The web checks run through webmail.py (standard library only).
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - vars/main.yml
+
+  vars:
+    __verify_dir: '/usr/local/lib/molecule-roundcube'
+    __verify_release: '1.7.6'
+    __verify_install_dir: '/var/www/roundcube'
+    __verify_release_dir: '{{ __verify_install_dir }}/releases/{{ __verify_release }}'
+    __verify_web: >-
+      {{ ansible_facts['python']['executable'] }} -I {{ __verify_dir }}/webmail.py
+    __verify_mariadb_socket: >-
+      {{ '/var/lib/mysql/mysql.sock' if ansible_facts['os_family'] == 'RedHat' else '/run/mysqld/mysqld.sock' }}
+    # Reads one value from a database of the instance as the superuser
+    __verify_sql:
+      postgresql: ['runuser', '-u', 'postgres', '--', 'psql', '-At', '-d']
+      mariadb: ['mariadb', '-N', '-B', '-D']
+
+  tasks:
+    - name: Verify | Load role defaults
+      ansible.builtin.include_vars:
+        file: '../../defaults/main.yml'
+        name: __verify_defaults
+
+    # A filter name of its own per run: Roundcube refuses a second filter
+    # of the same name, and verify may run again
+    - name: Verify | Name the test filter
+      ansible.builtin.set_fact:
+        __verify_filter: "molecule-archive-{{ now(utc=true).strftime('%Y%m%d%H%M%S') }}"
+
+    - name: Verify | Create the test directory
+      ansible.builtin.file:
+        path: '{{ __verify_dir }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Verify | Deploy webmail.py
+      ansible.builtin.copy:
+        src: files/webmail.py
+        dest: '{{ __verify_dir }}/webmail.py'
+        owner: root
+        group: root
+        mode: '0644'
+
+    #
+    # Release Layout
+    #
+
+    - name: Verify | Stat the release paths
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+        - '{{ __verify_install_dir }}/current'
+        - '{{ __verify_release_dir }}'
+        - '{{ __verify_release_dir }}/index.php'
+        - '{{ __verify_release_dir }}/temp'
+        - '{{ __verify_release_dir }}/logs'
+        - '{{ __verify_release_dir }}/config/config.inc.php'
+        - '/etc/roundcube'
+        - '/etc/roundcube/config.inc.php'
+      register: __verify_paths
+
+    - name: Verify | Assert the release layout and permissions
+      ansible.builtin.assert:
+        that:
+          - __verify_stat[__verify_install_dir ~ '/current'].islnk
+          - __verify_stat[__verify_install_dir ~ '/current'].lnk_target == __verify_release_dir
+          # The release is read-only for PHP-FPM
+          - __verify_stat[__verify_release_dir].pw_name == 'root'
+          - __verify_stat[__verify_release_dir].mode == '0755'
+          - __verify_stat[__verify_release_dir ~ '/index.php'].pw_name == 'root'
+          - __verify_stat[__verify_release_dir ~ '/index.php'].mode == '0644'
+          # Only temp and logs are writable for the pool user
+          - __verify_stat[__verify_release_dir ~ '/temp'].pw_name == 'roundcube'
+          - __verify_stat[__verify_release_dir ~ '/temp'].mode == '0750'
+          - __verify_stat[__verify_release_dir ~ '/logs'].pw_name == 'roundcube'
+          - __verify_stat[__verify_release_dir ~ '/logs'].mode == '0750'
+          # The release links to the configuration outside of it
+          - __verify_stat[__verify_release_dir ~ '/config/config.inc.php'].islnk
+          - __verify_stat[__verify_release_dir ~ '/config/config.inc.php'].lnk_target == '/etc/roundcube/config.inc.php'
+          - __verify_stat['/etc/roundcube'].mode == '0750'
+          - __verify_stat['/etc/roundcube'].gr_name == 'roundcube'
+          - __verify_stat['/etc/roundcube/config.inc.php'].mode == '0640'
+          - __verify_stat['/etc/roundcube/config.inc.php'].pw_name == 'root'
+          - __verify_stat['/etc/roundcube/config.inc.php'].gr_name == 'roundcube'
+        fail_msg: >-
+          {{ __verify_stat | dict2items | map(attribute='value')
+             | map(attribute='mode', default='-') | list }}
+      vars:
+        __verify_stat: >-
+          {{ dict(__verify_paths.results | map(attribute='item')
+                  | zip(__verify_paths.results | map(attribute='stat'))) }}
+
+    - name: Verify | Find files of the release writable by others than root
+      ansible.builtin.command:
+        argv:
+          - find
+          - '{{ __verify_release_dir }}'
+          - '('
+          - '-not'
+          - '-user'
+          - 'root'
+          - '-o'
+          - '-perm'
+          - '/022'
+          - ')'
+          - '-not'
+          - '-path'
+          - '{{ __verify_release_dir }}/temp*'
+          - '-not'
+          - '-path'
+          - '{{ __verify_release_dir }}/logs*'
+          - '-not'
+          - '-type'
+          - 'l'
+      register: __verify_writable
+      changed_when: false
+
+    - name: Verify | Assert only temp and logs are writable for PHP-FPM
+      ansible.builtin.assert:
+        that:
+          - __verify_writable.stdout_lines | length == 0
+        fail_msg: '{{ __verify_writable.stdout_lines[:20] }}'
+
+    - name: Verify | Read config.inc.php
+      ansible.builtin.slurp:
+        src: /etc/roundcube/config.inc.php
+      register: __verify_config_raw
+      no_log: true
+
+    # Asserts on the content without printing it (database passwords,
+    # des_key)
+    - name: Verify | Assert the settings of config.inc.php
+      ansible.builtin.assert:
+        that:
+          - "\"$config['des_key'] = 'molecule-des-key-0123456789abcdef';\" in __verify_config"
+          - "\"$config['cipher_method'] = 'AES-256-CBC';\" in __verify_config"
+          - "\"$config['imap_host'] = 'ssl://localhost:993';\" in __verify_config"
+          - "\"$config['smtp_host'] = 'tls://localhost:587';\" in __verify_config"
+          - "\"$config['managesieve_host'] = 'tls://localhost:4190';\" in __verify_config"
+          - "\"'verify_peer' => true\" in __verify_config"
+          - "\"'cafile' => '\" ~ __molecule_tls_cert ~ \"'\" in __verify_config"
+          - "\"$config['password_algorithm'] = 'hash-argon2id';\" in __verify_config"
+          - "\"$config['password_algorithm_prefix'] = true;\" in __verify_config"
+          - "\"$config['session_storage'] = 'db';\" in __verify_config"
+          - "\"$config['enable_installer'] = false;\" in __verify_config"
+          - "\"$config['log_driver'] = 'syslog';\" in __verify_config"
+          - "\"$config['support_url'] = 'https://www.example.com/support';\" in __verify_config"
+          - "\"$config['plugins'] = ['managesieve', 'password', 'acl', 'markasjunk'];\" in __verify_config"
+        quiet: true
+      vars:
+        __verify_config: '{{ __verify_config_raw.content | b64decode }}'
+      no_log: true
+
+    #
+    # Schema
+    #
+
+    - name: Verify | Read the schema state
+      ansible.builtin.command:
+        argv:
+          - php
+          - /usr/local/lib/roundcube-ansible/roundcube-schema.php
+          - '{{ __verify_install_dir }}/current'
+      register: __verify_schema
+      changed_when: false
+
+    - name: Verify | Assert the schema of the release
+      ansible.builtin.assert:
+        that:
+          - (__verify_schema.stdout | from_json).system
+          - (__verify_schema.stdout | from_json).version == (__verify_schema.stdout | from_json).target
+          - (__verify_schema.stdout | from_json).version >= 2025092300
+          - (__verify_schema.stdout | from_json).release == __verify_release
+        fail_msg: '{{ __verify_schema.stdout }}'
+
+    #
+    # PHP-FPM Pool
+    #
+
+    - name: Verify | List the PHP-FPM workers
+      ansible.builtin.command:
+        argv: ['ps', '-eo', 'user:32,args']
+      register: __verify_ps
+      changed_when: false
+
+    - name: Verify | Assert the roundcube pool runs as its user
+      ansible.builtin.assert:
+        that:
+          - __verify_ps.stdout_lines | select('match', '^roundcube\s+php-fpm.*pool roundcube') | list | length > 0
+        fail_msg: '{{ __verify_ps.stdout_lines | select("search", "php-fpm") | list }}'
+
+    #
+    # Web Interface
+    #
+
+    # Paths of the release outside public_html: a .php path is not found
+    # (the .sql dump pattern of the nginx role answers 403),
+    # every other path falls back to index.php (the login page); the file
+    # itself is never served
+    - name: Verify | Request the login page and the paths outside the web root
+      ansible.builtin.command:
+        argv: "{{ __verify_web.split() + ['page', item, '--product', 'Molecule Webmail'] }}"
+      loop:
+        - '/'
+        - '/config/config.inc.php'
+        - '/config/defaults.inc.php'
+        - '/temp/'
+        - '/logs/'
+        - '/bin/initdb.sh'
+        - '/SQL/postgres.initial.sql'
+        - '/composer.json'
+      register: __verify_pages
+      changed_when: false
+
+    - name: Verify | Assert the login page and that no file outside the web root is served
+      ansible.builtin.assert:
+        that:
+          - item.item != '/' or ((item.stdout | from_json).status == 200 and (item.stdout | from_json).product)
+          - >-
+            item.item == '/' or (item.stdout | from_json).status in [403, 404]
+            or ((item.stdout | from_json).status == 200 and (item.stdout | from_json).product)
+          - (item.stdout | from_json).body_start is not search('<\\?php|^#!|CREATE TABLE|"require"')
+        fail_msg: '{{ item.item }}: {{ item.stdout }}'
+      loop: '{{ __verify_pages.results }}'
+      loop_control:
+        label: '{{ item.item }}'
+
+    # MariaDB: the logins below then only work over TLS
+    - name: Verify | Require TLS for the Roundcube database user (MariaDB)
+      ansible.builtin.command:
+        argv:
+          - mariadb
+          - -e
+          - "ALTER USER 'roundcube'@'127.0.0.1' REQUIRE SSL"
+      changed_when: false
+      when: __molecule_db_type == 'mariadb'
+
+    - name: Verify | Read the DSN options of config.inc.php (MariaDB)
+      ansible.builtin.command:
+        argv: ['grep', '-c', "verify_server_cert=1", /etc/roundcube/config.inc.php]
+      register: __verify_mariadb_tls
+      changed_when: false
+      when: __molecule_db_type == 'mariadb'
+
+    - name: Verify | Log in with a wrong password
+      ansible.builtin.command:
+        argv: "{{ __verify_web.split() + ['login', '--user', 'alice@example.com'] }}"
+        stdin: '{{ {"password": "wrong-Secret-42"} | to_json }}'
+      register: __verify_wrong
+      changed_when: false
+
+    - name: Verify | Assert the wrong password is rejected
+      ansible.builtin.assert:
+        that:
+          - not (__verify_wrong.stdout | from_json).login_ok
+          - (__verify_wrong.stdout | from_json).login_status == 401
+        fail_msg: '{{ __verify_wrong.stdout }}'
+
+    # username_domain: 'alice' logs in as alice@example.com
+    - name: Verify | Log in with a PostfixAdmin mailbox
+      ansible.builtin.command:
+        argv: "{{ __verify_web.split() + ['login', '--user', 'alice'] }}"
+        stdin: '{{ {"password": "alice-Secret-42"} | to_json }}'
+      register: __verify_login
+      changed_when: false
+
+    - name: Verify | Assert the login and the folder list
+      ansible.builtin.assert:
+        that:
+          - (__verify_login.stdout | from_json).login_ok
+          - (__verify_login.stdout | from_json).mail_status == 200
+          - (__verify_login.stdout | from_json).token
+          - >-
+            ['INBOX', 'Drafts', 'Sent', 'Junk', 'Trash', 'Archive']
+            | difference((__verify_login.stdout | from_json).folders) | length == 0
+        fail_msg: '{{ __verify_login.stdout }}'
+
+    - name: Verify | Count the sessions in the database
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_sql[__molecule_db_type] + ['roundcube', '-c' if __molecule_db_type == 'postgresql' else '-e',
+             'SELECT COUNT(*) FROM session'] }}
+      register: __verify_sessions
+      changed_when: false
+
+    - name: Verify | Assert the sessions are stored in the database
+      ansible.builtin.assert:
+        that:
+          - __verify_sessions.stdout | trim | int > 0
+        fail_msg: '{{ __verify_sessions.stdout }}'
+
+    #
+    # ManageSieve
+    #
+
+    - name: Verify | Save a filter through the managesieve plugin
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_web.split() + ['sieve', '--user', 'alice@example.com',
+             '--name', __verify_filter, '--folder', 'Archive'] }}
+        stdin: '{{ {"password": "alice-Secret-42"} | to_json }}'
+      register: __verify_sieve
+      changed_when: false
+
+    - name: Verify | Read the Sieve scripts of the user from Dovecot
+      ansible.builtin.command:
+        argv: ['doveadm', 'sieve', 'list', '-u', 'alice@example.com']
+      register: __verify_sieve_list
+      changed_when: false
+
+    - name: Verify | Read the Roundcube Sieve script from Dovecot
+      ansible.builtin.command:
+        argv: ['doveadm', 'sieve', 'get', '-u', 'alice@example.com', 'roundcube']
+      register: __verify_sieve_script
+      changed_when: false
+
+    - name: Verify | Assert the filter is stored and active in Dovecot
+      ansible.builtin.assert:
+        that:
+          - (__verify_sieve.stdout | from_json).saved
+          - __verify_sieve_list.stdout is search('roundcube\s+ACTIVE')
+          - __verify_sieve_script.stdout is search(('# rule:[' ~ __verify_filter ~ ']') | regex_escape)
+          - __verify_sieve_script.stdout is search('fileinto "Archive"')
+        fail_msg: '{{ __verify_sieve.stdout }} / {{ __verify_sieve_list.stdout }} / {{ __verify_sieve_script.stdout }}'
+
+    #
+    # Shared Folder (acl)
+    #
+
+    - name: Verify | Share a folder through the acl plugin
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_web.split() + ['acl', '--user', 'alice@example.com', '--folder', 'Archive',
+             '--grantee', 'bob@example.com', '--rights', 'lrs'] }}
+        stdin: '{{ {"password": "alice-Secret-42"} | to_json }}'
+      register: __verify_acl
+      changed_when: false
+
+    - name: Verify | Read the ACL of the folder from Dovecot
+      ansible.builtin.command:
+        argv: ['doveadm', 'acl', 'get', '-u', 'alice@example.com', 'Archive']
+      register: __verify_acl_get
+      changed_when: false
+
+    - name: Verify | List the shared folders of the grantee over IMAP
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_web.split() + ['imap', '--user', 'bob@example.com', '--ca', __molecule_tls_cert,
+             '--pattern', 'shared/*'] }}
+        stdin: '{{ {"password": "bob-Secret-42"} | to_json }}'
+      register: __verify_bob_imap
+      changed_when: false
+
+    - name: Verify | Assert the folder is shared with the grantee
+      ansible.builtin.assert:
+        that:
+          - (__verify_acl.stdout | from_json).shared
+          # Dovecot 2.4.5 prints a Global column ("-") before the rights
+          - __verify_acl_get.stdout is search('user=bob@example\.com\s+(-\s+)?lookup read write-seen')
+          - (__verify_bob_imap.stdout | from_json).login
+          - "'shared/alice@example.com/Archive' in (__verify_bob_imap.stdout | from_json).folders"
+        fail_msg: '{{ __verify_acl.stdout }} / {{ __verify_acl_get.stdout }} / {{ __verify_bob_imap.stdout }}'
+
+    #
+    # Password Change
+    #
+
+    - name: Verify | Change the password through the password plugin
+      ansible.builtin.command:
+        argv: "{{ __verify_web.split() + ['password', '--user', 'alice@example.com'] }}"
+        stdin: '{{ {"password": "alice-Secret-42", "new_password": "alice-Changed-Secret-42"} | to_json }}'
+      register: __verify_password
+      changed_when: false
+
+    - name: Verify | Read the stored hash
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_sql[__molecule_db_type] + ['postfixadmin', '-c' if __molecule_db_type == 'postgresql' else '-e',
+             "SELECT password FROM mailbox WHERE username = 'alice@example.com'"] }}
+      register: __verify_hash
+      changed_when: false
+      no_log: true
+
+    - name: Verify | Log in to IMAP with the new and the old password
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_web.split() + ['imap', '--user', 'alice@example.com', '--ca', __molecule_tls_cert] }}
+        stdin: '{{ {"password": item} | to_json }}'
+      loop:
+        - 'alice-Changed-Secret-42'
+        - 'alice-Secret-42'
+      register: __verify_new_imap
+      changed_when: false
+      no_log: true
+
+    - name: Verify | Assert the new password is stored as ARGON2ID and works
+      ansible.builtin.assert:
+        that:
+          - (__verify_password.stdout | from_json).saved
+          - __verify_hash.stdout | trim is match('^\{ARGON2ID\}\$argon2id\$v=19\$')
+          - (__verify_new_imap.results[0].stdout | from_json).login
+          - not (__verify_new_imap.results[1].stdout | from_json).login
+        fail_msg: >-
+          {{ __verify_password.stdout }} / hash prefix {{ __verify_hash.stdout[:20] }} /
+          {{ __verify_new_imap.results | map(attribute='stdout') | list }}
+
+    # Restores the password of prepare, through the plugin again: verify can
+    # run again
+    - name: Verify | Change the password back
+      ansible.builtin.command:
+        argv: "{{ __verify_web.split() + ['password', '--user', 'alice@example.com'] }}"
+        stdin: '{{ {"password": "alice-Changed-Secret-42", "new_password": "alice-Secret-42"} | to_json }}'
+      register: __verify_password_back
+      changed_when: false
+
+    - name: Verify | Assert the password is changed back
+      ansible.builtin.assert:
+        that:
+          - (__verify_password_back.stdout | from_json).saved
+        fail_msg: '{{ __verify_password_back.stdout }}'
+
+    #
+    # Maintenance Timer
+    #
+
+    - name: Verify | Run the maintenance service
+      ansible.builtin.systemd_service:
+        name: roundcube-maintenance.service
+        state: started
+
+    - name: Verify | Read the state of the maintenance units
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - '--property=Result,ExecMainStatus,User'
+          - roundcube-maintenance.service
+      register: __verify_maintenance
+      changed_when: false
+
+    - name: Verify | Read the state of the maintenance timer
+      ansible.builtin.command:
+        argv: ['systemctl', 'is-enabled', 'roundcube-maintenance.timer']
+      register: __verify_timer_enabled
+      changed_when: false
+
+    - name: Verify | Read whether the maintenance timer runs
+      ansible.builtin.command:
+        argv: ['systemctl', 'is-active', 'roundcube-maintenance.timer']
+      register: __verify_timer_active
+      changed_when: false
+
+    - name: Verify | Assert the timer and a successful maintenance run
+      ansible.builtin.assert:
+        that:
+          - "'Result=success' in __verify_maintenance.stdout_lines"
+          - "'ExecMainStatus=0' in __verify_maintenance.stdout_lines"
+          - "'User=roundcube' in __verify_maintenance.stdout_lines"
+          - __verify_timer_enabled.stdout == 'enabled'
+          - __verify_timer_active.stdout == 'active'
+        fail_msg: '{{ __verify_maintenance.stdout_lines }}'
+
+    #
+    # Failure Cases
+    #
+    # Each run fails in the validation, before any change; config.inc.php
+    # stays as it is.
+    #
+
+    # Directories for the failure cases: a shared one of root (0755) and the
+    # SQLite directory of a former pool user
+    - name: Verify | Create the directories of the failure cases
+      ansible.builtin.file:
+        path: '{{ item.path }}'
+        state: directory
+        owner: '{{ item.owner }}'
+        group: root
+        mode: '0755'
+      loop:
+        - {path: '/srv/molecule-shared', owner: 'root'}
+        - {path: '/srv/molecule-sqlite', owner: 'nobody'}
+
+    - name: Verify | Stat config.inc.php before the failure cases
+      ansible.builtin.stat:
+        path: /etc/roundcube/config.inc.php
+        checksum_algorithm: sha256
+      register: __verify_config_before
+
+    - name: Verify | Run the role with invalid settings
+      ansible.builtin.include_tasks: tasks/failure_case.yml
+      loop:
+        - name: 'no des_key'
+          vars:
+            roundcube_des_key: ''
+          message: 'roundcube_des_key is required'
+        - name: 'des_key too short'
+          vars:
+            # 31 characters: AES-256 needs a key of 32
+            roundcube_des_key: 'molecule-des-key-0123456789abcd'
+          message: 'roundcube_des_key is required with at least 32 characters'
+        - name: 'managed key in roundcube_extra_config'
+          vars:
+            roundcube_extra_config:
+              des_key: 'molecule-des-key-0123456789abcdef'
+          message: 'des_key: roundcube_des_key'
+        - name: 'IMAP without TLS to another host'
+          vars:
+            roundcube_imap_host: 'imap.example.com'
+            roundcube_imap_tls: 'none'
+          message: "'none' is only accepted for a server on this host"
+        - name: 'password plugin without a password'
+          vars:
+            roundcube_password_db_password: ''
+          message: 'The password plugin needs'
+        - name: 'database TLS through a unix socket'
+          vars:
+            roundcube_db_host: '/run/postgresql'
+            roundcube_db_tls: true
+            roundcube_db_tls_ca_file: '/etc/ssl/certs/ca-certificates.crt'
+          message: 'roundcube_db_tls needs PostgreSQL or MariaDB over TCP'
+        - name: 'Valkey sessions without a port'
+          vars:
+            roundcube_session_storage: 'redis'
+            roundcube_redis_host: 'valkey.example.com'
+          message: "roundcube_redis_host has to be '<host>:<port>'"
+        - name: 'managed security key in roundcube_extra_config'
+          vars:
+            roundcube_extra_config:
+              password_confirm_current: false
+          message: 'password_confirm_current: (always true, set by the role)'
+        - name: 'SQLite database in a system directory'
+          vars:
+            roundcube_db_type: 'sqlite'
+            roundcube_db_path: '/var/lib/roundcube.db'
+            roundcube_db_create: false
+            roundcube_db_tls: false
+          message: 'roundcube_db_path: /var/lib is a system directory'
+        - name: 'SQLite database in a directory of another owner'
+          vars:
+            roundcube_db_type: 'sqlite'
+            roundcube_db_path: '/etc/ssl/roundcube.db'
+            roundcube_db_create: false
+            roundcube_db_tls: false
+          message: 'roundcube_db_path: /etc/ssl belongs to root, not to the PHP-FPM user roundcube'
+        # The directory of a former pool user: the message names the chown
+        - name: 'SQLite directory of another pool user'
+          vars:
+            roundcube_db_type: 'sqlite'
+            roundcube_db_path: '/srv/molecule-sqlite/roundcube.db'
+            roundcube_db_create: false
+            roundcube_db_tls: false
+          message: 'chown -R roundcube: /srv/molecule-sqlite'
+        - name: 'SQLite database in the log directory of the role'
+          vars:
+            roundcube_db_type: 'sqlite'
+            roundcube_db_path: '/var/log/roundcube/roundcube.db'
+            roundcube_db_create: false
+            roundcube_db_tls: false
+          message: 'roundcube_db_path: /var/log/roundcube is or lies in /var/log/roundcube, a path of the role itself'
+        - name: 'backup directory in a system directory'
+          vars:
+            roundcube_backup_dir: '/var/backups'
+          message: 'roundcube_backup_dir: /var/backups is a system directory'
+        - name: 'backup directory in the configuration directory of the role'
+          vars:
+            roundcube_backup_dir: '/etc/roundcube'
+          message: 'roundcube_backup_dir: /etc/roundcube is or lies in /etc/roundcube, a path of the role itself'
+        - name: 'backup directory below the releases of the role'
+          vars:
+            roundcube_backup_dir: '/var/www/roundcube/backups'
+          message: 'is or lies in /var/www/roundcube, a path of the role itself'
+        - name: 'shared backup directory'
+          vars:
+            roundcube_backup_dir: '/srv/molecule-shared'
+          message: 'exists, but is not root-owned with mode 0700'
+        - name: 'unknown plugin'
+          vars:
+            roundcube_plugins: ['managesieve', 'no_such_plugin']
+          message: 'has no plugin no_such_plugin'
+      loop_control:
+        loop_var: __verify_case
+        label: '{{ __verify_case.name }}'
+
+    # D1: the password plugin is off by default, and without it the role
+    # needs no settings of the PostfixAdmin database. A check run, so
+    # config.inc.php keeps the plugin of converge.
+    - name: Verify | Run the role without the password plugin and its database settings  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        apply:
+          check_mode: true
+      vars:
+        roundcube_plugins: "{{ __verify_defaults.roundcube_plugins }}"
+        roundcube_password_db_password: ''
+        roundcube_password_db_user: ''
+
+    - name: Verify | Assert the default plugins leave out the password plugin
+      ansible.builtin.assert:
+        that:
+          - "'password' not in __verify_defaults.roundcube_plugins"
+
+    - name: Verify | Stat config.inc.php after the failure cases
+      ansible.builtin.stat:
+        path: /etc/roundcube/config.inc.php
+        checksum_algorithm: sha256
+      register: __verify_config_after
+
+    - name: Verify | Assert config.inc.php is unchanged
+      ansible.builtin.assert:
+        that:
+          - __verify_config_after.stat.checksum == __verify_config_before.stat.checksum

@@ -1,0 +1,324 @@
+---
+#
+# Role Control
+#
+
+# Enable the postfix role
+postfix_enabled: false
+
+# Enable and start the Postfix service
+postfix_service_enabled: true
+
+#
+# Package Updates
+#
+
+# State of the Postfix packages:
+#   'present' installs missing packages and never updates (default).
+#   'latest'  updates the installed Postfix packages in one transaction and
+#             restarts the Postfix service while it still runs the replaced
+#             binary.
+# Pass 'latest' for a targeted update instead of setting it in inventory:
+#   --tags postfix -e postfix_packages_state=latest
+# Ignored on Arch Linux: updating single packages is a partial upgrade there,
+# Postfix updates with the full system upgrade.
+postfix_packages_state: 'present'
+
+# Lowest acceptable version, checked before the update (nothing changes when
+# the repository does not offer it yet) and again after it. Meant to be passed
+# with the update command to require a fix. Either an upstream version, which
+# accepts every distribution release of it:
+#   -e postfix_packages_minimum=3.10.13
+# or the full distribution version, which also covers fixes the distribution
+# backports without a new upstream version:
+#   -e postfix_packages_minimum=3.10.13-0+deb13u1
+# A mapping per platform (keys '<os_family>-<major>' or '<os_family>') covers
+# mixed hosts in one run; a host without a matching key fails:
+#   -e @postfix-minimum.yml
+postfix_packages_minimum: ''
+
+#
+# Compatibility Level
+#
+# Postfix changes some defaults with its compatibility level. The role writes
+# a fixed level, so a package update never changes the behavior without an
+# inventory change, and fails when the level is above the installed release.
+
+# compatibility_level of main.cf. Empty: the level of the release the
+# platform shipped when this role version was released (Arch Linux 3.11,
+# Debian 13 3.10, EL 10 3.8, EL 9 2).
+postfix_compatibility_level: ''
+
+#
+# Identity
+#
+
+# Host name of the MTA (myhostname): the name in the greeting, in the HELO of
+# outgoing mail and on the certificate. It must not be a mail domain.
+postfix_myhostname: "{{ ansible_facts['fqdn'] }}"
+
+# Domain of the host (mydomain)
+postfix_mydomain: "{{ ansible_facts['domain'] | default('localdomain', true) }}"
+
+# Domain appended to local mail without a domain, e.g. from cron (myorigin).
+# The host name keeps root@<host> local (mydestination) instead of sending
+# it to a mail domain of the database.
+postfix_myorigin: '{{ postfix_myhostname }}'
+
+# Greeting on port 25, 465 and 587 (smtpd_banner); without version or
+# platform
+postfix_smtpd_banner: '$myhostname ESMTP'
+
+#
+# Network
+#
+
+# Interfaces and IP protocols Postfix listens on (inet_interfaces,
+# inet_protocols): 'all', 'ipv4', 'ipv6'
+postfix_inet_interfaces: 'all'
+postfix_inet_protocols: 'all'
+
+# Trusted clients (mynetworks), e.g. a Dovecot on another host sending Sieve
+# redirects and vacation replies: they may relay through port 25, never
+# through submission, and the milter applies to them. Default: loopback
+# only.
+postfix_mynetworks:
+  - '127.0.0.0/8'
+  - '[::1]/128'
+
+#
+# System Mail
+#
+# Local mail of the host (cron, system notifications) goes through the
+# sendmail of Postfix; the names of mydestination ($myhostname, localhost)
+# are delivered locally with the aliases below.
+
+# Local aliases (name: target or list of targets), written into a marked
+# block of the alias file of the platform. A name here replaces the package
+# entry of the same name (e.g. postmaster): that line is commented out, and
+# restored when the name is removed again; the other package entries stay.
+# Forward root to a mailbox that is read.
+postfix_aliases: {}
+# Example:
+#   root: 'admin@example.com'
+#   postmaster: 'root'
+
+#
+# Database
+#
+# Connection settings of the PostfixAdmin database. The database server
+# may run on another host and does not have to be managed by Ansible. The
+# user needs SELECT on the tables domain, mailbox, alias and alias_domain
+# (postfixadmin_db_readers of marcstraube.server.postfixadmin).
+
+# Database type: 'postgresql' or 'mariadb'
+postfix_db_type: 'postgresql'
+
+# Host name, IP address or the path of a unix socket (PostgreSQL: the
+# socket directory). 'localhost' with MariaDB connects through the socket
+# of the platform.
+postfix_db_host: 'localhost'
+
+# Port; PostgreSQL also uses it for a unix socket (the socket file is named
+# after it), MariaDB ignores it there
+postfix_db_port: "{{ (postfix_db_type == 'mariadb') | ternary(3306, 5432) }}"
+
+# Database name, user and password (REQUIRED)
+postfix_db_name: 'postfixadmin'
+postfix_db_user: 'postfix'
+postfix_db_password: ''
+
+# Connect with TLS and verify the server certificate against
+# postfix_db_tls_ca_file and the host name (PostgreSQL sslmode
+# verify-full, MariaDB tls_verify_cert). The CA file is required with TLS;
+# use the system bundle for a publicly signed certificate. Not possible
+# through a unix socket. Without TLS the connection is unencrypted: only
+# for a private network or WireGuard.
+postfix_db_tls: false
+postfix_db_tls_ca_file: ''
+
+# SQL queries replacing the defaults on the PostfixAdmin schema, per lookup
+# table: virtual_mailbox_domains, virtual_mailbox_maps, virtual_alias_maps,
+# virtual_alias_domain_maps, virtual_alias_domain_catchall_maps,
+# sender_login_maps, sender_login_alias_domain_maps (see README)
+postfix_sql_queries: {}
+
+#
+# Delivery
+#
+
+# Dovecot LMTP: 'unix:private/dovecot-lmtp' (socket in the queue directory,
+# Dovecot on this host) or 'inet:<host>:24' (Dovecot on another host)
+postfix_lmtp_address: 'unix:private/dovecot-lmtp'
+
+# Dovecot SASL: 'private/auth' (socket in the queue directory, Dovecot on
+# this host) or 'inet:<host>:12345' (Dovecot on another host)
+postfix_sasl_path: 'private/auth'
+
+#
+# Submission
+#
+# Both services require TLS and SASL authentication through Dovecot. Users
+# send only from their own addresses and aliases (and the addresses of
+# postfix_sender_permissions).
+
+# Port 587 with STARTTLS
+postfix_submission_enabled: true
+
+# Port 465 with implicit TLS
+postfix_submissions_enabled: true
+
+# Remove the Received header with the address of the client from mail sent
+# through submission
+postfix_submission_hide_client: false
+
+# Further logins allowed to send as an address, e.g. a shared mailbox:
+# address: list of logins. Read access to a mailbox never allows sending
+# as it; the logins of the database stay owners as well.
+postfix_sender_permissions: {}
+# Example:
+#   'support@example.com':
+#     - 'alice@example.com'
+#     - 'bob@example.com'
+
+#
+# Inbound
+#
+
+# postscreen on port 25: blocks bots before smtpd (pregreet test and the
+# DNS blocklists below)
+postfix_postscreen_enabled: false
+
+# DNS blocklists of postscreen, with optional weight (postscreen_dnsbl_sites,
+# e.g. 'zen.spamhaus.org*2'). Most lists refuse queries from public
+# resolvers; use a local resolver such as marcstraube.common.unbound.
+postfix_postscreen_dnsbl_sites: []
+
+# Policy services checked for every recipient (check_policy_service), as
+# 'inet:<host>:<port>' or 'unix:<path>', e.g. the Dovecot quota-status
+# service 'inet:127.0.0.1:12340' to reject mail for full mailboxes
+postfix_policy_services: []
+
+#
+# Milter
+#
+
+# Milters for inbound and submitted mail and for mail from the local
+# sendmail (smtpd_milters, non_smtpd_milters). The default expects rspamd
+# (marcstraube.server.rspamd) on this host. [] disables the milter.
+postfix_milters:
+  - 'inet:127.0.0.1:11332'
+
+# Action when a milter is unreachable (milter_default_action): 'tempfail'
+# defers the mail instead of passing it unfiltered; 'accept', 'reject',
+# 'quarantine'
+postfix_milter_default_action: 'tempfail'
+
+#
+# Outbound
+#
+
+# Relay host for all outbound mail, e.g. '[smtp.example.net]:587' for a host
+# that cannot send on port 25. Empty: direct delivery by MX.
+postfix_relayhost: ''
+
+# Login at the relay host (SASL). With a password the connection to the
+# relay host is raised from 'none', 'may' or 'dane' to TLS level 'secure'
+# (certificate verified against the relay host name; write the host in
+# brackets, without them the certificate must match the MX lookup name); set
+# postfix_smtp_tls_security_level: 'encrypt' for a relay host whose
+# certificate does not verify.
+postfix_relayhost_username: ''
+postfix_relayhost_password: ''
+
+# TLS of outbound connections (smtp_tls_security_level): 'may'
+# (opportunistic), 'dane' (needs a DNSSEC-validating resolver such as
+# marcstraube.common.unbound), 'encrypt', 'verify', 'secure', ...
+postfix_smtp_tls_security_level: 'may'
+
+#
+# TLS
+#
+# Postfix reads certificate and key as root at the start; it reloads on
+# every certificate change notified in the play (handler topic 'Reload cert
+# services' of marcstraube.common.pki).
+
+# Server certificate (with the intermediate certificates appended) and
+# private key, PEM (REQUIRED)
+postfix_tls_cert_file: ''
+postfix_tls_key_file: ''
+
+# CA certificates for client certificates (smtpd_tls_CAfile); usually
+# empty
+postfix_tls_ca_file: ''
+
+# Protocols on port 25 and outbound with opportunistic TLS
+# (smtpd_tls_protocols, smtp_tls_protocols)
+postfix_tls_protocols: '!SSLv2, !SSLv3, !TLSv1, !TLSv1.1'
+
+# Protocols where TLS is required: submission, outbound with 'encrypt' or
+# higher (smtpd_tls_mandatory_protocols, smtp_tls_mandatory_protocols)
+postfix_tls_mandatory_protocols: '!SSLv2, !SSLv3, !TLSv1, !TLSv1.1'
+
+#
+# Limits
+#
+
+# Largest message in bytes (message_size_limit)
+postfix_message_size_limit: 52428800
+
+# Recipients per message (smtpd_recipient_limit)
+postfix_smtpd_recipient_limit: 1000
+
+# Per client and minute (anvil, mynetworks excepted): connections, messages
+# and recipients (smtpd_client_connection_rate_limit,
+# smtpd_client_message_rate_limit, smtpd_client_recipient_rate_limit).
+# 0 = no limit.
+postfix_smtpd_client_connection_rate_limit: 0
+postfix_smtpd_client_message_rate_limit: 0
+postfix_smtpd_client_recipient_rate_limit: 0
+
+#
+# Extra Configuration
+#
+
+# Further main.cf parameters (name: value); a list is joined with ', ',
+# true/false become yes/no. A parameter the role writes is replaced by the
+# value here.
+postfix_extra_main_cf: {}
+# Example:
+#   smtpd_tls_mandatory_ciphers: 'high'
+#   recipient_delimiter: '+'
+
+# Further master.cf lines, appended verbatim
+postfix_extra_master_cf: ''
+
+#
+# DNS
+#
+
+# Print the records the MTA needs and check each one, reported as present,
+# missing or different. A missing record never fails the run; the expected
+# records are printed either way. The check runs on the controller.
+postfix_dns_check_enabled: true
+
+# Resolver for the check (IPv4 address, several separated by commas).
+# Empty: the system resolver of the controller.
+postfix_dns_resolver: ''
+
+# Port of the resolver. A port other than 53 needs community.general 9.5.0
+# or later.
+postfix_dns_resolver_port: 53
+
+# Mail domains whose MX and SPF records are checked
+postfix_dns_domains: []
+# Example:
+#   - 'example.com'
+
+# Public addresses of the MTA for the A, AAAA and PTR records of
+# postfix_myhostname. Empty: the default IPv4 and IPv6 address of the host
+# (wrong behind NAT).
+postfix_dns_addresses: []
+
+# Expected SPF record of the mail domains ('' skips the SPF check)
+postfix_dns_spf: 'v=spf1 mx -all'

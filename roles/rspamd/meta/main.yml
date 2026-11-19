@@ -1,0 +1,29 @@
+---
+galaxy_info:
+  author: Marc Straube
+  description: rspamd mail filter with milter, controller, Valkey, DKIM and ARC signing, clamd and DMARC reports
+  license: MIT
+  min_ansible_version: '2.19'
+
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+
+    - name: Debian
+      versions:
+        - trixie
+
+    - name: EL
+      versions:
+        - all
+
+  galaxy_tags:
+    - mail
+    - rspamd
+    - spam
+    - dkim
+    - milter
+    - postfix
+
+dependencies: []

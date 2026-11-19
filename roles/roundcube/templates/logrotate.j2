@@ -1,0 +1,11 @@
+{{ ansible_managed | comment }}
+{{ __roundcube_log_dir }}/*.log {
+    weekly
+    rotate 12
+    missingok
+    notifempty
+    compress
+    delaycompress
+    su {{ __roundcube_fpm_user }} {{ __roundcube_fpm_group }}
+    create 0640 {{ __roundcube_fpm_user }} {{ __roundcube_fpm_group }}
+}
