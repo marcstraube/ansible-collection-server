@@ -51,6 +51,7 @@ provisioner:
   playbooks:
     converge: converge.yml
     verify: verify.yml
+    side_effect: side_effect.yml
   inventory:
     host_vars:
       archlinux:
@@ -74,4 +75,5 @@ scenario:
     - converge
     - idempotence
     - verify
+    - side_effect
     - destroy

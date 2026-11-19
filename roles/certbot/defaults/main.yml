@@ -134,7 +134,7 @@ certbot_certificates: []
 #       - 'mail.example.com'
 #     authenticator: 'standalone'
 #     pre_hook: 'systemctl stop nginx'
-#     post_hook: 'systemctl start nginx'
+#     post_hook: 'systemctl start nginx'  # not with reload services, see README
 #
 # DNS challenge (for wildcards):
 #   - domains:
@@ -155,7 +155,7 @@ certbot_certificates: []
 #     force_renewal: false
 #     expand: false  # Expand existing cert with new domains
 #     pre_hook: ''
-#     post_hook: ''
+#     post_hook: ''  # not with reload services, see README
 #     deploy_hook: 'systemctl reload nginx'
 #     must_staple: false  # Add OCSP Must-Staple extension
 
@@ -260,8 +260,10 @@ certbot_pkcs12_password: '{{ vault_certbot_pkcs12_password | default("") }}'
 # =============================================================================
 # MAIL SERVICE INTEGRATION
 # =============================================================================
-# Automatically reload mail services on certificate renewal
-# These add deploy hooks to reload services when certs are renewed
+# Services reloaded once per renewal run and after an issuance in a play.
+# A script passed as --post-hook to the renew command of the renewal unit
+# (or cron job) checks each service's configuration and reloads it; it never
+# restarts. See the README for the mechanism.
 
 # Reload Postfix on renewal
 certbot_postfix_enabled: false
@@ -275,7 +277,14 @@ certbot_nginx_enabled: false
 # Reload Apache on renewal
 certbot_apache_enabled: false
 
-# Custom services to reload on renewal (list of systemd service names)
+# Retry a failed reload hourly while it stays failed: the systemd timer
+# certbot-reload-retry.timer, or a cron job with certbot_use_systemd_timer:
+# false. Only with reload services.
+certbot_reload_retry_timer_enabled: true
+
+# Custom services to reload on renewal (list of systemd service names).
+# Without a configuration check unless the name is apache2, httpd, nginx,
+# postfix or dovecot.
 certbot_reload_services: []
 # Example:
 #   - 'postfix'

@@ -1,0 +1,15 @@
+{{ ansible_managed | comment }}
+# Retries a failed reload of the certbot certificate services. Runs the
+# reload script only while it left its marker; the script removes the marker
+# once every service reloaded.
+[Unit]
+Description=Retry a failed reload of the certbot certificate services
+ConditionPathExists={{ __certbot_reload_marker }}
+
+[Service]
+Type=oneshot
+ExecStart={{ __certbot_reload_script }} --retry
+# The script logs every message to the journal itself (tag
+# certbot-reload-services); its stdout and stderr would only repeat them
+StandardOutput=null
+StandardError=null

@@ -1,0 +1,11 @@
+{{ ansible_managed | comment }}
+# Hourly retry of a failed reload of the certbot certificate services
+[Unit]
+Description=Hourly retry of a failed certbot service reload
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
