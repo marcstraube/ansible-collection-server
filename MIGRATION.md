@@ -15,6 +15,8 @@ heading or rename it to a concrete version — the workflow handles that.
 
 ## Unreleased
 
+## v1.1.4 - 2026-11-19
+
 ### `certbot` — services reload once per renewal run, without a restart
 
 The services of `certbot_postfix_enabled`, `certbot_dovecot_enabled`,
