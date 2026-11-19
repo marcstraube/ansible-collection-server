@@ -1,0 +1,132 @@
+---
+# The role runs again on the installed Postfix host with states a first run
+# does not see:
+# - a policy-rc.d of the dovecot role (its marker, not this role's), which
+#   the role leaves as it is;
+# - a chroot copy that differs from the original while the refresh by
+#   postfix check is turned off (SYNC_CHROOT): postfix check warns about it,
+#   the role does not fail on that warning.
+# Then the role's own policy-rc.d is left behind, as an interrupted first
+# run does; runs with a single sub-tag (postfix:maps, postfix:configure,
+# postfix:service) must pass without the install tasks, and the next full
+# run removes the leftover. verify.yml checks that and that Postfix still
+# started only once.
+- name: Side Effect — Facts
+  hosts: all
+  gather_facts: true
+
+- name: Side Effect — Policy-rc.d of the dovecot role and chroot copies
+  hosts: mail
+  gather_facts: false
+
+  vars:
+    mta_enabled: false
+    __side_effect_dovecot_marker: 'Managed by Ansible (marcstraube.server.dovecot)'
+
+  tasks:
+    - name: Side Effect | Leave the policy-rc.d of the dovecot role
+      ansible.builtin.copy:
+        content: |
+          #!/bin/sh
+          # {{ __side_effect_dovecot_marker }}: keeps the first
+          # install of Dovecot from starting it, removed right after
+          case "$1" in
+            dovecot | dovecot.service | dovecot.socket) exit 101 ;;
+          esac
+          exit 0
+        dest: /usr/sbin/policy-rc.d
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Side Effect | Turn off the refresh of the chroot copies
+      ansible.builtin.copy:
+        content: "SYNC_CHROOT=''\n"
+        dest: /etc/default/postfix
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Side Effect | Change the chroot copy of /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /var/spool/postfix/etc/hosts
+        line: '# molecule side effect'
+
+    - name: Side Effect | Run postfix check
+      ansible.builtin.command:
+        argv: [postfix, check]
+      register: __side_effect_check
+      changed_when: false
+
+    - name: Side Effect | Assert postfix check warns about the chroot copy
+      ansible.builtin.assert:
+        that:
+          - >-
+            __side_effect_check.stderr
+            is search('warning: /var/spool/postfix/etc/hosts and /etc/hosts differ')
+        fail_msg: '{{ __side_effect_check.stderr }}'
+
+    - name: Side Effect | Include postfix role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+
+    - name: Side Effect | Read the policy-rc.d
+      ansible.builtin.slurp:
+        src: /usr/sbin/policy-rc.d
+      register: __side_effect_policy_rc
+
+    - name: Side Effect | Assert the policy-rc.d of the dovecot role is kept
+      ansible.builtin.assert:
+        that:
+          - __side_effect_dovecot_marker in (__side_effect_policy_rc.content | b64decode)
+        fail_msg: '{{ __side_effect_policy_rc.content | b64decode }}'
+
+    - name: Side Effect | Turn the refresh of the chroot copies on again
+      ansible.builtin.file:
+        path: /etc/default/postfix
+        state: absent
+
+    - name: Side Effect | Leave the role's policy-rc.d behind
+      ansible.builtin.copy:
+        content: |
+          #!/bin/sh
+          # Managed by Ansible (marcstraube.server.postfix): keeps the first
+          # install of Postfix from starting it, removed right after
+          exit 101
+        dest: /usr/sbin/policy-rc.d
+        owner: root
+        group: root
+        mode: '0755'
+
+# A run with a single sub-tag skips the install tasks, which set the facts
+# of a pending first install in check mode; the later phases must not
+# depend on them
+- name: Side Effect — Single sub-tags
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Side Effect | Run the role with a single sub-tag
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python | dirname }}/ansible-playbook"
+          - '--inventory'
+          - '{{ ansible_inventory_sources | first }}'
+          - '--tags'
+          - '{{ item }}'
+          - '{{ playbook_dir }}/converge_tagged.yml'
+      environment:
+        ANSIBLE_FORCE_COLOR: 'false'
+        ANSIBLE_NOCOLOR: 'true'
+      loop:
+        - 'postfix:maps'
+        - 'postfix:configure'
+        - 'postfix:service'
+      register: __side_effect_tagged
+      changed_when: false
+      failed_when: >-
+        __side_effect_tagged.rc != 0
+        or __side_effect_tagged.stdout is not search('postfix-split-mail +: ok=[1-9][0-9]* .*failed=0')
+
+- name: Side Effect — Run the role again
+  ansible.builtin.import_playbook: converge.yml

@@ -1,0 +1,98 @@
+<?php
+{{ ansible_managed | comment(decoration='// ') }}
+// Read by config.inc.php after the defaults of PostfixAdmin.
+{#- Renders a value as a PHP literal: strings single-quoted, lists and
+    mappings as arrays #}
+{%- macro php(value) -%}
+{%- if value is boolean -%}
+{{ value | ternary('true', 'false') }}
+{%- elif value is none -%}
+null
+{%- elif value is number -%}
+{{ value }}
+{%- elif value is string -%}
+'{{ value | replace('\\', '\\\\') | replace("'", "\\'") }}'
+{%- elif value is mapping -%}
+array({% for key, element in value.items() %}{{ php(key) }} => {{ php(element) }}{{ ', ' if not loop.last }}{% endfor %})
+{%- else -%}
+array({% for element in value %}{{ php(element) }}{{ ', ' if not loop.last }}{% endfor %})
+{%- endif -%}
+{%- endmacro %}
+
+
+$CONF['configured'] = true;
+$CONF['setup_password'] = {{ php(postfixadmin_setup_password_hash) }};
+
+// Database
+$CONF['database_type'] = {{ php(__postfixadmin_db_drivers[postfixadmin_db_type]) }};
+{% if postfixadmin_db_type == 'postgresql' and postfixadmin_db_tls | bool %}
+// PostgreSQL: the TLS parameters go into the connection string of PDO
+// through the host setting (verify-full checks the CA and the host name).
+$CONF['database_host'] = {{ php(postfixadmin_db_host ~ ';sslmode=verify-full;sslrootcert=' ~ postfixadmin_db_tls_ca_file) }};
+{% elif postfixadmin_db_type == 'postgresql' or __postfixadmin_db_socket | length == 0 %}
+$CONF['database_host'] = {{ php(postfixadmin_db_host) }};
+{% else %}
+$CONF['database_host'] = 'localhost';
+{% endif %}
+{#- PostgreSQL names its socket file after the port (.s.PGSQL.<port>), so
+    the port also applies to a socket directory; MariaDB ignores it for a
+    socket #}
+{% if postfixadmin_db_type == 'postgresql' or __postfixadmin_db_socket | length == 0 %}
+$CONF['database_port'] = {{ php(postfixadmin_db_port | string) }};
+{% endif %}
+$CONF['database_socket'] = {{ php(__postfixadmin_db_socket if postfixadmin_db_type == 'mariadb' else '') }};
+$CONF['database_user'] = {{ php(postfixadmin_db_user) }};
+$CONF['database_password'] = {{ php(postfixadmin_db_password) }};
+$CONF['database_name'] = {{ php(postfixadmin_db_name) }};
+{% if postfixadmin_db_type == 'mariadb' and postfixadmin_db_tls | bool %}
+$CONF['database_use_ssl'] = true;
+$CONF['database_ssl_ca'] = {{ php(postfixadmin_db_tls_ca_file) }};
+$CONF['database_ssl_verify_server_cert'] = true;
+$CONF['database_ssl_key'] = '';
+$CONF['database_ssl_cert'] = '';
+$CONF['database_ssl_ca_path'] = '';
+$CONF['database_ssl_cipher'] = '';
+{% else %}
+$CONF['database_use_ssl'] = false;
+{% endif %}
+
+// Password hashes, stored with the scheme prefix
+$CONF['encrypt'] = {{ php(postfixadmin_password_scheme) }};
+
+// Password rules and two-factor login
+$CONF['password_validation'] = {{ php(postfixadmin_password_validation) }};
+$CONF['totp'] = {{ php(postfixadmin_totp | bool | ternary('YES', 'NO')) }};
+
+// Mail sent by PostfixAdmin
+$CONF['admin_email'] = {{ php(postfixadmin_admin_email) }};
+$CONF['smtp_server'] = {{ php(postfixadmin_smtp_server) }};
+$CONF['smtp_port'] = {{ php(postfixadmin_smtp_port | string) }};
+
+// Maildir layout
+$CONF['domain_path'] = {{ php(postfixadmin_domain_path | bool | ternary('YES', 'NO')) }};
+$CONF['domain_in_mailbox'] = {{ php(postfixadmin_domain_in_mailbox | bool | ternary('YES', 'NO')) }};
+
+// Quotas and limits of new domains
+$CONF['quota'] = {{ php(postfixadmin_quota | bool | ternary('YES', 'NO')) }};
+$CONF['domain_quota'] = {{ php(postfixadmin_domain_quota | bool | ternary('YES', 'NO')) }};
+$CONF['quota_multiplier'] = {{ php(postfixadmin_quota_multiplier | string) }};
+$CONF['aliases'] = {{ php(postfixadmin_domain_aliases_limit | string) }};
+$CONF['mailboxes'] = {{ php(postfixadmin_domain_mailboxes_limit | string) }};
+$CONF['maxquota'] = {{ php(postfixadmin_domain_maxquota | string) }};
+$CONF['domain_quota_default'] = {{ php(postfixadmin_domain_quota_default | string) }};
+
+// Aliases of a new domain
+$CONF['default_aliases'] = {{ php(postfixadmin_default_aliases) }};
+
+// Vacation
+$CONF['vacation'] = {{ php(postfixadmin_vacation_enabled | bool | ternary('YES', 'NO')) }};
+{% if postfixadmin_vacation_enabled | bool %}
+$CONF['vacation_domain'] = {{ php(postfixadmin_vacation_domain) }};
+{% endif %}
+{% if postfixadmin_extra_config | length > 0 %}
+
+// Extra settings (never a key written above: the role rejects those)
+{% for key, value in postfixadmin_extra_config.items() %}
+$CONF[{{ php(key) }}] = {{ php(value) }};
+{% endfor %}
+{% endif %}

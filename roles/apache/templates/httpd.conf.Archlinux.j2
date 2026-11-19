@@ -169,9 +169,11 @@ DocumentRoot "{{ __apache_document_root }}"
 # HTTP/2 Configuration
 #
 
-{% if apache_http2_enabled %}
+{% if 'http2' in __apache_modules %}
+# Server default, inherited by every vhost without an http2 setting of its
+# own. An SSL vhost that differs carries its own Protocols line.
+Protocols {{ 'h2 http/1.1' if apache_http2_enabled | bool else 'http/1.1' }}
 <IfModule http2_module>
-    Protocols h2 http/1.1
     H2MaxSessionStreams {{ apache_http2_max_session_streams }}
     H2WindowSize {{ apache_http2_initial_window_size }}
 </IfModule>

@@ -2,6 +2,9 @@
 {% set __nginx_https_port = '' if item.listen_ssl | default(443) | int == 443 else ':' ~ item.listen_ssl %}
 {% set __nginx_http_port = '' if item.listen | default(80) | int == 80 else ':' ~ item.listen %}
 {% set __nginx_site_port = __nginx_https_port if item.ssl is defined and item.ssl.enabled | default(false) else __nginx_http_port %}
+{% set __nginx_site_http2 = item.http2 | default(nginx_http2_enabled) | bool %}
+{% set __nginx_http2_listen = ' http2' if not (__nginx_http2_directive | bool) and __nginx_site_http2 else '' %}
+{% set __nginx_http2_server = __nginx_http2_directive | bool and __nginx_site_http2 %}
 
 {% if item.http_redirect | default(false) and item.ssl is defined and item.ssl.enabled | default(false) %}
 # HTTP to HTTPS redirect
@@ -26,8 +29,11 @@ server {
 # WWW redirect
 server {
 {% if item.ssl is defined and item.ssl.enabled | default(false) %}
-    listen {{ item.listen_ssl | default(443) }} ssl http2;
-    listen [::]:{{ item.listen_ssl | default(443) }} ssl http2;
+    listen {{ item.listen_ssl | default(443) }} ssl{{ __nginx_http2_listen }};
+    listen [::]:{{ item.listen_ssl | default(443) }} ssl{{ __nginx_http2_listen }};
+{% if __nginx_http2_server %}
+    http2 on;
+{% endif %}
     ssl_certificate {{ item.ssl.certificate }};
     ssl_certificate_key {{ item.ssl.certificate_key }};
 {% else %}
@@ -47,8 +53,11 @@ server {
 # Main server block
 server {
 {% if item.ssl is defined and item.ssl.enabled | default(false) %}
-    listen {{ item.listen_ssl | default(443) }} ssl http2;
-    listen [::]:{{ item.listen_ssl | default(443) }} ssl http2;
+    listen {{ item.listen_ssl | default(443) }} ssl{{ __nginx_http2_listen }};
+    listen [::]:{{ item.listen_ssl | default(443) }} ssl{{ __nginx_http2_listen }};
+{% if __nginx_http2_server %}
+    http2 on;
+{% endif %}
 
     # SSL configuration
     ssl_certificate {{ item.ssl.certificate }};

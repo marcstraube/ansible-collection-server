@@ -1,0 +1,84 @@
+---
+# Directories the applications write to. On RedHat with SELinux enabled,
+# httpd and its PHP-FPM workers (httpd_t) may only write to paths labeled
+# httpd_sys_rw_content_t (or httpd_log_t and the other types in
+# __nginx_writable_path_types). A directory created below the document root
+# inherits httpd_sys_content_t, which is read-only for httpd_t; the symptom is
+# a bare "Permission denied" from the application.
+
+# Missing parent directories are created with the same owner, group and mode.
+- name: Writable Paths | Create directories
+  ansible.builtin.file:
+    path: '{{ item.path }}'
+    state: directory
+    owner: '{{ item.owner | default(__nginx_user) }}'
+    group: '{{ item.group | default(__nginx_group) }}'
+    mode: '{{ item.mode | default("0755") }}'
+  loop: '{{ nginx_writable_paths }}'
+  loop_control:
+    label: '{{ item.path }}'
+  register: __nginx_writable_paths_dirs
+  when: item.owner is defined or item.group is defined or item.mode is defined
+
+# The file context covers the directory and everything below it. Dots are
+# escaped, so the regex matches the path only; the validation in main.yml
+# admits no other regex characters.
+- name: Writable Paths | Add SELinux file contexts
+  community.general.sefcontext:
+    target: '{{ item.path | replace(".", "\.") }}(/.*)?'
+    setype: '{{ item.type | default("httpd_sys_rw_content_t") }}'
+    ftype: a
+    state: present
+  loop: '{{ nginx_writable_paths }}'
+  loop_control:
+    label: '{{ item.path }}'
+  register: __nginx_writable_paths_fcontexts
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+# Compares the label of each existing path with the file context, on every
+# run: a directory the application created after the context was added
+# inherits the type of its parent. Only the path itself is checked, not its
+# content. Read-only (-n), so it also runs in check mode; -i skips a path
+# that does not exist yet.
+- name: Writable Paths | Check the SELinux labels
+  ansible.builtin.command:
+    argv:
+      - restorecon
+      - '-n'
+      - '-v'
+      - '-i'
+      - '{{ item.path }}'
+  loop: '{{ nginx_writable_paths }}'
+  loop_control:
+    label: '{{ item.path }}'
+  register: __nginx_writable_paths_labels
+  changed_when: false
+  check_mode: false
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+# Relabels the path and everything below it after a new or changed file
+# context, or when the check found a wrong label on the path.
+- name: Writable Paths | Restore the SELinux labels
+  ansible.builtin.command:
+    argv:
+      - restorecon
+      - '-R'
+      - '-v'
+      - '-i'
+      - '{{ item.path }}'
+  loop: '{{ nginx_writable_paths }}'
+  loop_control:
+    label: '{{ item.path }}'
+    index_var: __nginx_writable_path_index
+  register: __nginx_writable_paths_restorecon
+  changed_when: __nginx_writable_paths_restorecon.stdout | default('') | length > 0
+  when:
+    - not ansible_check_mode
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+    - __nginx_writable_paths_fcontexts.results[__nginx_writable_path_index] | default({}) is changed
+      or __nginx_writable_paths_labels.results[__nginx_writable_path_index].stdout | default('') | length > 0

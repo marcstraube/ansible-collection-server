@@ -1,0 +1,4 @@
+{{ ansible_managed | comment }}
+# The Received header smtpd adds for an authenticated client carries its
+# address; mail from submission leaves without it
+/^Received: .*with (E|UTF8)SMTPS?A /	IGNORE

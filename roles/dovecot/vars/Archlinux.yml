@@ -1,0 +1,28 @@
+---
+# One package carries the core, every protocol and both SQL drivers;
+# pigeonhole adds Sieve and ManageSieve
+__dovecot_packages:
+  - dovecot
+  - pigeonhole
+__dovecot_db_packages:
+  postgresql: []
+  mariadb: []
+__dovecot_pop3_packages: []
+__dovecot_managesieve_packages: []
+__dovecot_curl_packages:
+  - curl
+
+# Package whose version the role reports and checks
+__dovecot_version_package: 'dovecot'
+
+# Installed packages a targeted update moves along
+__dovecot_update_pattern: '^(dovecot|pigeonhole)$'
+
+__dovecot_service_name: 'dovecot'
+
+# Group of the Dovecot service user (default_internal_group), created by the
+# package
+__dovecot_internal_group: 'dovecot'
+
+# Shell of the virtual mail user
+__dovecot_nologin_shell: '/usr/bin/nologin'

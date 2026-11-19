@@ -102,6 +102,23 @@
   when: ansible_facts['os_family'] == 'RedHat'
   notify: Reload Apache
 
+# The apache2 package's mods-available/http2.conf sets 'Protocols h2 h2c
+# http/1.1' server-wide as soon as mod_http2 is enabled. Protocols directives
+# in one context add up, so the server default in apache2.conf could not
+# switch h2 off again, and h2c would be on for plain HTTP. Like the EL files
+# above, it is replaced with a neutral file, which dpkg keeps on updates
+# (conffile); deployed regardless of HTTP/2, since the package ships it
+# either way.
+- name: Configure | Neutralize the package http2.conf (Debian)
+  ansible.builtin.template:
+    src: 'http2.conf.j2'
+    dest: '{{ __apache_modules_available_dir }}/http2.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  when: ansible_facts['os_family'] == 'Debian'
+  notify: Reload Apache
+
 # Proxy modules are not in apache_modules_enabled by default, yet both the
 # PHP-FPM handler and reverse proxy vhosts emit directives that need them.
 # Distributions that load them out of the box (RedHat ships 00-proxy.conf) hide
@@ -147,7 +164,9 @@
   when: ansible_facts['os_family'] == 'Debian'
 
 # Modules the apache2 package enables that this configuration does not need
-# (autoindex, access_compat, Basic Auth, ...), plus apache_modules_disabled.
+# (autoindex, access_compat, Basic Auth, ...), feature modules the role
+# enabled for a feature that is now off (mod_http2), plus
+# apache_modules_disabled.
 # force: a2dismod asks for confirmation before disabling modules Debian marks
 # as essential (authn_file, authz_user, autoindex); this list never contains
 # one the configuration needs.
@@ -157,7 +176,8 @@
     state: absent
     force: true
   loop: >-
-    {{ (__apache_modules_package_defaults + apache_modules_disabled) | unique
+    {{ (__apache_modules_package_defaults + __apache_modules_feature_disable
+        + apache_modules_disabled) | unique
        | reject('in', __apache_modules + __apache_module_deps.stdout_lines | default([]))
        | list }}
   loop_control:

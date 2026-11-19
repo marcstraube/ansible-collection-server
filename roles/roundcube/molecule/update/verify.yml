@@ -1,0 +1,132 @@
+---
+# The update from the previous release: the new release is active, the
+# previous one kept, older ones removed, the schema upgraded after a
+# pre-update dump (with the rotation), config.inc.php unchanged, and a
+# PostfixAdmin mailbox logs in through the new release.
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - ../shared/vars/main.yml
+
+  vars:
+    __verify_dir: '/usr/local/lib/molecule-roundcube'
+    __verify_releases: '/var/www/roundcube/releases'
+    __verify_web: >-
+      {{ ansible_facts['python']['executable'] }} -I {{ __verify_dir }}/webmail.py
+
+  tasks:
+    - name: Verify | Load role defaults
+      ansible.builtin.include_vars:
+        file: '../../defaults/main.yml'
+        name: __verify_defaults
+
+    - name: Verify | Read the state before the update
+      ansible.builtin.slurp:
+        src: /root/molecule-before-update.json
+      register: __verify_before_raw
+
+    - name: Verify | Stat the active release link
+      ansible.builtin.stat:
+        path: /var/www/roundcube/current
+      register: __verify_current
+
+    - name: Verify | Find the release directories
+      ansible.builtin.find:
+        paths: '{{ __verify_releases }}'
+        file_type: directory
+        hidden: true
+      register: __verify_release_dirs
+
+    - name: Verify | Assert the new release is active and the previous one kept
+      ansible.builtin.assert:
+        that:
+          - __verify_current.stat.lnk_target == __verify_releases ~ '/' ~ __verify_defaults.roundcube_version
+          - >-
+            __verify_release_dirs.files | map(attribute='path') | map('basename') | sort
+            == [__molecule_previous_version, __verify_defaults.roundcube_version] | sort
+        fail_msg: >-
+          current: {{ __verify_current.stat.lnk_target | default('-') }},
+          releases: {{ __verify_release_dirs.files | map(attribute='path') | list }}
+
+    - name: Verify | Read the schema state after the update
+      ansible.builtin.command:
+        argv:
+          - php
+          - /usr/local/lib/roundcube-ansible/roundcube-schema.php
+          - /var/www/roundcube/current
+      register: __verify_status
+      changed_when: false
+
+    - name: Verify | Stat config.inc.php
+      ansible.builtin.stat:
+        path: /etc/roundcube/config.inc.php
+        checksum_algorithm: sha256
+      register: __verify_config
+
+    - name: Verify | Assert the schema upgrade and the kept configuration
+      ansible.builtin.assert:
+        that:
+          - __verify_before.status.release == __molecule_previous_version
+          - __verify_after.release == __verify_defaults.roundcube_version
+          - __verify_after.version > __verify_before.status.version
+          - __verify_after.version == __verify_after.target
+          - __verify_config.stat.checksum == __verify_before.config_checksum
+        fail_msg: 'before: {{ __verify_before }}, after: {{ __verify_after }}'
+      vars:
+        __verify_before: '{{ __verify_before_raw.content | b64decode | from_json }}'
+        __verify_after: '{{ __verify_status.stdout | from_json }}'
+
+    - name: Verify | Find the pre-update dumps
+      ansible.builtin.find:
+        paths: /var/backups/roundcube
+        patterns: 'roundcube-*.sql.gz'
+      register: __verify_dumps
+
+    - name: Verify | Assert the pre-update dump of the previous release and the rotation
+      ansible.builtin.assert:
+        that:
+          # roundcube_backup_update_keep 2: the dump of the update and the
+          # newer of the two older ones
+          - __verify_dumps.files | length == 2
+          - __verify_names | select('match', 'roundcube-' ~ __molecule_previous_version ~ '-') | list | length == 1
+          - "'roundcube-1.6.0-20200102T000000.sql.gz' in __verify_names"
+          # The dump of the update is readable by root only (the older ones
+          # are touched by prepare)
+          - >-
+            __verify_dumps.files | selectattr('path', 'search', 'roundcube-' ~ __molecule_previous_version ~ '-')
+            | map(attribute='mode') | list == ['0600']
+        fail_msg: '{{ __verify_names }}'
+      vars:
+        __verify_names: '{{ __verify_dumps.files | map(attribute="path") | map("basename") | list }}'
+
+    - name: Verify | Create the test directory
+      ansible.builtin.file:
+        path: '{{ __verify_dir }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Verify | Deploy webmail.py
+      ansible.builtin.copy:
+        src: ../shared/files/webmail.py
+        dest: '{{ __verify_dir }}/webmail.py'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Verify | Log in through the new release
+      ansible.builtin.command:
+        argv: "{{ __verify_web.split() + ['login', '--user', 'alice@example.com'] }}"
+        stdin: '{{ {"password": "alice-Secret-42"} | to_json }}'
+      register: __verify_login
+      changed_when: false
+
+    - name: Verify | Assert the login and the folder list
+      ansible.builtin.assert:
+        that:
+          - (__verify_login.stdout | from_json).login_ok
+          - "'INBOX' in (__verify_login.stdout | from_json).folders"
+        fail_msg: '{{ __verify_login.stdout }}'

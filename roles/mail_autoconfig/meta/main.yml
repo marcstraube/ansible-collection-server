@@ -1,0 +1,28 @@
+---
+galaxy_info:
+  author: Marc Straube
+  description: Publish mail client autoconfiguration (Mozilla Autoconfig, Microsoft Autodiscover, Apple profile)
+  license: MIT
+  min_ansible_version: '2.19'
+
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+    - name: Debian
+      versions:
+        - trixie
+    - name: EL
+      versions:
+        - all
+
+  galaxy_tags:
+    - mail
+    - email
+    - autoconfig
+    - autodiscover
+    - thunderbird
+    - outlook
+    - dns
+
+dependencies: []

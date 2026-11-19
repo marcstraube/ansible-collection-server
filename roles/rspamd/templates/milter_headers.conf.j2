@@ -1,0 +1,3 @@
+{{ ansible_managed | comment }}
+use = {{ rspamd_milter_headers | map('string') | list | to_json }};
+extended_spam_headers = {{ rspamd_milter_extended_headers | bool | to_json }};

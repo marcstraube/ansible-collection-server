@@ -1,0 +1,240 @@
+---
+# Alias restore, then the targeted package update: the Postfix packages
+# are rolled back to the previous build of the repository (EL AppStream and
+# Debian keep it; Arch Linux has a single version and only runs the minimum
+# checks), then the role runs with postfix_packages_state latest and the
+# version before the rollback as minimum. On Debian policy-rc.d keeps the maintainer scripts
+# from restarting Postfix, so only the role can; verify.yml checks that the
+# master process runs the new binary.
+# postmaster leaves postfix_aliases: the role restores the package entry it
+# had commented out; the later runs below manage postmaster again, which
+# verify.yml checks
+- name: Side Effect — Alias restore
+  hosts: all
+  gather_facts: true
+
+  vars:
+    mta_enabled: false
+    __side_effect_alias_file: >-
+      {{ '/etc/postfix/aliases' if ansible_facts['os_family'] == 'Archlinux' else '/etc/aliases' }}
+
+  tasks:
+    - name: Side Effect | Include postfix role without postmaster  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        postfix_aliases:
+          root: 'alice@example.com'
+
+    - name: Side Effect | Look up postmaster
+      ansible.builtin.command:
+        argv: [postalias, '-q', 'postmaster', 'lmdb:{{ __side_effect_alias_file }}']
+      register: __side_effect_postmaster
+      changed_when: false
+
+    - name: Side Effect | Read the alias file
+      ansible.builtin.slurp:
+        src: '{{ __side_effect_alias_file }}'
+      register: __side_effect_aliases
+
+    - name: Side Effect | Assert the package entry of postmaster is back
+      ansible.builtin.assert:
+        that:
+          - __side_effect_postmaster.stdout == 'root'
+          - __side_effect_aliases_text is search('(?m)^postmaster:\s*root$')
+          - __side_effect_aliases_text is not search('marcstraube[.]server[.]postfix:[ ]')
+        fail_msg: '{{ __side_effect_postmaster.stdout }} {{ __side_effect_aliases_text }}'
+      vars:
+        __side_effect_aliases_text: '{{ __side_effect_aliases.content | b64decode }}'
+
+- name: Side Effect — Roll back
+  hosts: all
+  gather_facts: true
+
+  vars:
+    # [epoch:]version-release of the main package from the latest package
+    # facts (Debian has no separate release field)
+    __side_effect_version: >-
+      {{ ((__side_effect_pkg.epoch ~ ':')
+          if ((__side_effect_pkg.epoch | default('', true) | string) not in ['', 'None', '0']) else '')
+         ~ (__side_effect_pkg.version | default(''))
+         ~ (('-' ~ __side_effect_pkg.release) if (__side_effect_pkg.release | default('', true)) else '') }}
+    __side_effect_pkg: "{{ ansible_facts['packages']['postfix'] | default([{}]) | first }}"
+
+  tasks:
+    - name: Side Effect | Gather package facts before the rollback
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Record the current package version
+      ansible.builtin.set_fact:
+        __side_effect_version_current: '{{ __side_effect_version }}'
+
+    - name: Side Effect | Block service restarts by packages (Debian)
+      ansible.builtin.copy:
+        content: "#!/bin/sh\nexit 101\n"
+        dest: /usr/sbin/policy-rc.d
+        owner: root
+        group: root
+        mode: '0755'
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # When the repository holds only one build, dnf reports that the lowest
+    # version is installed and exits with 0; nothing is rolled back and
+    # verify.yml skips the comparison. Every installed package of the family
+    # moves back together.
+    - name: Side Effect | Roll the Postfix packages back (RedHat)
+      ansible.builtin.command:
+        argv: >-
+          {{ ['dnf', 'downgrade', '-y']
+             + (ansible_facts['packages'] | list | select('match', '^postfix(-.+)?$') | list) }}
+      changed_when: true
+      retries: 5
+      delay: 10
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Side Effect | Roll the Postfix packages back (Debian)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          installed=$(dpkg-query -W -f '${Version}' postfix)
+          # madison lists the newest build first; take the first older one
+          old=$(apt-cache madison postfix \
+            | awk -F' [|] ' -v cur="${installed}" '$2 != cur { print $2; exit }')
+          [ -n "${old}" ] || exit 0
+          pkgs=$(dpkg-query -W -f '${Package} ${Version} ${db:Status-Abbrev}\n' 'postfix*' \
+            | awk -v cur="${installed}" '$2 == cur && $3 == "ii" { print $1 }')
+          args=''
+          for pkg in ${pkgs}; do args="${args} ${pkg}=${old}"; done
+          # shellcheck disable=SC2086
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades \
+            -o Dpkg::Options::=--force-confold ${args}
+        executable: /bin/bash
+      changed_when: true
+      retries: 5
+      delay: 10
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Side Effect | Gather package facts after the rollback
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Record the rolled back package version
+      ansible.builtin.set_fact:
+        __side_effect_version_rolled_back: '{{ __side_effect_version }}'
+
+    # verify.yml runs as a separate playbook; the versions reach it through
+    # this file
+    - name: Side Effect | Record the package versions around the rollback
+      ansible.builtin.copy:
+        content: |
+          {{ __side_effect_version_current }}
+          {{ __side_effect_version_rolled_back }}
+        dest: /root/postfix-update-versions
+        owner: root
+        group: root
+        mode: '0600'
+
+- name: Side Effect — Minimum
+  hosts: all
+  gather_facts: true
+
+  vars:
+    mta_enabled: false
+    __side_effect_version: >-
+      {{ ((__side_effect_pkg.epoch ~ ':')
+          if ((__side_effect_pkg.epoch | default('', true) | string) not in ['', 'None', '0']) else '')
+         ~ (__side_effect_pkg.version | default(''))
+         ~ (('-' ~ __side_effect_pkg.release) if (__side_effect_pkg.release | default('', true)) else '') }}
+    __side_effect_pkg: "{{ ansible_facts['packages']['postfix'] | default([{}]) | first }}"
+
+  tasks:
+    # The pre-check runs before the package task, so a minimum the
+    # repository does not offer leaves the rolled back packages in place.
+    - name: Side Effect | Run with a minimum the repository does not offer
+      block:
+        - name: Side Effect | Include postfix role with an unmet minimum  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            postfix_packages_state: 'latest'
+            postfix_packages_minimum: "{{ {ansible_facts['os_family']: '99.0'} }}"
+      rescue:
+        - name: Side Effect | Record the minimum check failure
+          ansible.builtin.set_fact:
+            __side_effect_minimum_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Read the recorded versions
+      ansible.builtin.slurp:
+        src: /root/postfix-update-versions
+      register: __side_effect_versions
+
+    - name: Side Effect | Gather package facts after the unmet minimum
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Assert the unmet minimum failed without a change
+      ansible.builtin.assert:
+        that:
+          - __side_effect_minimum_error is defined
+          - "'requires 99.0' in __side_effect_minimum_error"
+          - "'nothing was changed' in __side_effect_minimum_error"
+          - __side_effect_version == (__side_effect_versions.content | b64decode).splitlines()[1] | trim
+        fail_msg: >-
+          A minimum of 99.0 did not fail before the update (error:
+          {{ __side_effect_minimum_error | default('none') }}, postfix
+          {{ __side_effect_version }})
+        success_msg: 'The pre-check rejects a minimum the repository does not offer'
+
+    - name: Side Effect | Run with a mapping without a key for the host
+      block:
+        - name: Side Effect | Include postfix role with a mapping for another platform  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            postfix_packages_state: 'latest'
+            postfix_packages_minimum:
+              Solaris: '1.0'
+      rescue:
+        - name: Side Effect | Record the mapping failure
+          ansible.builtin.set_fact:
+            __side_effect_mapping_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Assert the mapping without a key failed
+      ansible.builtin.assert:
+        that:
+          - __side_effect_mapping_error is defined
+          - "'has no key for this host' in __side_effect_mapping_error"
+        fail_msg: 'A mapping without a key for the host did not fail the run'
+        success_msg: 'A mapping without a key for the host fails the run'
+
+# On Debian the packages are already updated by the rollback of the
+# rollback; the role restarts the master that still runs the replaced
+# binary. The full distribution version is the minimum.
+- name: Side Effect — Update
+  hosts: all
+  gather_facts: true
+
+  vars:
+    mta_enabled: false
+
+  tasks:
+    - name: Side Effect | Read the recorded versions
+      ansible.builtin.slurp:
+        src: /root/postfix-update-versions
+      register: __side_effect_versions
+
+    - name: Side Effect | Include postfix role with the update  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        postfix_packages_state: 'latest'
+        postfix_packages_minimum: '{{ (__side_effect_versions.content | b64decode).splitlines()[0] | trim }}'
+
+- name: Side Effect — Clean up
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Allow service restarts by packages again (Debian)
+      ansible.builtin.file:
+        path: /usr/sbin/policy-rc.d
+        state: absent
+      when: ansible_facts['os_family'] == 'Debian'

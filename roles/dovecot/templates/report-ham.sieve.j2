@@ -1,0 +1,24 @@
+{{ ansible_managed | comment }}
+{% if __dovecot_trash_mailbox | length > 0 %}
+# IMAPSieve: a message copied or moved out of {{ __dovecot_junk_mailbox }} is reported as
+# ham, unless it goes to {{ __dovecot_trash_mailbox }} (the \Trash folder of dovecot_mailboxes).
+{% else %}
+# IMAPSieve: a message copied or moved out of {{ __dovecot_junk_mailbox }} is reported as
+# ham. dovecot_mailboxes has no \Trash folder, so a move into a trash
+# folder is reported as ham as well.
+{% endif %}
+require ["vnd.dovecot.pipe", "copy", "imapsieve", "environment", "variables"];
+
+if environment :matches "imap.mailbox" "*" {
+  set "mailbox" "${1}";
+}
+{% if __dovecot_trash_mailbox | length > 0 %}
+if string "${mailbox}" "{{ __dovecot_trash_mailbox }}" {
+  stop;
+}
+{% endif %}
+if string "${mailbox}" "{{ __dovecot_junk_mailbox }}" {
+  stop;
+}
+
+pipe :copy "rspamd-learn-ham.sh";

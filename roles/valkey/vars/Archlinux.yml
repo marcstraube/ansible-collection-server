@@ -1,0 +1,17 @@
+---
+__valkey_packages:
+  - valkey
+
+__valkey_service_name: 'valkey'
+
+# valkey.conf and users.conf. The package ships valkey.conf world-readable
+# (root:root 0644); the ACL hashes in users.conf are for the service user
+# only. Both files stay root-owned like /etc/valkey (root:valkey 0755 from
+# tmpfiles.d), so the service user reads them through the group.
+__valkey_config_owner: 'root'
+__valkey_config_group: 'valkey'
+__valkey_config_mode: '0640'
+
+# The package configures no PID file and logs to the journal
+__valkey_pid_file: '/run/valkey/valkey.pid'
+__valkey_log_file: ''

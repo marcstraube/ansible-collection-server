@@ -59,7 +59,8 @@
           enabled: true
           certificate: '/etc/nginx/ssl/test.crt'
           certificate_key: '/etc/nginx/ssl/test.key'
-      # HTTPS on 443: the redirect URL carries no port
+      # HTTPS on 443: the redirect URL carries no port. Inherits HTTP/2 from
+      # nginx_http2_enabled (default true).
       - name: 'test-redirect-default'
         server_names:
           - 'redirect-default.example.com'
@@ -69,6 +70,30 @@
           enabled: true
           certificate: '/etc/nginx/ssl/test.crt'
           certificate_key: '/etc/nginx/ssl/test.key'
+      # Switches HTTP/2 off for itself. On a port of its own, since nginx
+      # before 1.25.1 (EL 9) applies the listen parameter to the whole port;
+      # side_effect.yml covers a shared port.
+      - name: 'test-http2-off'
+        server_names:
+          - 'http2-off.example.com'
+        root: '/var/www/html'
+        listen_ssl: 8443
+        http2: false
+        ssl:
+          enabled: true
+          certificate: '/etc/nginx/ssl/test.crt'
+          certificate_key: '/etc/nginx/ssl/test.key'
+    # Cache below a document root (owner and group default to the web server
+    # user), a log directory created below /var/log and a label-only path.
+    nginx_writable_paths:
+      - path: '/var/www/writable.example.local/var/cache'
+        mode: '0750'
+      - path: '/var/log/molecule-writable'
+        type: 'httpd_log_t'
+        owner: 'root'
+        group: 'root'
+        mode: '0770'
+      - path: '/var/www/writable.example.local/uploads'
     nginx_stub_status_enabled: true
     nginx_stub_status_path: '/nginx_status'
 

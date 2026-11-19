@@ -1,0 +1,158 @@
+---
+# The community.general.dig lookup runs on the controller. Missing records
+# never fail the run. The expected records are printed on every run, also
+# when the check is off or the lookup itself fails.
+
+# Starts every run from the unchecked records, so a report or an error of an
+# earlier run in the same play never shows up again
+- name: DNS | Reset report
+  ansible.builtin.set_fact:
+    __mail_autoconfig_dns_report: >-
+      {{ __mail_autoconfig_dns_records | map('combine', {'status': 'unchecked', 'found': []}) | list }}
+    __mail_autoconfig_dns_web_addresses: []
+    __mail_autoconfig_dns_error: ''
+
+- name: DNS | Check records
+  when: mail_autoconfig_dns_check_enabled | bool
+  block:
+    - name: DNS | Resolve web host
+      ansible.builtin.set_fact:
+        __mail_autoconfig_dns_web_addresses: >-
+          {{
+            (query('community.general.dig', mail_autoconfig_web_host,
+                   *__mail_autoconfig_dns_servers, qtype='A', **__mail_autoconfig_dns_options)
+             + query('community.general.dig', mail_autoconfig_web_host,
+                     *__mail_autoconfig_dns_servers, qtype='AAAA', **__mail_autoconfig_dns_options))
+            | reject('in', ['', 'NXDOMAIN']) | map('lower') | list
+          }}
+
+    - name: DNS | Query records
+      ansible.builtin.set_fact:
+        __mail_autoconfig_dns_answer:
+          cname: >-
+            {{
+              query('community.general.dig', item.name,
+                    *__mail_autoconfig_dns_servers, qtype='CNAME', **__mail_autoconfig_dns_options)
+              if item.type == 'host' else []
+            }}
+          addresses: >-
+            {{
+              (query('community.general.dig', item.name,
+                     *__mail_autoconfig_dns_servers, qtype='A', **__mail_autoconfig_dns_options)
+               + query('community.general.dig', item.name,
+                       *__mail_autoconfig_dns_servers, qtype='AAAA', **__mail_autoconfig_dns_options))
+              if item.type == 'host' else []
+            }}
+          srv: >-
+            {{
+              query('community.general.dig', item.name,
+                    *__mail_autoconfig_dns_servers, qtype='SRV', **__mail_autoconfig_dns_options)
+              if item.type == 'srv' else []
+            }}
+      loop: '{{ __mail_autoconfig_dns_records }}'
+      loop_control:
+        label: '{{ item.name }}'
+      register: __mail_autoconfig_dns_answers
+
+    - name: DNS | Compare records
+      ansible.builtin.set_fact:
+        __mail_autoconfig_dns_result:
+          name: '{{ __record.name }}'
+          record: '{{ __record.record }}'
+          found: '{{ __cname + __addresses + __srv }}'
+          status: >-
+            {{
+              'missing' if (__cname + __addresses + __srv) | length == 0
+              else 'present' if (
+                (__cname is contains(__record.target | lower)) if __cname | length > 0
+                else (__web | length > 0 and __addresses | difference(__web) | length == 0)
+                  if __record.type == 'host'
+                else __srv is contains(__record.port ~ ' ' ~ __record.target | lower))
+              else 'different'
+            }}
+      loop: '{{ __mail_autoconfig_dns_answers.results }}'
+      loop_control:
+        label: '{{ __record.name }}'
+      register: __mail_autoconfig_dns_results
+      vars:
+        __record: '{{ item.item }}'
+        __answer: '{{ item.ansible_facts.__mail_autoconfig_dns_answer }}'
+        __web: '{{ __mail_autoconfig_dns_web_addresses }}'
+        __cname: >-
+          {{ __answer.cname | reject('in', ['', 'NXDOMAIN'])
+             | map('regex_replace', '\.$', '') | map('lower') | list }}
+        __addresses: >-
+          {{ __answer.addresses | reject('in', ['', 'NXDOMAIN']) | map('lower') | list }}
+        # '<priority> <weight> <port> <target>.' -> '<port> <target>'
+        __srv: >-
+          {{ __answer.srv | reject('in', ['', 'NXDOMAIN'])
+             | map('regex_replace', '^\d+ \d+ (\d+) (\S+?)\.?$', '\1 \2')
+             | map('lower') | list }}
+
+    - name: DNS | Collect report
+      ansible.builtin.set_fact:
+        __mail_autoconfig_dns_report: >-
+          {{ __mail_autoconfig_dns_results.results
+             | map(attribute='ansible_facts.__mail_autoconfig_dns_result') | list }}
+
+  # Only an error of the dig lookup itself (dnspython missing, a resolver name
+  # that does not resolve, an unexpected resolver error) skips the check. The
+  # lookup plugin is named in its error message, also per item of a loop; any
+  # other error, such as a broken variable, is a bug and fails the run with
+  # its original message.
+  rescue:
+    - name: DNS | Fail on errors other than the lookup
+      ansible.builtin.fail:
+        msg: '{{ __mail_autoconfig_dns_failures | unique | join(" ") }}'
+      when: >-
+        __mail_autoconfig_dns_failures | length == 0
+        or __mail_autoconfig_dns_failures
+           | reject('search', "lookup plugin 'community.general.dig'") | list | length > 0
+      vars:
+        __mail_autoconfig_dns_failures: &mail_autoconfig_dns_failures >-
+          {{ (ansible_failed_result.results | default([ansible_failed_result]))
+             | selectattr('failed', 'defined') | selectattr('failed')
+             | map(attribute='msg', default='') | list }}
+
+    - name: DNS | Record lookup error
+      ansible.builtin.set_fact:
+        __mail_autoconfig_dns_error: '{{ __mail_autoconfig_dns_failures | first }}'
+      vars:
+        __mail_autoconfig_dns_failures: *mail_autoconfig_dns_failures
+
+- name: DNS | Show records
+  ansible.builtin.debug:
+    msg: >-
+      {{
+        __mail_autoconfig_dns_report
+        | map(attribute='status') | map('upper')
+        | zip(__mail_autoconfig_dns_report | map(attribute='record'),
+              __mail_autoconfig_dns_report | map(attribute='found') | map('join', ', '))
+        | map('join', ' | ') | map('regex_replace', ' [|] $', '') | list
+      }}
+
+- name: DNS | Warn about the failed check
+  ansible.builtin.debug:
+    msg: >-
+      The DNS check could not run, the records above are unchecked. Lookup
+      error: {{ __mail_autoconfig_dns_error }}
+      The controller needs the Python library dnspython for the
+      community.general.dig lookup, and mail_autoconfig_dns_resolver must be
+      an IPv4 address or a name the controller resolves. Set
+      mail_autoconfig_dns_check_enabled to false to turn the check off.
+  when: __mail_autoconfig_dns_error | length > 0
+
+# The lookup returns the same empty answer for a missing record and for a
+# resolver that does not answer
+- name: DNS | Warn about an empty result
+  ansible.builtin.debug:
+    msg: >-
+      No record was found, not even an address of
+      {{ mail_autoconfig_web_host }}. Check that the resolver
+      ({{ mail_autoconfig_dns_resolver | default('', true) or 'system resolver' }})
+      answers from the controller.
+  when:
+    - mail_autoconfig_dns_check_enabled | bool
+    - __mail_autoconfig_dns_error | length == 0
+    - __mail_autoconfig_dns_web_addresses | length == 0
+    - __mail_autoconfig_dns_report | map(attribute='status') | unique == ['missing']

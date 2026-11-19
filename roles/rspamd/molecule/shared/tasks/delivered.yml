@@ -1,0 +1,24 @@
+---
+# Waits for a message in the Maildir of the user 'molecule' and reads it.
+# Input: __delivered_subject (unique Subject), __delivered_name (result
+# fact). Output: the fact named in __delivered_name with the message text.
+
+- name: Verify | Wait for the delivered message
+  ansible.builtin.find:
+    paths: /home/molecule/Maildir/new
+    file_type: file
+    contains: '^Subject: {{ __delivered_subject | regex_escape }}$'
+    read_whole_file: false
+  register: __delivered_found
+  until: __delivered_found.files | length > 0
+  retries: 20
+  delay: 3
+
+- name: Verify | Read the delivered message
+  ansible.builtin.slurp:
+    src: '{{ (__delivered_found.files | first).path }}'
+  register: __delivered_message
+
+- name: Verify | Record the delivered message
+  ansible.builtin.set_fact:
+    '{{ __delivered_name }}': '{{ __delivered_message.content | b64decode }}'

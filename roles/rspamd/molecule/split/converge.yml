@@ -1,0 +1,15 @@
+---
+# Facts of both hosts: rspamd_milter_bind holds the address of the rspamd
+# container
+- name: Converge — Facts
+  hosts: all
+  gather_facts: true
+
+- name: Converge
+  hosts: filter
+  gather_facts: false
+
+  tasks:
+    - name: Converge | Include rspamd role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'

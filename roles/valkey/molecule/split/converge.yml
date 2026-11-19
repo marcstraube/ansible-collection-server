@@ -1,0 +1,26 @@
+---
+- name: Converge
+  hosts: valkey_servers
+  gather_facts: true
+
+  vars:
+    valkey_enabled: true
+    # Other hosts get TLS only: no plain TCP port, the unix socket serves
+    # the local clients
+    valkey_bind: '0.0.0.0'
+    valkey_port: 0
+    valkey_unix_socket: '/run/valkey/valkey.sock'
+    valkey_tls_enabled: true
+    valkey_tls_port: 6380
+    valkey_tls_cert_file: '/etc/molecule-tls/server.crt'
+    valkey_tls_key_file: '/etc/molecule-tls/server.key'
+    valkey_users:
+      - name: 'rspamd'
+        password: 'rspamd-secret'
+        keys:
+          - 'rs*'
+
+  tasks:
+    - name: Converge | Include valkey role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'

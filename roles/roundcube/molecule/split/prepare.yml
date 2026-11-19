@@ -1,0 +1,259 @@
+---
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __prepare_packages:
+      # valkey-server creates the service user and group the Valkey key
+      # belongs to; ssl-cert the group of the PostgreSQL key (the
+      # postgresql package adds the postgres user to it)
+      mail:
+        - systemd
+        - dbus
+        - procps
+        - openssl
+        - locales
+        - ssl-cert
+        - valkey-server
+        - valkey-tools
+      web:
+        - systemd
+        - dbus
+        - procps
+        - openssl
+
+  tasks:
+    - name: Prepare | Update package cache (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name: '{{ __prepare_packages[group_names | first] }}'
+        state: present
+      retries: 3
+      delay: 5
+
+# The mail host: a test CA signs one certificate for the container name,
+# which PostgreSQL, Dovecot and Valkey serve, each with a key copy its
+# service user can read. Then PostgreSQL, PostfixAdmin with the test
+# mailboxes and the column grants of the password plugin user, Dovecot
+# and Valkey.
+- name: Prepare — Mail host
+  hosts: mail
+  gather_facts: true
+
+  vars:
+    __prepare_tls_dir: '/etc/molecule-tls'
+
+  tasks:
+    - name: Prepare | Generate en_US.UTF-8 locale
+      community.general.locale_gen:
+        name: en_US.UTF-8
+        state: present
+
+    - name: Prepare | Create the test certificate directory
+      ansible.builtin.file:
+        path: '{{ __prepare_tls_dir }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Create the test CA
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -newkey
+          - rsa:2048
+          - -nodes
+          - -days
+          - '30'
+          - -subj
+          - '/CN=Molecule Test CA'
+          # The key usage Python's strict certificate check requires of a CA
+          - -addext
+          - 'basicConstraints=critical,CA:TRUE'
+          - -addext
+          - 'keyUsage=critical,keyCertSign,cRLSign'
+          - -keyout
+          - '{{ __prepare_tls_dir }}/ca.key'
+          - -out
+          - '{{ __prepare_tls_dir }}/ca.crt'
+        creates: '{{ __prepare_tls_dir }}/ca.crt'
+
+    - name: Prepare | Create the server key and request
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -newkey
+          - rsa:2048
+          - -nodes
+          - -subj
+          - '/CN={{ inventory_hostname }}'
+          - -keyout
+          - '{{ __prepare_tls_dir }}/server.key'
+          - -out
+          - '{{ __prepare_tls_dir }}/server.csr'
+        creates: '{{ __prepare_tls_dir }}/server.csr'
+
+    - name: Prepare | Write the server certificate extensions
+      ansible.builtin.copy:
+        content: "subjectAltName=DNS:{{ inventory_hostname }},DNS:localhost\n"
+        dest: '{{ __prepare_tls_dir }}/server.ext'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Sign the server certificate
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -req
+          - -in
+          - '{{ __prepare_tls_dir }}/server.csr'
+          - -CA
+          - '{{ __prepare_tls_dir }}/ca.crt'
+          - -CAkey
+          - '{{ __prepare_tls_dir }}/ca.key'
+          - -CAcreateserial
+          - -days
+          - '30'
+          - -extfile
+          - '{{ __prepare_tls_dir }}/server.ext'
+          - -out
+          - '{{ __prepare_tls_dir }}/server.crt'
+        creates: '{{ __prepare_tls_dir }}/server.crt'
+
+    - name: Prepare | Make the server certificate readable
+      ansible.builtin.file:
+        path: '{{ __prepare_tls_dir }}/server.crt'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Hand the PostgreSQL key to the ssl-cert group
+      ansible.builtin.file:
+        path: '{{ __prepare_tls_dir }}/server.key'
+        owner: root
+        group: ssl-cert
+        mode: '0640'
+
+    - name: Prepare | Copy the key for Valkey and Dovecot
+      ansible.builtin.copy:
+        src: '{{ __prepare_tls_dir }}/server.key'
+        dest: '{{ item.dest }}'
+        remote_src: true
+        owner: root
+        group: '{{ item.group }}'
+        mode: '{{ item.mode }}'
+      loop:
+        - {dest: '{{ __prepare_tls_dir }}/valkey.key', group: 'valkey', mode: '0640'}
+        - {dest: '/etc/ssl/private/molecule-dovecot.key', group: 'root', mode: '0600'}
+
+    - name: Prepare | Fetch the test CA
+      ansible.builtin.fetch:
+        src: '{{ __prepare_tls_dir }}/ca.crt'
+        dest: '{{ lookup("env", "MOLECULE_EPHEMERAL_DIRECTORY") }}/roundcube-split-ca.pem'
+        flat: true
+
+    - name: Prepare | Include php role
+      ansible.builtin.include_role:
+        name: marcstraube.common.php
+      vars:
+        php_versions:
+          - version: 'auto'
+            extensions: ['pdo_pgsql', 'mbstring']
+            fpm: true
+        php_default_version: 'auto'
+
+    - name: Prepare | Include postgresql role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postgresql'
+
+    - name: Prepare | Include postfixadmin role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postfixadmin'
+
+    # The privileges of the README for the password plugin user
+    - name: Prepare | Grant the password plugin user its columns
+      community.postgresql.postgresql_query:
+        login_db: 'postfixadmin'
+        query: >-
+          GRANT SELECT (username), UPDATE (password, modified) ON mailbox
+          TO roundcube_password
+      become: true
+      become_user: postgres
+      changed_when: false
+
+    - name: Prepare | Include dovecot role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../dovecot'
+
+    - name: Prepare | Include valkey role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../valkey'
+
+# The web host: the test CA, nginx and PHP-FPM with the redis extension
+# (phpredis) for the sessions in Valkey, in the www pool of the platform
+- name: Prepare — Web host
+  hosts: web
+  gather_facts: true
+
+  # The site of the README with the www pool of Debian 13 (PHP 8.4); in the
+  # playbook, not in molecule.yml, which would read the nginx variables as
+  # environment placeholders
+  vars:
+    nginx_enabled: true
+    nginx_sites:
+      - name: 'roundcube'
+        server_names:
+          - 'localhost'
+        type: 'custom'
+        root: '/var/www/roundcube/current/public_html'
+        index: 'index.php'
+        locations:
+          - path: '/'
+            config: |
+              try_files $uri $uri/ /index.php$is_args$args;
+          - path: '~ \.php(/|$)'
+            config: |
+              fastcgi_split_path_info ^(.+?\.php)(/.*)$;
+              try_files $fastcgi_script_name =404;
+              set $path_info $fastcgi_path_info;
+              fastcgi_pass unix:/run/php/php8.4-fpm.sock;
+              fastcgi_index index.php;
+              include fastcgi_params;
+              fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+              fastcgi_param DOCUMENT_ROOT $realpath_root;
+              fastcgi_param PATH_INFO $path_info;
+
+  tasks:
+    - name: Prepare | Install the test CA
+      ansible.builtin.copy:
+        src: '{{ lookup("env", "MOLECULE_EPHEMERAL_DIRECTORY") }}/roundcube-split-ca.pem'
+        dest: '{{ __molecule_ca_file }}'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Include nginx role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../nginx'
+
+    - name: Prepare | Include php role
+      ansible.builtin.include_role:
+        name: marcstraube.common.php
+      vars:
+        php_versions:
+          - version: 'auto'
+            extensions: ['pdo_pgsql', 'intl', 'mbstring', 'xml', 'redis']
+            fpm: true
+        php_default_version: 'auto'

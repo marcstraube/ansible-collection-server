@@ -1,0 +1,235 @@
+---
+# Lookup tables of the role. Postfix notices a rebuilt lmdb table by itself
+# (the processes restart on their next request); proxymap keeps the SQL
+# tables open, so a changed query file reloads Postfix. Check mode on a new
+# host has neither the postfix group nor postmap.
+
+#
+# SQL Lookups
+#
+
+# proxymap reads the files as the postfix user; they name the database
+# user (MariaDB: and its password), so the group postfix reads them and
+# nobody else
+- name: Maps | Create the SQL lookup directory
+  ansible.builtin.file:
+    path: '{{ __postfix_sql_dir }}'
+    state: directory
+    owner: root
+    group: '{{ __postfix_mail_owner }}'
+    mode: '0750'
+  when: not __postfix_check_mode_install | default(false) | bool
+
+- name: Maps | Deploy the SQL lookup files
+  ansible.builtin.template:
+    src: sql.cf.j2
+    dest: '{{ __postfix_sql_dir }}/{{ item }}.cf'
+    owner: root
+    group: '{{ __postfix_mail_owner }}'
+    mode: '0640'
+  loop: '{{ __postfix_sql_queries.keys() | list }}'
+  vars:
+    __postfix_sql_query: '{{ __postfix_sql_queries[item] }}'
+  notify: Reload Postfix server
+  no_log: true
+  when: not __postfix_check_mode_install | default(false) | bool
+
+# libpq reads the PostgreSQL password from this file as the postfix user
+# (proxymap) and ignores it when group or others have any access
+- name: Maps | Deploy the PostgreSQL password file
+  ansible.builtin.template:
+    src: pgpass.j2
+    dest: '{{ __postfix_pgsql_passfile }}'
+    owner: '{{ __postfix_mail_owner }}'
+    group: '{{ __postfix_mail_owner }}'
+    mode: '0400'
+  notify: Reload Postfix server
+  no_log: true
+  when:
+    - postfix_db_type == 'postgresql'
+    - not __postfix_check_mode_install | default(false) | bool
+
+# Own state: the file of a former PostgreSQL connection
+- name: Maps | Remove the PostgreSQL password file
+  ansible.builtin.file:
+    path: '{{ __postfix_pgsql_passfile }}'
+    state: absent
+  when: postfix_db_type != 'postgresql'
+
+#
+# Sender Permissions
+#
+
+# Always present (empty without entries): smtpd_sender_login_maps names it
+- name: Maps | Deploy the sender permissions
+  ansible.builtin.template:
+    src: sender_permissions.j2
+    dest: '{{ __postfix_sender_permissions_file }}'
+    owner: root
+    group: root
+    mode: '0644'
+  register: __postfix_sender_permissions_result
+  when: not __postfix_check_mode_install | default(false) | bool
+
+- name: Maps | Stat the sender permissions table
+  ansible.builtin.stat:
+    path: '{{ __postfix_sender_permissions_file }}.lmdb'
+  register: __postfix_sender_permissions_db
+
+- name: Maps | Build the sender permissions table
+  ansible.builtin.command:
+    argv:
+      - postmap
+      - 'lmdb:{{ __postfix_sender_permissions_file }}'
+  changed_when: true
+  when:
+    - not ansible_check_mode
+    - not __postfix_check_mode_install | default(false) | bool
+    - __postfix_sender_permissions_result is changed or not __postfix_sender_permissions_db.stat.exists
+
+#
+# Relay Host Password
+#
+
+# The Postfix SMTP client opens the table as root before it drops its
+# privileges, so root alone reads source and table
+- name: Maps | Deploy the relay host password
+  ansible.builtin.template:
+    src: relay_password.j2
+    dest: '{{ __postfix_relay_password_file }}'
+    owner: root
+    group: root
+    mode: '0600'
+  register: __postfix_relay_password_result
+  no_log: true
+  when:
+    - __postfix_relay_auth | bool
+    - not __postfix_check_mode_install | default(false) | bool
+
+- name: Maps | Stat the relay host password table
+  ansible.builtin.stat:
+    path: '{{ __postfix_relay_password_file }}.lmdb'
+  register: __postfix_relay_password_db
+  when: __postfix_relay_auth | bool
+
+# postmap creates the table with the mode of its source file
+- name: Maps | Build the relay host password table
+  ansible.builtin.command:
+    argv:
+      - postmap
+      - 'lmdb:{{ __postfix_relay_password_file }}'
+  changed_when: true
+  when:
+    - not ansible_check_mode
+    - __postfix_relay_auth | bool
+    - __postfix_relay_password_result is changed or not __postfix_relay_password_db.stat.exists
+
+- name: Maps | Restrict the relay host password table to root
+  ansible.builtin.file:
+    path: '{{ __postfix_relay_password_file }}.lmdb'
+    owner: root
+    group: root
+    mode: '0600'
+  when:
+    - not ansible_check_mode
+    - __postfix_relay_auth | bool
+
+# Own state: without a password the role removes the table it wrote
+- name: Maps | Remove the relay host password
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: absent
+  loop:
+    - '{{ __postfix_relay_password_file }}'
+    - '{{ __postfix_relay_password_file }}.lmdb'
+  when: not __postfix_relay_auth | bool
+
+#
+# Submission Header Checks
+#
+
+# Read by the cleanup service of submission only
+- name: Maps | Deploy the submission header checks
+  ansible.builtin.template:
+    src: submission_header_checks.j2
+    dest: '{{ __postfix_submission_header_checks_file }}'
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload Postfix server
+  when:
+    - postfix_submission_hide_client | bool
+    - not __postfix_check_mode_install | default(false) | bool
+
+- name: Maps | Remove the submission header checks
+  ansible.builtin.file:
+    path: '{{ __postfix_submission_header_checks_file }}'
+    state: absent
+  when: not postfix_submission_hide_client | bool
+
+#
+# Aliases
+#
+
+# postalias keeps the first entry of a name and skips a later one with a
+# warning, so the role's block at the end of the file could not override a
+# package entry (postmaster, and on EL and Arch Linux abuse, webmaster and
+# other system names). The package entries of the names in postfix_aliases
+# are commented out with a marker, and restored once the name leaves
+# postfix_aliases; the other package entries stay as they are.
+- name: Maps | Read the alias file
+  ansible.builtin.slurp:
+    src: '{{ __postfix_alias_file }}'
+  register: __postfix_aliases_file
+  # A missing file is created by the block below
+  failed_when: false
+  when: not __postfix_check_mode_install | default(false) | bool
+
+- name: Maps | Replace the package entries of the managed aliases
+  ansible.builtin.copy:
+    # YAML turns \n into the newline the lines are joined with
+    content: "{{ __postfix_aliases_lines | join('\n') }}"
+    dest: '{{ __postfix_alias_file }}'
+    owner: root
+    group: root
+    mode: '0644'
+  vars:
+    __postfix_aliases_text: '{{ __postfix_aliases_file.content | b64decode }}'
+  register: __postfix_aliases_entries_result
+  when:
+    - not __postfix_check_mode_install | default(false) | bool
+    - __postfix_aliases_file.content is defined
+
+# The role's names in a marked block at the end of the file
+- name: Maps | Manage the local aliases
+  ansible.builtin.blockinfile:
+    path: '{{ __postfix_alias_file }}'
+    marker: '{{ __postfix_aliases_marker }}'
+    block: |-
+      {% for name, target in postfix_aliases.items() | sort %}
+      {{ name }}: {{ [target] | flatten | join(', ') }}
+      {% endfor %}
+    state: "{{ 'present' if postfix_aliases | length > 0 else 'absent' }}"
+    create: true
+    owner: root
+    group: root
+    mode: '0644'
+  register: __postfix_aliases_result
+  when: not __postfix_check_mode_install | default(false) | bool
+
+- name: Maps | Stat the alias table
+  ansible.builtin.stat:
+    path: '{{ __postfix_alias_file }}.lmdb'
+  register: __postfix_aliases_db
+
+- name: Maps | Build the alias table
+  ansible.builtin.command:
+    argv:
+      - postalias
+      - 'lmdb:{{ __postfix_alias_file }}'
+  changed_when: true
+  when:
+    - not ansible_check_mode
+    - not __postfix_check_mode_install | default(false) | bool
+    - __postfix_aliases_result is changed or __postfix_aliases_entries_result is changed
+      or not __postfix_aliases_db.stat.exists

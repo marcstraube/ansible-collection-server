@@ -231,6 +231,216 @@
     apache_packages_state: 'latest'
     apache_packages_minimum: '{{ __side_effect_version_current }}'
 
+# Every invalid writable path entry must fail the validation in main.yml,
+# which runs before any change.
+- name: Side Effect | Writable path validation
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Run with a relative path
+      block:
+        - name: Side Effect | Include apache role with a relative path  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            apache_enabled: true
+            apache_writable_paths:
+              - path: 'var/www/relative'
+      rescue:
+        - name: Side Effect | Record the error for a relative path
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'relative': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with a trailing slash
+      block:
+        - name: Side Effect | Include apache role with a trailing slash  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            apache_enabled: true
+            apache_writable_paths:
+              - path: '/var/www/trailing/'
+      rescue:
+        - name: Side Effect | Record the error for a trailing slash
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'trailing': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with a '..' component
+      block:
+        - name: Side Effect | Include apache role with a '..' component  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            apache_enabled: true
+            apache_writable_paths:
+              - path: '/var/www/../etc'
+      rescue:
+        - name: Side Effect | Record the error for a '..' component
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'dotdot': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with an entry without a path
+      block:
+        - name: Side Effect | Include apache role with an entry without a path  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            apache_enabled: true
+            apache_writable_paths:
+              - type: 'httpd_log_t'
+      rescue:
+        - name: Side Effect | Record the error for an entry without a path
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'nopath': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with an unsupported type
+      block:
+        - name: Side Effect | Include apache role with an unsupported type  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            apache_enabled: true
+            apache_writable_paths:
+              - path: '/var/www/type'
+                type: 'httpd_sys_content_t'
+      rescue:
+        - name: Side Effect | Record the error for an unsupported type
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'type': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with a numeric mode
+      block:
+        - name: Side Effect | Include apache role with a numeric mode  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            apache_enabled: true
+            apache_writable_paths:
+              - path: '/var/www/mode'
+                mode: 750
+      rescue:
+        - name: Side Effect | Record the error for a numeric mode
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'mode': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Assert every invalid writable path failed the validation
+      ansible.builtin.assert:
+        that:
+          - __errors['relative'] | default('') is search('must be absolute')
+          - __errors['trailing'] | default('') is search('must be absolute')
+          - __errors['dotdot'] | default('') is search('must be absolute')
+          - __errors['nopath'] | default('') is search('needs a path')
+          - __errors['type'] | default('') is search('must be one of')
+          - __errors['mode'] | default('') is search('must be a quoted octal string')
+        fail_msg: 'Unexpected validation results: {{ __errors }}'
+        success_msg: 'The validation rejects every invalid writable path'
+      vars:
+        __errors: '{{ __side_effect_writable_errors | default({}) }}'
+
+# A per-vhost http2 that is not a boolean must fail the validation in
+# main.yml, which runs before any change.
+- name: Side Effect | HTTP/2 validation
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Run with a string as http2 of an SSL vhost
+      block:
+        - name: Side Effect | Include apache role with a string as http2  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            apache_enabled: true
+            apache_vhosts_ssl:
+              - server_name: 'string.example.local'
+                certificate_file: '/etc/ssl/test/present.crt'
+                certificate_key_file: '/etc/ssl/test/present.key'
+                http2: 'off'
+      rescue:
+        - name: Side Effect | Record the HTTP/2 validation failure
+          ansible.builtin.set_fact:
+            __side_effect_http2_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with a typo as HTTP/2 server default
+      block:
+        - name: Side Effect | Include apache role with a typo in apache_http2_enabled  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            apache_enabled: true
+            apache_http2_enabled: 'flase'
+      rescue:
+        - name: Side Effect | Record the HTTP/2 server default failure
+          ansible.builtin.set_fact:
+            __side_effect_http2_default_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Assert a string as http2 failed the validation
+      ansible.builtin.assert:
+        that:
+          - >-
+            __side_effect_http2_error | default('')
+            is search("http2 of vhost 'string.example.local' must be true or false")
+          - >-
+            __side_effect_http2_default_error | default('')
+            is search('apache_http2_enabled must be true or false')
+        fail_msg: >-
+          A string as http2 or a typo in apache_http2_enabled did not fail the validation
+          (errors: {{ __side_effect_http2_error | default('none') }};
+          {{ __side_effect_http2_default_error | default('none') }})
+        success_msg: 'A per-vhost http2 that is not a boolean or a typo in the server default fails the run'
+
 - name: Side Effect | Clean up
   hosts: all
   gather_facts: true

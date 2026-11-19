@@ -1,0 +1,66 @@
+---
+# clamd of marcstraube.common.clamav on the test signature database: the
+# tests never download the official databases. One hand-written signature
+# (the EICAR test file) is enough for clamd to load and detect EICAR. The
+# units of Arch Linux and Debian require the official daily database
+# (ConditionPathExistsGlob), which the overrides reset; the overrides also
+# run clamd in the foreground as the containers expect.
+
+- name: Prepare | Set the clamd unit names
+  ansible.builtin.set_fact:
+    __prepare_clamd_unit:
+      Archlinux: 'clamav-daemon.service'
+      Debian: 'clamav-daemon.service'
+      RedHat: 'clamd@scan.service'
+    __prepare_clamd_exec:
+      Archlinux: '/usr/bin/clamd --foreground'
+      Debian: '/usr/sbin/clamd --foreground'
+      RedHat: '/usr/sbin/clamd --foreground -c /etc/clamd.d/scan.conf'
+
+- name: Prepare | Create the systemd override directory for clamd
+  ansible.builtin.file:
+    path: '/etc/systemd/system/{{ __prepare_clamd_unit[ansible_facts["os_family"]] }}.d'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Prepare | Deploy the systemd override for clamd
+  ansible.builtin.copy:
+    dest: '/etc/systemd/system/{{ __prepare_clamd_unit[ansible_facts["os_family"]] }}.d/override.conf'
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      [Unit]
+      ConditionPathExistsGlob=
+      [Service]
+      Type=simple
+      ExecStart=
+      ExecStart={{ __prepare_clamd_exec[ansible_facts['os_family']] }}
+
+- name: Prepare | Reload systemd for clamd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Prepare | Create the ClamAV database directory
+  ansible.builtin.file:
+    path: /var/lib/clamav
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Prepare | Deploy the test signature database
+  ansible.builtin.copy:
+    dest: /var/lib/clamav/test.hdb
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      44d88612fea8a8f36de82e1278abb02f:68:Eicar-Test-Signature
+
+# The clamav variables come from the inventory of the scenario
+- name: Prepare | Include clamav role
+  ansible.builtin.include_role:
+    name: marcstraube.common.clamav

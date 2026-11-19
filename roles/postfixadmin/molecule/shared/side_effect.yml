@@ -1,0 +1,296 @@
+---
+# Changes the accounts behind the role's back, as an admin would in the web
+# interface, then runs the role with accounts_changed.yml (updates, a new
+# password, a rehash, removals). Further runs remove a read-only user and
+# the SOGo view and restore both; the last run must change nothing. The
+# helper's check mode follows: it reports changed accounts and leaves the
+# database as it is. A role run under the check_mode keyword closes; it
+# must not write either (the scenario's check steps cover --check).
+- name: Side Effect
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - vars/accounts_changed.yml
+
+  vars:
+    __side_effect_dir: '/var/www/postfixadmin'
+    __side_effect_query: '/root/molecule-query.php'
+    __side_effect_mariadb_sockets:
+      Archlinux: '/run/mysqld/mysqld.sock'
+      Debian: '/run/mysqld/mysqld.sock'
+      RedHat: '/var/lib/mysql/mysql.sock'
+    # Changes the helper reported per entry in the last role run
+    __side_effect_actions: >-
+      {%- set ns = namespace(actions={}) -%}
+      {%- for result in __postfixadmin_accounts.results | selectattr('stdout', 'defined') -%}
+      {%- for entry in (result.stdout | from_json).results -%}
+      {%- set ns.actions = ns.actions | combine({entry.id: entry}) -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ ns.actions }}
+
+  tasks:
+    - name: Side Effect | Deploy the query helper
+      ansible.builtin.copy:
+        src: query.php
+        dest: '{{ __side_effect_query }}'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Side Effect | Hash passwords outside the role
+      ansible.builtin.command:
+        argv:
+          - php
+          - '-r'
+          - >-
+            echo json_encode([
+            'argon2id' => '{ARGON2ID}' . password_hash('tampered-Secret-42', PASSWORD_ARGON2ID),
+            'sha512' => '{SHA512-CRYPT}' . crypt('inactive-Secret-42', '$6$molecule$')]);
+      register: __side_effect_hash
+      changed_when: false
+
+    - name: Side Effect | Change the accounts in the database
+      ansible.builtin.command:
+        argv:
+          - php
+          - '{{ __side_effect_query }}'
+          - exec
+          - '{{ __side_effect_dir }}'
+          - '{{ item }}'
+      loop:
+        - "UPDATE domain SET description = 'Tampered' WHERE domain IN ('example.com', 'example.net')"
+        - "UPDATE mailbox SET name = 'Tampered' WHERE username IN ('alice@example.com', 'bob@example.com')"
+        - >-
+          UPDATE mailbox SET password = '{{ (__side_effect_hash.stdout | from_json).argon2id }}'
+          WHERE username IN ('alice@example.com', 'bob@example.com')
+        # The same password in another scheme: the role rehashes it
+        - >-
+          UPDATE mailbox SET password = '{{ (__side_effect_hash.stdout | from_json).sha512 }}'
+          WHERE username = 'inactive@example.com'
+        - "UPDATE alias SET goto = 'x@example.net' WHERE address IN ('info@example.com', 'sales@example.com')"
+        - "UPDATE admin SET active = false WHERE username = 'helpdesk@example.com'"
+      changed_when: true
+
+    - name: Side Effect | Include postfixadmin role with the changed accounts  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+
+    - name: Side Effect | Assert the changes the role reported
+      ansible.builtin.assert:
+        that:
+          # Same password, other scheme: rehashed
+          - __side_effect_actions['inactive@example.com'].action == 'updated'
+          - __side_effect_actions['inactive@example.com'].fields == ['password']
+          # Admin update: superadmin and password
+          - __side_effect_actions['ops@example.com'].action == 'updated'
+          - __side_effect_actions['ops@example.com'].fields | sort == ['password', 'superadmin']
+          # Alias domain update
+          - __side_effect_actions['example.org'].action == 'updated'
+          - __side_effect_actions['example.org'].fields == ['target_domain']
+          # disabled: neither removed nor reported
+          - "'bob@example.com' not in __side_effect_actions"
+        fail_msg: '{{ __side_effect_actions | to_json }}'
+
+    #
+    # Read-only user and SOGo view removed, then restored
+    #
+
+    - name: Side Effect | Include postfixadmin role with a read-only user absent  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        postfixadmin_db_readers:
+          - name: 'postfix_ro'
+            password: 'postfix-Reader-42'
+          - name: 'sogo_ro'
+            state: 'absent'
+
+    - name: Side Effect | Log in as the removed user (PostgreSQL)
+      community.postgresql.postgresql_query:
+        login_host: '127.0.0.1'
+        login_user: 'sogo_ro'
+        login_password: 'sogo-Reader-42'
+        login_db: 'postfixadmin'
+        query: 'SELECT 1'
+      register: __side_effect_removed_pg
+      failed_when: __side_effect_removed_pg is succeeded
+      when: postfixadmin_db_type == 'postgresql'
+
+    - name: Side Effect | Log in as the removed user (MariaDB)
+      ansible.mariadb.mariadb_query:
+        login_unix_socket: '{{ __side_effect_mariadb_sockets[ansible_facts["os_family"]] }}'
+        login_user: 'sogo_ro'
+        login_password: 'sogo-Reader-42'
+        login_db: 'postfixadmin'
+        query: 'SELECT 1'
+      register: __side_effect_removed_mariadb
+      failed_when: __side_effect_removed_mariadb is succeeded
+      when: postfixadmin_db_type == 'mariadb'
+
+    # The reader of the view is gone, so nothing grants on it any more
+    - name: Side Effect | Include postfixadmin role with the SOGo view disabled  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        postfixadmin_sogo_view_enabled: false
+        postfixadmin_db_readers:
+          - name: 'postfix_ro'
+            password: 'postfix-Reader-42'
+
+    - name: Side Effect | Look up the SOGo view
+      ansible.builtin.command:
+        argv:
+          - php
+          - '{{ __side_effect_query }}'
+          - sql
+          - '{{ __side_effect_dir }}'
+          - "SELECT table_name FROM information_schema.views WHERE table_name = 'sogo_users'"
+      register: __side_effect_view
+      changed_when: false
+
+    - name: Side Effect | Assert the SOGo view was removed
+      ansible.builtin.assert:
+        that:
+          - __postfixadmin_sogo_view is changed
+          - __side_effect_view.stdout | from_json | length == 0
+        fail_msg: '{{ __side_effect_view.stdout }}'
+
+    - name: Side Effect | Include postfixadmin role to restore the user and the view  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+
+    - name: Side Effect | Include postfixadmin role again  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+
+    - name: Side Effect | Assert the last run changed nothing
+      ansible.builtin.assert:
+        that:
+          - >-
+            __postfixadmin_accounts.results | selectattr('changed', 'defined') | selectattr('changed')
+            | list | length == 0
+          - __postfixadmin_schema_upgrade is skipped
+          - __postfixadmin_sogo_view is not changed
+        fail_msg: >-
+          {{ __postfixadmin_accounts.results | selectattr('changed', 'defined') | selectattr('changed')
+             | map(attribute='stdout') | list }}
+
+    #
+    # Check mode of the helper on the configured host
+    #
+
+    - name: Side Effect | Apply changed accounts in check mode
+      ansible.builtin.command:
+        argv:
+          - php
+          - /usr/local/lib/postfixadmin-ansible/postfixadmin-ansible.php
+          - '{{ __side_effect_dir }}'
+        stdin: '{{ item | to_json }}'
+      loop:
+        - action: 'accounts'
+          type: 'mailbox'
+          check: true
+          entries:
+            - {id: 'alice@example.com', state: 'present', mode: 'managed',
+               values: {name: 'Alice Check', quota: 2048}, password: 'alice-Changed-42'}
+            - {id: 'check@example.com', state: 'present', mode: 'managed',
+               values: {name: 'Check'}, password: 'check-Secret-42'}
+        - action: 'accounts'
+          type: 'alias_domain'
+          check: true
+          entries:
+            - {id: 'example.org', state: 'absent', mode: 'managed'}
+      loop_control:
+        label: '{{ item.type }}'
+      register: __side_effect_check
+      changed_when: false
+      no_log: true
+
+    - name: Side Effect | Read the accounts the check run would change
+      ansible.builtin.command:
+        argv:
+          - php
+          - '{{ __side_effect_query }}'
+          - sql
+          - '{{ __side_effect_dir }}'
+          - >-
+            SELECT 'mailbox' AS kind, username AS id, name AS value FROM mailbox
+            WHERE username IN ('alice@example.com', 'check@example.com')
+            UNION ALL
+            SELECT 'alias_domain', alias_domain, target_domain FROM alias_domain
+            WHERE alias_domain = 'example.org'
+      register: __side_effect_after_check
+      changed_when: false
+
+    - name: Side Effect | Assert the check run reported the changes and made none
+      ansible.builtin.assert:
+        that:
+          - __side_effect_reported['alice@example.com'] == 'updated'
+          - __side_effect_reported['check@example.com'] == 'created'
+          - __side_effect_reported['example.org'] == 'deleted'
+          - __side_effect_rows | map(attribute='id') | sort == ['alice@example.com', 'example.org']
+          - (__side_effect_rows | selectattr('id', 'eq', 'alice@example.com') | first).value == 'Alice'
+          - (__side_effect_rows | selectattr('id', 'eq', 'example.org') | first).value == 'example.net'
+        fail_msg: '{{ __side_effect_reported | to_json }} {{ __side_effect_rows | to_json }}'
+      vars:
+        __side_effect_rows: '{{ __side_effect_after_check.stdout | from_json }}'
+        __side_effect_reported: >-
+          {%- set ns = namespace(actions={}) -%}
+          {%- for result in __side_effect_check.results -%}
+          {%- for entry in (result.stdout | from_json).results -%}
+          {%- set ns.actions = ns.actions | combine({entry.id: entry.action}) -%}
+          {%- endfor -%}
+          {%- endfor -%}
+          {{ ns.actions }}
+
+    #
+    # Role run under the check_mode keyword (not --check)
+    #
+
+    - name: Side Effect | Rename a mailbox behind the role's back
+      ansible.builtin.command:
+        argv:
+          - php
+          - '{{ __side_effect_query }}'
+          - exec
+          - '{{ __side_effect_dir }}'
+          - "UPDATE mailbox SET name = 'Keyword' WHERE username = 'alice@example.com'"
+      changed_when: true
+
+    - name: Side Effect | Run the role under the check_mode keyword
+      check_mode: true
+      block:
+        - name: Side Effect | Include postfixadmin role in check mode  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+
+    - name: Side Effect | Read the renamed mailbox
+      ansible.builtin.command:
+        argv:
+          - php
+          - '{{ __side_effect_query }}'
+          - sql
+          - '{{ __side_effect_dir }}'
+          - "SELECT name FROM mailbox WHERE username = 'alice@example.com'"
+      register: __side_effect_keyword
+      changed_when: false
+
+    - name: Side Effect | Assert the keyword check run reported the change and made none
+      ansible.builtin.assert:
+        that:
+          - __postfixadmin_check_mode | bool
+          - __side_effect_actions['alice@example.com'].action == 'updated'
+          - (__side_effect_keyword.stdout | from_json | first).name == 'Keyword'
+        fail_msg: '{{ __side_effect_actions | to_json }} {{ __side_effect_keyword.stdout }}'
+
+    - name: Side Effect | Restore the mailbox name
+      ansible.builtin.command:
+        argv:
+          - php
+          - '{{ __side_effect_query }}'
+          - exec
+          - '{{ __side_effect_dir }}'
+          - "UPDATE mailbox SET name = 'Alice' WHERE username = 'alice@example.com'"
+      changed_when: true

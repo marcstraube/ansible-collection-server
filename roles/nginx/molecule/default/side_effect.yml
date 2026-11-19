@@ -225,6 +225,361 @@
     nginx_packages_state: 'latest'
     nginx_packages_minimum: '{{ __side_effect_version_current }}'
 
+# Every invalid writable path entry must fail the validation in main.yml,
+# which runs before any change.
+- name: Side Effect | Writable path validation
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Run with a relative path
+      block:
+        - name: Side Effect | Include nginx role with a relative path  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_writable_paths:
+              - path: 'var/www/relative'
+      rescue:
+        - name: Side Effect | Record the error for a relative path
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'relative': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with a trailing slash
+      block:
+        - name: Side Effect | Include nginx role with a trailing slash  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_writable_paths:
+              - path: '/var/www/trailing/'
+      rescue:
+        - name: Side Effect | Record the error for a trailing slash
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'trailing': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with a '..' component
+      block:
+        - name: Side Effect | Include nginx role with a '..' component  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_writable_paths:
+              - path: '/var/www/../etc'
+      rescue:
+        - name: Side Effect | Record the error for a '..' component
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'dotdot': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with an entry without a path
+      block:
+        - name: Side Effect | Include nginx role with an entry without a path  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_writable_paths:
+              - type: 'httpd_log_t'
+      rescue:
+        - name: Side Effect | Record the error for an entry without a path
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'nopath': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with an unsupported type
+      block:
+        - name: Side Effect | Include nginx role with an unsupported type  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_writable_paths:
+              - path: '/var/www/type'
+                type: 'httpd_sys_content_t'
+      rescue:
+        - name: Side Effect | Record the error for an unsupported type
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'type': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with a numeric mode
+      block:
+        - name: Side Effect | Include nginx role with a numeric mode  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_writable_paths:
+              - path: '/var/www/mode'
+                mode: 750
+      rescue:
+        - name: Side Effect | Record the error for a numeric mode
+          ansible.builtin.set_fact:
+            __side_effect_writable_errors: >-
+              {{ __side_effect_writable_errors | default({})
+                 | combine({'mode': __side_effect_writable_error}) }}
+          vars:
+            # The assert loops over the entries; the message is in the item
+            __side_effect_writable_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Assert every invalid writable path failed the validation
+      ansible.builtin.assert:
+        that:
+          - __errors['relative'] | default('') is search('must be absolute')
+          - __errors['trailing'] | default('') is search('must be absolute')
+          - __errors['dotdot'] | default('') is search('must be absolute')
+          - __errors['nopath'] | default('') is search('needs a path')
+          - __errors['type'] | default('') is search('must be one of')
+          - __errors['mode'] | default('') is search('must be a quoted octal string')
+        fail_msg: 'Unexpected validation results: {{ __errors }}'
+        success_msg: 'The validation rejects every invalid writable path'
+      vars:
+        __errors: '{{ __side_effect_writable_errors | default({}) }}'
+
+# A per-site http2 that is not a boolean must fail the validation in
+# main.yml, which runs before any change.
+- name: Side Effect | HTTP/2 validation
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Run with a string as http2 of a site
+      block:
+        - name: Side Effect | Include nginx role with a string as http2  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_sites:
+              - name: 'test-http2-string'
+                server_names:
+                  - 'http2-string.example.com'
+                root: '/var/www/html'
+                http2: 'off'
+      rescue:
+        - name: Side Effect | Record the HTTP/2 validation failure
+          ansible.builtin.set_fact:
+            __side_effect_http2_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Run with a typo as HTTP/2 default
+      block:
+        - name: Side Effect | Include nginx role with a typo in nginx_http2_enabled  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_http2_enabled: 'flase'
+      rescue:
+        - name: Side Effect | Record the HTTP/2 default failure
+          ansible.builtin.set_fact:
+            __side_effect_http2_default_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    # -e nginx_http2_enabled=false passes the string 'false'; it must pass the
+    # validation and switch HTTP/2 off like the boolean
+    - name: Side Effect | Include nginx role with the string 'false' as HTTP/2 default  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        nginx_enabled: true
+        nginx_http2_enabled: 'false'
+
+    - name: Side Effect | Read the default site rendered with the string 'false'
+      ansible.builtin.slurp:
+        src: /etc/nginx/sites-available/default.conf
+      register: __side_effect_http2_false_site
+
+    - name: Side Effect | Assert the string 'false' switched HTTP/2 off
+      ansible.builtin.assert:
+        that:
+          - (__side_effect_http2_false_site.content | b64decode) is not search('http2 on;|ssl http2')
+          - (__side_effect_http2_false_site.content | b64decode) is search('listen 443 ssl default_server;')
+        fail_msg: >-
+          The default site still has HTTP/2 with nginx_http2_enabled: 'false':
+          {{ __side_effect_http2_false_site.content | b64decode }}
+        success_msg: "The string 'false' switches HTTP/2 off"
+
+    - name: Side Effect | Assert a string as http2 failed the validation
+      ansible.builtin.assert:
+        that:
+          - __side_effect_http2_error | default('') is search("http2 of site 'test-http2-string' must be true or false")
+          - >-
+            __side_effect_http2_default_error | default('')
+            is search('nginx_http2_enabled must be true or false')
+        fail_msg: >-
+          A string as http2 or a typo in nginx_http2_enabled did not fail the validation
+          (errors: {{ __side_effect_http2_error | default('none') }};
+          {{ __side_effect_http2_default_error | default('none') }})
+        success_msg: 'A per-site http2 that is not a boolean or a typo in the default fails the run'
+
+# A site with http2: false on port 443, which the default site and
+# test-redirect-default share with HTTP/2 on. From nginx 1.25.1 the
+# directive sits in the server blocks with HTTP/2 on only, so the site
+# stays on HTTP/1.1 by itself; before that (EL 9) the
+# listen parameter would switch it on for the whole port, so the run must
+# fail before any configuration change and name the port and the sites.
+- name: Side Effect | HTTP/2 on a shared port
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __side_effect_shared_site:
+      name: 'test-http2-shared'
+      server_names:
+        - 'http2-shared.example.com'
+      root: '/var/www/html'
+      http2: false
+      ssl:
+        enabled: true
+        certificate: '/etc/nginx/ssl/test.crt'
+        certificate_key: '/etc/nginx/ssl/test.key'
+
+  tasks:
+    - name: Side Effect | Read the installed nginx version
+      ansible.builtin.command:
+        argv:
+          - nginx
+          - -v
+      register: __side_effect_nginx_version
+      changed_when: false
+
+    - name: Side Effect | Select the expected outcome
+      ansible.builtin.set_fact:
+        __side_effect_http2_directive: >-
+          {{ (__side_effect_nginx_version.stderr | regex_search('nginx/([0-9.]+)', '\1') or ['0'])
+             | first is version('1.25.1', '>=') }}
+
+    - name: Side Effect | Run with sites disagreeing on HTTP/2 on port 443
+      block:
+        - name: Side Effect | Include nginx role with a shared port  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_sites:
+              - '{{ __side_effect_shared_site }}'
+      rescue:
+        - name: Side Effect | Record the shared port failure
+          ansible.builtin.set_fact:
+            __side_effect_shared_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Check whether the shared port site was deployed
+      ansible.builtin.stat:
+        path: /etc/nginx/sites-available/test-http2-shared.conf
+      register: __side_effect_shared_conf
+
+    - name: Side Effect | Assert the shared port failed before any change (nginx before 1.25.1)
+      ansible.builtin.assert:
+        that:
+          - >-
+            __side_effect_shared_error | default('')
+            is search('Port 443: HTTP/2 on for default site, off for test-http2-shared')
+          - not __side_effect_shared_conf.stat.exists
+        fail_msg: >-
+          Sites disagreeing on HTTP/2 on one port did not fail before the
+          configuration (error: {{ __side_effect_shared_error | default('none') }},
+          site deployed: {{ __side_effect_shared_conf.stat.exists }})
+        success_msg: 'nginx before 1.25.1 refuses sites that disagree on HTTP/2 on one port'
+      when: not (__side_effect_http2_directive | bool)
+
+    - name: Side Effect | Flush the reload of the shared port site
+      ansible.builtin.meta: flush_handlers
+
+    # After an h2 handshake the server sends a binary SETTINGS frame, which
+    # is not valid text; only the ALPN line is kept.
+    - name: Side Effect | Negotiate the protocol on the shared port
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          openssl s_client -connect 127.0.0.1:443 -servername {{ item }} \
+            -alpn h2,http/1.1 < /dev/null 2> /dev/null \
+            | grep -a -E '^(ALPN protocol|No ALPN)'
+        executable: /bin/bash
+      loop:
+        - 'redirect-default.example.com'
+        - 'http2-shared.example.com'
+      register: __side_effect_alpn
+      changed_when: false
+      when: __side_effect_http2_directive | bool
+
+    - name: Side Effect | Assert the shared port serves both settings (nginx 1.25.1 and later)
+      ansible.builtin.assert:
+        that:
+          - __side_effect_shared_error is not defined
+          - __side_effect_alpn_result['redirect-default.example.com'] == 'h2'
+          - __side_effect_alpn_result['http2-shared.example.com'] == 'http/1.1'
+        fail_msg: >-
+          Expected h2 for redirect-default.example.com and http/1.1 for
+          http2-shared.example.com on port 443, got {{ __side_effect_alpn_result }}
+          (error: {{ __side_effect_shared_error | default('none') }})
+        success_msg: 'Sites on one port negotiate their own HTTP/2 setting'
+      vars:
+        __side_effect_alpn_result: >-
+          {{ dict(__side_effect_alpn.results | map(attribute='item')
+                  | zip(__side_effect_alpn.results | map(attribute='stdout')
+                        | map('regex_search', 'ALPN protocol: (\S+)', '\1')
+                        | map('default', ['none'], true) | map('first'))) }}
+      when: __side_effect_http2_directive | bool
+
+    - name: Side Effect | Remove the shared port site
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: absent
+      loop:
+        - /etc/nginx/sites-enabled/test-http2-shared.conf
+        - /etc/nginx/sites-available/test-http2-shared.conf
+
+    - name: Side Effect | Reload nginx without the shared port site
+      ansible.builtin.systemd_service:
+        name: nginx
+        state: reloaded
+
 - name: Side Effect | Clean up
   hosts: all
   gather_facts: true
@@ -235,3 +590,139 @@
         path: /usr/sbin/policy-rc.d
         state: absent
       when: ansible_facts['os_family'] == 'Debian'
+
+# nginx_selinux_network_connect: false cannot be combined with a proxy site.
+# The assert runs before any configuration change, on every platform.
+- name: Side Effect | SELinux validation
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Run with network connections denied next to a proxy site
+      block:
+        - name: Side Effect | Include nginx role with a proxy site and no network connect  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_selinux_network_connect: false
+            nginx_sites:
+              - name: 'test-proxy'
+                server_names:
+                  - 'proxy.example.com'
+                type: 'proxy'
+                proxy_pass: 'http://127.0.0.1:8080'
+      rescue:
+        - name: Side Effect | Record the SELinux validation failure
+          ansible.builtin.set_fact:
+            __side_effect_selinux_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Assert network connections denied next to a proxy site failed
+      ansible.builtin.assert:
+        that:
+          - __side_effect_selinux_error is defined
+          - "'nginx_selinux_network_connect is false' in __side_effect_selinux_error"
+        fail_msg: >-
+          nginx_selinux_network_connect: false next to a proxy site did not fail
+          the run (error: {{ __side_effect_selinux_error | default('none') }})
+        success_msg: 'nginx_selinux_network_connect: false next to a proxy site fails the run'
+
+# Each boolean follows true, null, false and null again; null must leave the
+# value of the run before untouched. The PHP site has no upstream and no proxy
+# type, so only nginx_selinux_network_connect decides whether its location
+# reaches the backend on an unlabeled port (httpd_t, shared with PHP-FPM).
+# The false case defines an upstream nothing uses: it does not count as a
+# proxy and must not fail the run. Needs SELinux, so RedHat only and skipped
+# where the container runs without it.
+- name: Side Effect | SELinux booleans
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __side_effect_selinux_enabled: >-
+      {{ ansible_facts['os_family'] == 'RedHat'
+         and ansible_facts['selinux']['status'] | default('disabled') == 'enabled' }}
+    __side_effect_selinux_sites:
+      - name: 'test-selinux-php'
+        server_names:
+          - 'selinux-php.example.com'
+        type: 'php'
+        root: '/var/www/html'
+        php:
+          socket: 'unix:/run/php-fpm/www.sock'
+        locations:
+          - path: '/backend/'
+            config: 'proxy_pass http://127.0.0.1:15555/;'
+
+  tasks:
+    - name: Side Effect | Create the backend document root
+      ansible.builtin.file:
+        path: /var/www/selinux-backend
+        state: directory
+        mode: '0755'
+      when: __side_effect_selinux_enabled | bool
+
+    - name: Side Effect | Create the backend index
+      ansible.builtin.copy:
+        content: "backend\n"
+        dest: /var/www/selinux-backend/index.html
+        mode: '0644'
+      when: __side_effect_selinux_enabled | bool
+
+    - name: Side Effect | Start the backend on an unlabeled port
+      ansible.builtin.command:
+        argv:
+          - systemd-run
+          - '--unit=nginx-selinux-backend'
+          - python3
+          - '-m'
+          - http.server
+          - '15555'
+          - '--bind'
+          - '127.0.0.1'
+          - '--directory'
+          - /var/www/selinux-backend
+      changed_when: true
+      when: __side_effect_selinux_enabled | bool
+
+    - name: Side Effect | Wait for the backend
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 15555
+        timeout: 30
+      when: __side_effect_selinux_enabled | bool
+
+    - name: Side Effect | Run the SELinux boolean cases
+      ansible.builtin.include_tasks: tasks/selinux_booleans.yml
+      loop:
+        - name: 'true'
+          value: true
+          expected: 'on'
+        - name: 'null after true'
+          value: null
+          expected: 'on'
+        - name: 'false'
+          value: false
+          expected: 'off'
+          upstreams:
+            - name: 'selinux_unused'
+              servers:
+                - address: '127.0.0.1:15555'
+        - name: 'null after false'
+          value: null
+          expected: 'off'
+      loop_control:
+        loop_var: __side_effect_case
+        label: '{{ __side_effect_case.name }}'
+      when: __side_effect_selinux_enabled | bool
+
+    - name: Side Effect | Stop the backend
+      ansible.builtin.systemd_service:
+        name: nginx-selinux-backend
+        state: stopped
+      when: __side_effect_selinux_enabled | bool
+
+# The SELinux plays ran the role with its defaults; restore the configuration
+# verify.yml expects.
+- name: Side Effect | Restore
+  ansible.builtin.import_playbook: converge.yml

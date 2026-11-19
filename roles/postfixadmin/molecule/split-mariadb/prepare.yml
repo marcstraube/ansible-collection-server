@@ -1,0 +1,127 @@
+---
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Prepare | Update package cache (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name:
+          - systemd
+          - dbus
+          - procps
+          - python3-cryptography
+        state: present
+      retries: 3
+      delay: 5
+
+# A CA and a server certificate for the host name of the database
+# container, which the web container verifies.
+- name: Prepare — Database server
+  hosts: database
+  gather_facts: true
+
+  tasks:
+    - name: Prepare | Create the TLS directory
+      ansible.builtin.file:
+        path: /etc/mariadb-tls
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Create the CA key
+      community.crypto.openssl_privatekey:
+        path: /etc/mariadb-tls/ca.key
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Prepare | Create the CA certificate request
+      community.crypto.openssl_csr_pipe:
+        privatekey_path: /etc/mariadb-tls/ca.key
+        common_name: 'PostfixAdmin split MariaDB test CA'
+        basic_constraints:
+          - 'CA:TRUE'
+        basic_constraints_critical: true
+        key_usage:
+          - keyCertSign
+        key_usage_critical: true
+      register: __prepare_ca_csr
+      changed_when: false
+
+    - name: Prepare | Create the CA certificate
+      community.crypto.x509_certificate:
+        path: /etc/mariadb-tls/ca.crt
+        csr_content: '{{ __prepare_ca_csr.csr }}'
+        privatekey_path: /etc/mariadb-tls/ca.key
+        provider: selfsigned
+        owner: root
+        group: root
+        mode: '0644'
+
+    # Test key only: readable for the mysql user, which the mariadb-server
+    # package creates after this task
+    - name: Prepare | Create the server key
+      community.crypto.openssl_privatekey:
+        path: /etc/mariadb-tls/server.key
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Create the server certificate request
+      community.crypto.openssl_csr_pipe:
+        privatekey_path: /etc/mariadb-tls/server.key
+        common_name: 'postfixadmin-split-mariadb-db'
+        subject_alt_name:
+          - 'DNS:postfixadmin-split-mariadb-db'
+      register: __prepare_server_csr
+      changed_when: false
+
+    - name: Prepare | Create the server certificate
+      community.crypto.x509_certificate:
+        path: /etc/mariadb-tls/server.crt
+        csr_content: '{{ __prepare_server_csr.csr }}'
+        provider: ownca
+        ownca_path: /etc/mariadb-tls/ca.crt
+        ownca_privatekey_path: /etc/mariadb-tls/ca.key
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Include mariadb role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../mariadb'
+
+    - name: Prepare | Fetch the CA certificate
+      ansible.builtin.fetch:
+        src: /etc/mariadb-tls/ca.crt
+        dest: '{{ lookup("env", "MOLECULE_EPHEMERAL_DIRECTORY") }}/postfixadmin-split-mariadb-ca.pem'
+        flat: true
+
+- name: Prepare — PostfixAdmin host
+  hosts: web
+  gather_facts: true
+
+  tasks:
+    - name: Prepare | Install the CA certificate of the database server
+      ansible.builtin.copy:
+        src: '{{ lookup("env", "MOLECULE_EPHEMERAL_DIRECTORY") }}/postfixadmin-split-mariadb-ca.pem'
+        dest: '{{ __molecule_ca_file }}'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Include php role
+      ansible.builtin.include_role:
+        name: marcstraube.common.php
+      vars:
+        php_versions:
+          - version: 'auto'
+            extensions: ['pdo_mysql', 'mbstring']
+            fpm: true
+        php_default_version: 'auto'

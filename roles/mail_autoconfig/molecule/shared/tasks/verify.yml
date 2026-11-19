@@ -1,0 +1,613 @@
+---
+# Assertions shared by both scenarios. Expects the variables of
+# shared/vars/main.yml; the expected values follow the toggle set of the
+# platform (molecule_variant).
+
+- name: Verify | Set expectations
+  ansible.builtin.set_fact:
+    __verify_web_root: '/var/www/mail-autoconfig'
+    __verify_pop3: '{{ mail_autoconfig_pop3_enabled | bool }}'
+    __verify_apple: '{{ mail_autoconfig_apple_profile_enabled | bool }}'
+    __verify_display_name: >-
+      {{ mail_autoconfig_display_name if mail_autoconfig_display_name | length > 0
+         else 'example.com' }}
+    __verify_display_short_name: >-
+      {{ mail_autoconfig_display_short_name if mail_autoconfig_display_short_name | length > 0
+         else mail_autoconfig_display_name if mail_autoconfig_display_name | length > 0
+         else 'example.com' }}
+    # Outgoing servers in client order: implicit TLS first
+    __verify_submission: >-
+      {{
+        ([{'port': '465', 'socket': 'SSL'}]
+         if mail_autoconfig_submission_implicit_tls_enabled | bool else [])
+        + ([{'port': '587', 'socket': 'STARTTLS'}]
+           if mail_autoconfig_submission_starttls_enabled | bool else [])
+      }}
+
+#
+# Rendered files
+#
+
+- name: Verify | Copy file parser
+  ansible.builtin.copy:
+    src: '{{ playbook_dir }}/../shared/files/parse_files.py'
+    dest: /tmp/mail-autoconfig-parse.py
+    owner: root
+    group: root
+    mode: '0644'
+
+# Fails when a file is not well-formed XML or not a valid property list. The
+# Apple profiles are parsed only when they are enabled.
+- name: Verify | Parse rendered files
+  ansible.builtin.command:
+    argv: >-
+      {{ [ansible_facts['python']['executable'], '/tmp/mail-autoconfig-parse.py', __verify_web_root]
+         + (mail_autoconfig_domains if __verify_apple else []) }}
+  register: __verify_parse
+  changed_when: false
+
+- name: Verify | Store parsed files
+  ansible.builtin.set_fact:
+    __verify_files: '{{ __verify_parse.stdout | from_json }}'
+
+- name: Verify | Assert Mozilla Autoconfig file
+  ansible.builtin.assert:
+    that:
+      - __moz.root == 'clientConfig'
+      - __moz.version == '1.1'
+      - __moz.id == 'example.com'
+      - __moz.domains == mail_autoconfig_domains
+      - __moz.display_name == __verify_display_name
+      - __moz.display_short_name == __verify_display_short_name
+      - __moz.incoming | map(attribute='type') | list == ['imap'] + (['pop3'] if __verify_pop3 else [])
+      - __moz.incoming | map(attribute='port') | list == ['993'] + (['995'] if __verify_pop3 else [])
+      - __moz.incoming | map(attribute='hostname') | unique | list == ['mail.example.com']
+      - __moz.incoming | map(attribute='socketType') | unique | list == ['SSL']
+      - __moz.outgoing | map(attribute='port') | list == __verify_submission | map(attribute='port') | list
+      - __moz.outgoing | map(attribute='socketType') | list
+        == __verify_submission | map(attribute='socket') | list
+      - __moz.outgoing | map(attribute='hostname') | unique | list == ['mail.example.com']
+      - (__moz.incoming + __moz.outgoing) | map(attribute='username') | unique | list == ['%EMAILADDRESS%']
+      - (__moz.incoming + __moz.outgoing) | map(attribute='authentication') | unique | list
+        == ['password-cleartext']
+      - __verify_files.mozilla_identical
+  vars:
+    __moz: '{{ __verify_files.mozilla }}'
+
+# One outgoing server only: implicit TLS when enabled, STARTTLS otherwise,
+# marked with Encryption TLS
+- name: Verify | Assert Microsoft Autodiscover file
+  ansible.builtin.assert:
+    that:
+      - __ad.root == '{http://schemas.microsoft.com/exchange/autodiscover/responseschema/2006}Autodiscover'
+      - __ad.account_type == 'email'
+      - __ad.action == 'settings'
+      - __ad.protocols | map(attribute='Type') | list == ['IMAP'] + (['POP3'] if __verify_pop3 else []) + ['SMTP']
+      - __ad.protocols | map(attribute='Port') | list
+        == ['993'] + (['995'] if __verify_pop3 else []) + [__smtp.port]
+      - __ad.protocols | map(attribute='Server') | unique | list == ['mail.example.com']
+      - __ad.protocols | map(attribute='SSL') | unique | list == ['on']
+      - __ad.protocols | map(attribute='SPA') | unique | list == ['off']
+      - __ad.protocols | map(attribute='AuthRequired') | unique | list == ['on']
+      - (__ad.protocols | last).Encryption | default('none')
+        == ('TLS' if __smtp.socket == 'STARTTLS' else 'none')
+  vars:
+    __ad: '{{ __verify_files.autodiscover }}'
+    __smtp: '{{ __verify_submission | first }}'
+
+- name: Verify | Assert Apple configuration profiles
+  ansible.builtin.assert:
+    that:
+      - __profile.PayloadType == 'Configuration'
+      - __profile.PayloadVersion == 1
+      - __profile.PayloadUUID is match('^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$')
+      - __profile.PayloadIdentifier == (item.split('.') | reverse | join('.')) ~ '.mail-autoconfig'
+      - __profile.PayloadDisplayName == __verify_display_name ~ ' (' ~ item ~ ')'
+      - __profile.PayloadContent | length == 1
+      - __account.PayloadType == 'com.apple.mail.managed'
+      - __account.PayloadUUID != __profile.PayloadUUID
+      - __account.EmailAccountType == 'EmailTypeIMAP'
+      - __account.IncomingMailServerHostName == 'mail.example.com'
+      - __account.IncomingMailServerPortNumber == 993
+      - __account.IncomingMailServerUseSSL
+      - __account.OutgoingMailServerHostName == 'mail.example.com'
+      - __account.OutgoingMailServerPortNumber == (__verify_submission | first).port | int
+      # TLS required on 465 and 587 alike; the payload has no STARTTLS setting
+      - __account.OutgoingMailServerUseSSL
+      - __account.IncomingMailServerAuthentication == 'EmailAuthPassword'
+      - __account.OutgoingMailServerAuthentication == 'EmailAuthPassword'
+      # Generic profile: the device asks for address and user name on import
+      - "'EmailAddress' not in __account"
+      - "'IncomingMailServerUsername' not in __account"
+      - "'OutgoingMailServerUsername' not in __account"
+  loop: '{{ mail_autoconfig_domains }}'
+  when: __verify_apple
+  vars:
+    __profile: '{{ __verify_files.apple[item] }}'
+    __account: '{{ __verify_files.apple[item].PayloadContent[0] }}'
+
+- name: Verify | Check Apple configuration profile directory
+  ansible.builtin.stat:
+    path: '{{ __verify_web_root }}/apple'
+  register: __verify_apple_dir
+
+- name: Verify | Assert Apple configuration profile directory follows the toggle
+  ansible.builtin.assert:
+    that:
+      - __verify_apple_dir.stat.exists == __verify_apple
+    fail_msg: 'apple/ exists: {{ __verify_apple_dir.stat.exists }}, profile enabled: {{ __verify_apple }}'
+
+#
+# Owner and mode
+#
+
+# The web root (created by prepare like the role creates a missing one),
+# every directory and every file of the role: root:root, writable by root
+# only
+- name: Verify | Check owner and mode of the web root, directories and files
+  ansible.builtin.stat:
+    path: '{{ __verify_web_root }}{{ item }}'
+  loop: >-
+    {{
+      ['', '/mail', '/.well-known', '/.well-known/autoconfig', '/.well-known/autoconfig/mail', '/autodiscover',
+       '/mail/config-v1.1.xml', '/.well-known/autoconfig/mail/config-v1.1.xml', '/autodiscover/autodiscover.xml']
+      + ((['/apple'] + mail_autoconfig_domains | map('regex_replace', '^', '/apple/')
+                       | map('regex_replace', '$', '.mobileconfig') | list)
+         if __verify_apple else [])
+    }}
+  loop_control:
+    label: '{{ __verify_web_root }}{{ item }}'
+  register: __verify_modes
+
+- name: Verify | Assert owner and mode of the web root, directories and files
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg if __file else item.stat.isdir
+      - item.stat.pw_name == 'root'
+      - item.stat.gr_name == 'root'
+      - item.stat.mode == ('0644' if __file else '0755')
+    fail_msg: >-
+      {{ __verify_web_root }}{{ item.item }}:
+      {{ item.stat.pw_name | default('missing') }}:{{ item.stat.gr_name | default('') }}
+      {{ item.stat.mode | default('') }}
+    quiet: true
+  loop: '{{ __verify_modes.results }}'
+  loop_control:
+    label: '{{ __verify_web_root }}{{ item.item }}'
+  vars:
+    __file: "{{ item.item is search('[.](xml|mobileconfig)$') }}"
+
+#
+# Web server
+#
+
+- name: Verify | Write Autodiscover request body
+  ansible.builtin.copy:
+    content: |
+      <?xml version="1.0" encoding="utf-8"?>
+      <Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/requestschema/2006">
+        <Request>
+          <EMailAddress>user@example.com</EMailAddress>
+          <AcceptableResponseSchema>http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a</AcceptableResponseSchema>
+        </Request>
+      </Autodiscover>
+    dest: /tmp/mail-autoconfig-request.xml
+    owner: root
+    group: root
+    mode: '0644'
+
+# Name resolution with --resolve, so the TLS handshake carries the real host
+# name (SNI) and the certificate is verified against it
+- name: Verify | Request files through the web server
+  ansible.builtin.command:
+    argv: >-
+      {{
+        ['curl', '--silent', '--show-error',
+         '--cacert', '/etc/letsencrypt/live/autoconfig.' ~ item.0 ~ '/fullchain.pem',
+         '--resolve', item.1.host ~ '.' ~ item.0 ~ ':443:127.0.0.1',
+         '--request', item.1.method,
+         '--output', '/tmp/mail-autoconfig-body-' ~ item.1.host ~ '-' ~ item.1.name ~ '-' ~ item.0,
+         '--write-out', '%{http_code} %{content_type}']
+        + (['--header', 'Content-Type: text/xml', '--data-binary', '@/tmp/mail-autoconfig-request.xml']
+           if item.1.method == 'POST' else [])
+        + ['https://' ~ item.1.host ~ '.' ~ item.0 ~ item.1.path | replace('DOMAIN', item.0)]
+      }}
+  loop: >-
+    {{ mail_autoconfig_domains
+       | product(__verify_requests | rejectattr('apple') | list
+                 + (__verify_requests | selectattr('apple') | list if __verify_apple else []))
+       | list }}
+  loop_control:
+    label: '{{ item.1.method }} {{ item.1.host }}.{{ item.0 }}{{ item.1.path | replace("DOMAIN", item.0) }}'
+  register: __verify_responses
+  changed_when: false
+  vars:
+    __verify_requests:
+      - name: 'autoconfig'
+        method: 'GET'
+        host: 'autoconfig'
+        path: '/mail/config-v1.1.xml?emailaddress=user%40DOMAIN'
+        file: 'mail/config-v1.1.xml'
+        type: 'xml'
+        apple: false
+      - name: 'well-known'
+        method: 'GET'
+        host: 'autoconfig'
+        path: '/.well-known/autoconfig/mail/config-v1.1.xml'
+        file: '.well-known/autoconfig/mail/config-v1.1.xml'
+        type: 'xml'
+        apple: false
+      - name: 'autodiscover'
+        method: 'POST'
+        host: 'autodiscover'
+        path: '/autodiscover/autodiscover.xml'
+        file: 'autodiscover/autodiscover.xml'
+        type: 'xml'
+        apple: false
+      - name: 'apple'
+        method: 'GET'
+        host: 'autoconfig'
+        path: '/apple/DOMAIN.mobileconfig'
+        file: 'apple/DOMAIN.mobileconfig'
+        type: 'application/x-apple-aspen-config'
+        apple: true
+
+- name: Verify | Assert status and content type
+  ansible.builtin.assert:
+    that:
+      - __status == '200'
+      - (__content_type is search('xml')) if __request.type == 'xml'
+        else (__content_type == __request.type)
+    fail_msg: '{{ item.item.1.method }} {{ item.item.1.host }}.{{ item.item.0 }}: {{ item.stdout }}'
+    quiet: true
+  loop: '{{ __verify_responses.results }}'
+  loop_control:
+    label: '{{ item.item.1.name }} {{ item.item.0 }}: {{ item.stdout }}'
+  vars:
+    __request: '{{ item.item.1 }}'
+    __status: '{{ item.stdout.split(" ")[0] }}'
+    __content_type: '{{ item.stdout.split(" ")[1] | default("") | regex_replace(";.*$", "") }}'
+
+- name: Verify | Assert body equals the rendered file
+  ansible.builtin.command:
+    argv:
+      - cmp
+      - '/tmp/mail-autoconfig-body-{{ item.1.host }}-{{ item.1.name }}-{{ item.0 }}'
+      - '{{ __verify_web_root }}/{{ item.1.file | replace("DOMAIN", item.0) }}'
+  loop: '{{ __verify_responses.results | map(attribute="item") | list }}'
+  loop_control:
+    label: '{{ item.1.name }} {{ item.0 }}'
+  changed_when: false
+
+# Outlook follows the _autodiscover._tcp SRV record to the web host name;
+# the site of the first domain answers for it with a certificate that names it
+- name: Verify | Send Autodiscover POST to the web host name
+  ansible.builtin.command:
+    argv:
+      - curl
+      - --silent
+      - --show-error
+      - --cacert
+      - '/etc/letsencrypt/live/autoconfig.{{ mail_autoconfig_domains | first }}/fullchain.pem'
+      - --resolve
+      - '{{ mail_autoconfig_web_host }}:443:127.0.0.1'
+      - --request
+      - POST
+      - --header
+      - 'Content-Type: text/xml'
+      - --data-binary
+      - '@/tmp/mail-autoconfig-request.xml'
+      - --output
+      - /tmp/mail-autoconfig-body-web-host
+      - --write-out
+      - '%{http_code}'
+      - 'https://{{ mail_autoconfig_web_host }}/autodiscover/autodiscover.xml'
+  register: __verify_web_host
+  changed_when: false
+
+- name: Verify | Assert status of the web host name
+  ansible.builtin.assert:
+    that:
+      - __verify_web_host.stdout == '200'
+    fail_msg: 'POST to {{ mail_autoconfig_web_host }} answered {{ __verify_web_host.stdout }}'
+
+- name: Verify | Assert the web host name serves the Autodiscover file
+  ansible.builtin.command:
+    argv:
+      - cmp
+      - /tmp/mail-autoconfig-body-web-host
+      - '{{ __verify_web_root }}/autodiscover/autodiscover.xml'
+  changed_when: false
+
+#
+# DNS check against the test resolver
+#
+
+- name: Verify | Set DNS expectations
+  ansible.builtin.set_fact:
+    # Records of the enabled services in the order of the role
+    __verify_dns_names: >-
+      {{
+        mail_autoconfig_domains
+        | product(['autoconfig', 'autodiscover', '_imaps._tcp']
+                  + (['_submissions._tcp'] if mail_autoconfig_submission_implicit_tls_enabled | bool else [])
+                  + (['_submission._tcp'] if mail_autoconfig_submission_starttls_enabled | bool else [])
+                  + (['_pop3s._tcp'] if __verify_pop3 else [])
+                  + ['_autodiscover._tcp'])
+        | map('reverse') | map('join', '.') | list
+      }}
+    # State of every record in the test zone (molecule-dns.conf)
+    __verify_dns_zone:
+      autoconfig.example.com: 'present'
+      autodiscover.example.com: 'present'
+      _imaps._tcp.example.com: 'present'
+      _submissions._tcp.example.com: 'present'
+      _submission._tcp.example.com: 'present'
+      _pop3s._tcp.example.com: 'present'
+      _autodiscover._tcp.example.com: 'present'
+      autoconfig.example.org: 'different'
+      autodiscover.example.org: 'missing'
+      _imaps._tcp.example.org: 'different'
+      _submissions._tcp.example.org: 'different'
+      _submission._tcp.example.org: 'missing'
+      _pop3s._tcp.example.org: 'missing'
+      _autodiscover._tcp.example.org: 'different'
+
+- name: Verify | Run DNS check  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: dns.yml
+
+# With the check off the records are listed as unchecked
+- name: Verify | Assert DNS report
+  ansible.builtin.assert:
+    that:
+      - __mail_autoconfig_dns_error == ''
+      - __verify_report.names == __verify_dns_names
+      - __verify_report.status == __verify_expected
+      - "'_imaps._tcp.example.com. IN SRV 0 1 993 mail.example.com.' in __verify_report.records"
+      - "'autoconfig.example.org. IN CNAME web.example.net.' in __verify_report.records"
+      - "'_autodiscover._tcp.example.org. IN SRV 0 1 443 web.example.net.' in __verify_report.records"
+    fail_msg: '{{ __verify_report | to_json }}'
+  vars:
+    __verify_report:
+      names: '{{ __mail_autoconfig_dns_report | map(attribute="name") | list }}'
+      records: '{{ __mail_autoconfig_dns_report | map(attribute="record") | list }}'
+      status: >-
+        {{ dict(__mail_autoconfig_dns_report | map(attribute='name')
+                | zip(__mail_autoconfig_dns_report | map(attribute='status'))) }}
+    __verify_expected: >-
+      {{
+        dict(__verify_dns_names
+             | zip(__verify_dns_names | map('extract', __verify_dns_zone)
+                   if mail_autoconfig_dns_check_enabled | bool
+                   else __verify_dns_names | map('regex_replace', '^.*$', 'unchecked')))
+      }}
+
+# A resolver name that cannot be resolved makes the lookup itself fail (RFC
+# 6761 name, never resolvable). The role catches it, still lists every record
+# as unchecked with a warning, and the run goes on to the next task.
+- name: Verify | Run DNS check with a broken resolver  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: dns.yml
+  vars:
+    mail_autoconfig_dns_check_enabled: true
+    mail_autoconfig_dns_resolver: 'resolver.invalid'
+
+- name: Verify | Assert the lookup failure was reported and the run went on
+  ansible.builtin.assert:
+    that:
+      - __mail_autoconfig_dns_error is search("lookup plugin 'community.general.dig'")
+      - __mail_autoconfig_dns_error is search('dns lookup NS')
+      - __mail_autoconfig_dns_report | map(attribute='name') | list == __verify_dns_names
+      - __mail_autoconfig_dns_report | map(attribute='status') | unique | list == ['unchecked']
+    fail_msg: '{{ __mail_autoconfig_dns_error }} {{ __mail_autoconfig_dns_report }}'
+
+# Any other error inside the check is a bug and must fail the run: an
+# undefined variable in the resolver setting breaks the arguments of the
+# lookup before the lookup runs
+- name: Verify | Run DNS check with a broken variable
+  block:
+    - name: Verify | Include DNS check with a broken variable  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: dns.yml
+      vars:
+        mail_autoconfig_dns_check_enabled: true
+        mail_autoconfig_dns_resolver: '{{ __verify_undefined_resolver }}'
+  rescue:
+    - name: Verify | Record the broken variable failure
+      ansible.builtin.set_fact:
+        __verify_dns_bug:
+          msg: '{{ ansible_failed_result.msg | default("") }}'
+          task: '{{ ansible_failed_task.name | default("") }}'
+
+# The failure has to come from the rescue of the role, not from the include
+- name: Verify | Assert the broken variable failed the run
+  ansible.builtin.assert:
+    that:
+      - __verify_dns_bug is defined
+      - __verify_dns_bug.task == 'DNS | Fail on errors other than the lookup'
+      - "'__verify_undefined_resolver' in __verify_dns_bug.msg"
+      - __mail_autoconfig_dns_error == ''
+    fail_msg: 'Broken variable result: {{ __verify_dns_bug | default("role run succeeded") }}'
+
+#
+# HTTP check
+#
+
+- name: Verify | Set HTTP expectations
+  ansible.builtin.set_fact:
+    # Requests of the role in its order, per domain
+    __verify_http_requests: >-
+      {%- set ns = namespace(requests=[]) -%}
+      {%- for domain in mail_autoconfig_domains -%}
+      {%- set ns.requests = ns.requests + [
+            'GET https://autoconfig.' ~ domain ~ '/mail/config-v1.1.xml',
+            'GET https://autoconfig.' ~ domain ~ '/.well-known/autoconfig/mail/config-v1.1.xml',
+            'POST https://autodiscover.' ~ domain ~ '/autodiscover/autodiscover.xml']
+          + (['GET https://autoconfig.' ~ domain ~ '/apple/' ~ domain ~ '.mobileconfig'] if __verify_apple else []) -%}
+      {%- endfor -%}
+      {{ ns.requests }}
+
+# Through the README sites in the container (etc_hosts), with the CA file of
+# prepare; with the check off the report stays empty
+- name: Verify | Run HTTP check  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: http.yml
+
+- name: Verify | Assert HTTP report
+  ansible.builtin.assert:
+    that:
+      - (__verify_report | map(attribute='request') | list
+         == (__verify_http_requests if mail_autoconfig_http_check_enabled | bool else []))
+      - __verify_report | map(attribute='status') | reject('equalto', 'reachable') | list | length == 0
+      - __verify_report | map(attribute='found') | reject('match', '^200 ') | list | length == 0
+      - __verify_report | selectattr('request', 'search', 'mobileconfig$') | map(attribute='found')
+        | reject('equalto', '200 application/x-apple-aspen-config') | list | length == 0
+    fail_msg: '{{ __verify_report | to_json }}'
+  vars:
+    __verify_report: '{{ __mail_autoconfig_http_report }}'
+
+# Without the CA file the self-signed certificates fail verification: every
+# file is reported unreachable with the TLS error, and the run goes on
+- name: Verify | Run HTTP check with the system trust store  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: http.yml
+  vars:
+    mail_autoconfig_http_check_enabled: true
+    mail_autoconfig_http_check_ca_path: ''
+
+- name: Verify | Assert the certificate errors were reported and the run went on
+  ansible.builtin.assert:
+    that:
+      - __mail_autoconfig_http_report | map(attribute='request') | list == __verify_http_requests
+      - __mail_autoconfig_http_report | map(attribute='status') | unique | list == ['unreachable']
+      - __mail_autoconfig_http_report | map(attribute='found') | reject('search', 'CERTIFICATE_VERIFY_FAILED')
+        | list | length == 0
+    fail_msg: '{{ __mail_autoconfig_http_report | to_json }}'
+
+# The same without certificate verification
+- name: Verify | Run HTTP check without certificate verification  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: http.yml
+  vars:
+    mail_autoconfig_http_check_enabled: true
+    mail_autoconfig_http_check_ca_path: ''
+    mail_autoconfig_http_check_validate_certs: false
+
+- name: Verify | Assert every file is reachable without certificate verification
+  ansible.builtin.assert:
+    that:
+      - __mail_autoconfig_http_report | map(attribute='request') | list == __verify_http_requests
+      - __mail_autoconfig_http_report | map(attribute='status') | unique | list == ['reachable']
+    fail_msg: '{{ __mail_autoconfig_http_report | to_json }}'
+
+# A POST that does not get the file (here: the file moved away, 404) is
+# reported with its status, the other requests stay reachable
+- name: Verify | Run HTTP check without the Autodiscover file
+  block:
+    - name: Verify | Move the Autodiscover file away
+      ansible.builtin.command:
+        argv:
+          - mv
+          - '{{ __verify_web_root }}/autodiscover/autodiscover.xml'
+          - /tmp/mail-autoconfig-autodiscover.xml
+      changed_when: true
+
+    - name: Verify | Include HTTP check without the Autodiscover file  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: http.yml
+      vars:
+        mail_autoconfig_http_check_enabled: true
+
+  always:
+    - name: Verify | Restore the Autodiscover file
+      ansible.builtin.command:
+        argv:
+          - mv
+          - /tmp/mail-autoconfig-autodiscover.xml
+          - '{{ __verify_web_root }}/autodiscover/autodiscover.xml'
+        removes: /tmp/mail-autoconfig-autodiscover.xml
+
+- name: Verify | Assert the failed POST was reported and the run went on
+  ansible.builtin.assert:
+    that:
+      - __report | map(attribute='request') | list == __verify_http_requests
+      - __post | map(attribute='status') | unique | list == ['unreachable']
+      - __post | map(attribute='found') | reject('match', '^4[0-9][0-9] ') | list | length == 0
+      - __others | map(attribute='status') | unique | list == ['reachable']
+    fail_msg: '{{ __report | to_json }}'
+  vars:
+    __report: '{{ __mail_autoconfig_http_report }}'
+    __post: "{{ __report | selectattr('request', 'match', '^POST ') | list }}"
+    __others: "{{ __report | rejectattr('request', 'match', '^POST ') | list }}"
+
+#
+# Toggles and validation
+#
+
+# Turning the profile off removes the directory with every profile
+- name: Verify | Turn the Apple profile off
+  when: __verify_apple
+  block:
+    - name: Verify | Include mail_autoconfig role with the Apple profile off  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_autoconfig_apple_profile_enabled: false
+        mail_autoconfig_dns_check_enabled: false
+
+    - name: Verify | Check Apple configuration profile directory after the toggle
+      ansible.builtin.stat:
+        path: '{{ __verify_web_root }}/apple'
+      register: __verify_apple_dir_off
+
+    - name: Verify | Assert Apple configuration profile directory was removed
+      ansible.builtin.assert:
+        that:
+          - not __verify_apple_dir_off.stat.exists
+
+# A web root that does not exist yet is created with its missing parents,
+# all root:root 0755
+- name: Verify | Include mail_autoconfig role with a new web root  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+  vars:
+    mail_autoconfig_web_root: '/srv/mail-autoconfig-new/site/root'
+    mail_autoconfig_dns_check_enabled: false
+    mail_autoconfig_http_check_enabled: false
+
+- name: Verify | Check the new web root and its parents
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  loop:
+    - /srv/mail-autoconfig-new
+    - /srv/mail-autoconfig-new/site
+    - /srv/mail-autoconfig-new/site/root
+    - /srv/mail-autoconfig-new/site/root/autodiscover/autodiscover.xml
+  register: __verify_new_root
+
+- name: Verify | Assert the new web root and its parents are root:root 0755
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.pw_name == 'root'
+      - item.stat.gr_name == 'root'
+      - item.stat.mode == ('0644' if item.item is search('[.]xml$') else '0755')
+    fail_msg: >-
+      {{ item.item }}: {{ item.stat.pw_name | default('missing') }}:{{ item.stat.gr_name | default('') }}
+      {{ item.stat.mode | default('') }}
+    quiet: true
+  loop: '{{ __verify_new_root.results }}'
+  loop_control:
+    label: '{{ item.item }}'
+
+- name: Verify | Import validation tests
+  ansible.builtin.import_tasks: verify_validation.yml

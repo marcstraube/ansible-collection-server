@@ -1,0 +1,11 @@
+{{ ansible_managed | comment }}
+{% if rspamd_antivirus_enabled | bool %}
+clamav {
+  type = "clamav";
+  servers = {{ rspamd_clamd_address | to_json }};
+  symbol = "CLAM_VIRUS";
+  action = {{ rspamd_antivirus_action | to_json }};
+  max_size = {{ rspamd_antivirus_max_size | int }};
+  scan_mime_parts = true;
+}
+{% endif %}

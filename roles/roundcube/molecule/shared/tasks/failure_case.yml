@@ -1,0 +1,47 @@
+---
+# One failure case of verify.yml (__verify_case: name, vars, message): the
+# role has to fail with the message. Settings the case leaves out keep the
+# values of converge.
+- name: Verify | Run the role with an invalid setting
+  vars:
+    __case: '{{ __verify_case.vars }}'
+  block:
+    - name: Verify | Include roundcube role with the invalid setting  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        roundcube_des_key: "{{ __case.roundcube_des_key | default('molecule-des-key-0123456789abcdef') }}"
+        roundcube_extra_config: >-
+          {{ __case.roundcube_extra_config | default({'support_url': 'https://www.example.com/support'}) }}
+        roundcube_imap_host: "{{ __case.roundcube_imap_host | default('localhost') }}"
+        roundcube_imap_tls: "{{ __case.roundcube_imap_tls | default('implicit') }}"
+        roundcube_password_db_password: >-
+          {{ __case.roundcube_password_db_password | default(__molecule_password_db_password) }}
+        roundcube_db_type: '{{ __case.roundcube_db_type | default(__molecule_db_type) }}'
+        roundcube_db_path: "{{ __case.roundcube_db_path | default('/var/lib/roundcube/roundcube.db') }}"
+        roundcube_db_create: '{{ __case.roundcube_db_create | default(true) }}'
+        roundcube_db_host: "{{ __case.roundcube_db_host | default(__molecule_rc_db_host | default('localhost')) }}"
+        roundcube_db_tls: "{{ __case.roundcube_db_tls | default(__molecule_rc_db_tls | default(false)) }}"
+        roundcube_db_tls_ca_file: >-
+          {{ __case.roundcube_db_tls_ca_file | default(__molecule_rc_db_tls_ca_file | default('')) }}
+        roundcube_backup_dir: "{{ __case.roundcube_backup_dir | default('/var/backups/roundcube') }}"
+        roundcube_session_storage: "{{ __case.roundcube_session_storage | default('db') }}"
+        roundcube_redis_host: "{{ __case.roundcube_redis_host | default('127.0.0.1:6379') }}"
+        roundcube_plugins: >-
+          {{ __case.roundcube_plugins | default(['managesieve', 'password', 'acl', 'markasjunk']) }}
+
+    - name: Verify | Fail when the role accepted the setting
+      ansible.builtin.fail:
+        msg: 'The role accepted: {{ __verify_case.name }}'
+  rescue:
+    # A failed loop item carries its message in the results
+    - name: Verify | Assert the role failed with the expected message
+      ansible.builtin.assert:
+        that:
+          - __verify_messages is search(__verify_case.message | regex_escape)
+        fail_msg: '{{ __verify_case.name }}: {{ __verify_messages }}'
+      vars:
+        __verify_messages: >-
+          {{ ([ansible_failed_result.msg | default('')]
+              + ansible_failed_result.results | default([]) | map(attribute='msg', default='') | list)
+             | join(' ') }}

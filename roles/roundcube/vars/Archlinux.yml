@@ -1,0 +1,7 @@
+---
+# Pool user of the php-fpm package
+__roundcube_default_fpm_user: 'http'
+__roundcube_default_fpm_group: 'http'
+
+# Socket of the MariaDB server
+__roundcube_mariadb_socket: '/run/mysqld/mysqld.sock'

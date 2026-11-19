@@ -1,0 +1,76 @@
+---
+# Role variables shared by prepare, converge and verify of both scenarios.
+# Set per platform in molecule.yml: molecule_dns_port, the published port of
+# the test resolver on the controller, and molecule_variant, the toggle set
+# of the platform below. Together the variants switch every toggle on and
+# off at least once in each scenario.
+
+mail_autoconfig_enabled: true
+mail_autoconfig_domains:
+  - 'example.com'
+  - 'example.org'
+mail_autoconfig_imap_host: 'mail.example.com'
+mail_autoconfig_web_host: 'web.example.net'
+mail_autoconfig_dns_resolver: '127.0.0.1'
+mail_autoconfig_dns_resolver_port: '{{ molecule_dns_port }}'
+# The controller cannot reach the web server in the container: the HTTP
+# check runs in the container, which resolves the names to itself
+# (etc_hosts in molecule.yml) and trusts the self-signed certificates of
+# prepare through a CA file
+mail_autoconfig_http_check_delegate: '{{ inventory_hostname }}'
+mail_autoconfig_http_check_ca_path: '/etc/letsencrypt/molecule-ca.pem'
+
+mail_autoconfig_display_name: '{{ __molecule_toggles.display_name }}'
+mail_autoconfig_display_short_name: '{{ __molecule_toggles.display_short_name }}'
+mail_autoconfig_submission_implicit_tls_enabled: '{{ __molecule_toggles.implicit_tls }}'
+mail_autoconfig_submission_starttls_enabled: '{{ __molecule_toggles.starttls }}'
+mail_autoconfig_pop3_enabled: '{{ __molecule_toggles.pop3 }}'
+mail_autoconfig_apple_profile_enabled: '{{ __molecule_toggles.apple }}'
+mail_autoconfig_dns_check_enabled: '{{ __molecule_toggles.dns_check }}'
+mail_autoconfig_http_check_enabled: '{{ __molecule_toggles.http_check }}'
+
+__molecule_toggles: '{{ __molecule_variants[molecule_variant] }}'
+__molecule_variants:
+  # Everything on, display name set
+  full:
+    display_name: 'Example Mail'
+    display_short_name: ''
+    implicit_tls: true
+    starttls: true
+    pop3: true
+    apple: true
+    dns_check: true
+    http_check: true
+  # Implicit TLS only, no POP3, no Apple profile, names from the fallbacks
+  # except the short name
+  implicit_tls:
+    display_name: ''
+    display_short_name: 'Example'
+    implicit_tls: true
+    starttls: false
+    pop3: false
+    apple: false
+    dns_check: true
+    http_check: true
+  # STARTTLS only (one outgoing server on 587 in Autodiscover and the Apple
+  # profile), DNS check off (the records are printed unchecked) and HTTP
+  # check off
+  starttls:
+    display_name: 'Example Mail'
+    display_short_name: 'Example'
+    implicit_tls: false
+    starttls: true
+    pop3: true
+    apple: true
+    dns_check: false
+    http_check: false
+  # Role defaults for every toggle except the Apple profile
+  defaults:
+    display_name: ''
+    display_short_name: ''
+    implicit_tls: true
+    starttls: true
+    pop3: false
+    apple: true
+    dns_check: true
+    http_check: true

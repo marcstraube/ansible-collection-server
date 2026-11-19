@@ -1,0 +1,90 @@
+---
+# Requests every published file over HTTPS from the controller (or the
+# configured delegate host), the way the clients do. A file that cannot be
+# fetched never fails the run; it is reported with the status code or the
+# error. Read-only requests: they run in check mode as well and never report
+# a change. No retries: the check reports the state of the moment, and a
+# retried unreachable site only delays the report.
+
+# Starts every run from an empty report, so a report of an earlier run in the
+# same play never shows up again
+- name: HTTP | Reset report
+  ansible.builtin.set_fact:
+    __mail_autoconfig_http_report: []
+
+- name: HTTP | Check files
+  when: mail_autoconfig_http_check_enabled | bool
+  block:
+    # Every outcome is reported, none fails the run: connection, name
+    # resolution, TLS and timeout errors come back with status -1, and the
+    # module fails without any status when the server drops the connection
+    # mid-request (e.g. a broken pipe on the POST). A broken variable still
+    # fails the task, before any request is sent.
+    - name: HTTP | Request files
+      ansible.builtin.uri:
+        url: '{{ item.url }}'
+        method: '{{ item.method }}'
+        body: '{{ __mail_autoconfig_http_autodiscover_request if item.method == "POST" else omit }}'
+        headers: '{{ {"Content-Type": "text/xml"} if item.method == "POST" else omit }}'
+        validate_certs: '{{ mail_autoconfig_http_check_validate_certs | bool }}'
+        ca_path: '{{ mail_autoconfig_http_check_ca_path if mail_autoconfig_http_check_ca_path | length > 0 else omit }}'
+        status_code: 200
+      loop: '{{ __mail_autoconfig_http_requests }}'
+      loop_control:
+        label: '{{ item.method }} {{ item.url }}'
+      register: __mail_autoconfig_http_responses
+      delegate_to: '{{ mail_autoconfig_http_check_delegate }}'
+      # The requests need no privileges; on the controller, become would ask
+      # for the sudo password of the user running Ansible
+      become: false
+      check_mode: false
+      changed_when: false
+      failed_when: false
+      vars:
+        __mail_autoconfig_http_email: '{{ item.email | default("") }}'
+
+    # Reachable: status 200 with the content type the clients expect. Found:
+    # status and content type of the answer, or the error without the generic
+    # prefix of the uri module (none when the module failed without a status)
+    - name: HTTP | Collect report
+      ansible.builtin.set_fact:
+        __mail_autoconfig_http_report: >-
+          {%- set ns = namespace(report=[]) -%}
+          {%- for response in __mail_autoconfig_http_responses.results -%}
+          {%- set status = response.status | default(-1) | int -%}
+          {%- set type = response.content_type | default('') | regex_replace(';.*$', '') | trim | lower -%}
+          {%- set ns.report = ns.report + [{
+                'request': response.item.method ~ ' ' ~ response.item.url,
+                'status': 'reachable' if status == 200
+                            and ((type is search('xml')) if response.item.type == 'xml'
+                                 else type == response.item.type)
+                          else 'unreachable',
+                'found': status ~ ' ' ~ (type or 'no content type') if status > 0
+                         else response.msg | default('the connection failed without an answer', true)
+                              | regex_replace('^Status code was -?\d+ and not \[[^]]*\]: ', '')}] -%}
+          {%- endfor -%}
+          {{ ns.report }}
+
+    - name: HTTP | Show requests
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            __mail_autoconfig_http_report
+            | map(attribute='status') | map('upper')
+            | zip(__mail_autoconfig_http_report | map(attribute='request'),
+                  __mail_autoconfig_http_report | map(attribute='found'))
+            | map('join', ' | ') | list
+          }}
+
+    - name: HTTP | Warn about unreachable files
+      ansible.builtin.debug:
+        msg: >-
+          Clients cannot fetch the files reported as unreachable above
+          (requested from {{ mail_autoconfig_http_check_delegate }}). Check the
+          DNS records, the site and its certificate for the name; a POST
+          answered with 405 comes from an nginx site without
+          'error_page 405 =200 $uri;'. A controller that cannot reach the
+          sites can send the requests from another host
+          (mail_autoconfig_http_check_delegate);
+          mail_autoconfig_http_check_enabled false turns the check off.
+      when: __mail_autoconfig_http_report | selectattr('status', 'equalto', 'unreachable') | list | length > 0

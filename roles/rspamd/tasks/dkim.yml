@@ -1,0 +1,153 @@
+---
+# One RSA key per domain and selector, created with rspamadm dkim_keygen
+# when it does not exist; an existing key is never replaced. A new selector
+# creates a new key next to the old one. The public record goes into
+# '<domain>.<selector>.txt' for the DNS report. The directory is closed to
+# everyone but root and the service group, the keys belong to the service
+# user (rspamd reads them in its workers). Check mode on a new host has no
+# rspamadm and no service user.
+
+- name: DKIM | Create the key directory
+  ansible.builtin.file:
+    path: '{{ __rspamd_dkim_dir }}'
+    state: directory
+    owner: root
+    group: '{{ __rspamd_group }}'
+    mode: '0750'
+  when:
+    - rspamd_dkim_domains | length > 0
+    - not __rspamd_check_mode_install | default(false) | bool
+
+# -o dnskey prints the record as one line: 'v=DKIM1; k=rsa; p=<key>'
+- name: DKIM | Create missing keys
+  ansible.builtin.command:
+    argv:
+      - rspamadm
+      - dkim_keygen
+      - --type
+      - rsa
+      - --bits
+      - '{{ item.key_size | default(2048) | string }}'
+      - --domain
+      - '{{ item.domain | lower }}'
+      - --selector
+      - '{{ item.selector }}'
+      - --privkey
+      - '{{ __rspamd_dkim_dir }}/{{ item.domain | lower }}.{{ item.selector }}.key'
+      - --output
+      - dnskey
+    creates: '{{ __rspamd_dkim_dir }}/{{ item.domain | lower }}.{{ item.selector }}.key'
+  loop: '{{ rspamd_dkim_domains }}'
+  loop_control:
+    label: '{{ item.selector }}._domainkey.{{ item.domain | lower }}'
+  register: __rspamd_dkim_keygen
+  when: not __rspamd_check_mode_install | default(false) | bool
+
+- name: DKIM | Store the public records of new keys
+  ansible.builtin.copy:
+    content: "{{ item.stdout | trim }}\n"
+    dest: '{{ __rspamd_dkim_dir }}/{{ item.item.domain | lower }}.{{ item.item.selector }}.txt'
+    owner: root
+    group: '{{ __rspamd_group }}'
+    mode: '0644'
+  loop: '{{ __rspamd_dkim_keygen.results | default([]) | select("changed") | list }}'
+  loop_control:
+    label: '{{ item.item.selector }}._domainkey.{{ item.item.domain | lower }}'
+  when: not ansible_check_mode
+
+# Check mode skips a key that would only be created by the real run
+- name: DKIM | Restrict the keys to the service user
+  ansible.builtin.file:
+    path: '{{ __rspamd_dkim_dir }}/{{ item.item.domain | lower }}.{{ item.item.selector }}.key'
+    state: file
+    owner: '{{ __rspamd_user }}'
+    group: '{{ __rspamd_group }}'
+    mode: '0600'
+  loop: '{{ __rspamd_dkim_keygen.results | default([]) | rejectattr("skipped", "defined") | list }}'
+  loop_control:
+    label: '{{ item.item.selector }}._domainkey.{{ item.item.domain | lower }}'
+  when: not (ansible_check_mode and item is changed)
+
+# A key the role did not create (placed by hand, or the record file was
+# removed) has no public record next to it. The record is rebuilt from the
+# private key with openssl on every run until the file exists again: the
+# public key of an RSA key in DER (SubjectPublicKeyInfo), base64, is the
+# p= value of the DKIM record.
+- name: DKIM | Check the public records
+  ansible.builtin.stat:
+    path: '{{ __rspamd_dkim_dir }}/{{ item.item.domain | lower }}.{{ item.item.selector }}.txt'
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  loop: >-
+    {{ __rspamd_dkim_keygen.results | default([]) | rejectattr('skipped', 'defined')
+       | rejectattr('changed') | list }}
+  loop_control:
+    label: '{{ item.item.selector }}._domainkey.{{ item.item.domain | lower }}'
+  register: __rspamd_dkim_records_stat
+
+- name: DKIM | Install openssl for the missing public records
+  ansible.builtin.package:
+    name: '{{ __rspamd_openssl_package }}'
+    state: present
+  retries: 3
+  delay: 5
+  when: __rspamd_dkim_records_missing | length > 0
+  vars:
+    __rspamd_dkim_records_missing: >-
+      {{ __rspamd_dkim_records_stat.results | default([]) | rejectattr('stat.exists') | list }}
+
+- name: DKIM | Read the public keys of keys without a record
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - pkey
+      - -in
+      - '{{ __rspamd_dkim_dir }}/{{ item.item.item.domain | lower }}.{{ item.item.item.selector }}.key'
+      - -pubout
+      # Public components only, whatever the input key holds
+      - -text_pub
+  loop: "{{ __rspamd_dkim_records_stat.results | default([]) | rejectattr('stat.exists') | list }}"
+  loop_control:
+    label: '{{ item.item.item.selector }}._domainkey.{{ item.item.item.domain | lower }}'
+  register: __rspamd_dkim_pubkeys
+  changed_when: false
+  check_mode: false
+  # Check mode on a host without openssl: the record stays missing
+  failed_when: __rspamd_dkim_pubkeys.rc != 0 and not ansible_check_mode
+
+# The role creates RSA keys only, and the record it builds is the one of an
+# RSA key (k=rsa, the SubjectPublicKeyInfo as p=). A hand-placed key of
+# another type (Ed25519 has the raw key as p=) needs its record by hand.
+- name: DKIM | Assert the keys without a record are RSA keys
+  ansible.builtin.assert:
+    that:
+      - item.stdout is search('(?m)^Modulus:')
+    fail_msg: >-
+      {{ item.item.item.item.domain | lower }}.{{ item.item.item.item.selector }}.key
+      is not an RSA key; the role rebuilds the public record of RSA keys only.
+      Write {{ item.item.item.item.domain | lower }}.{{ item.item.item.item.selector }}.txt
+      next to it by hand (the TXT record value).
+    quiet: true
+  loop: >-
+    {{ __rspamd_dkim_pubkeys.results | default([]) | selectattr('rc', 'defined')
+       | selectattr('rc', 'eq', 0) | list }}
+  loop_control:
+    label: '{{ item.item.item.item.selector }}._domainkey.{{ item.item.item.item.domain | lower }}'
+
+- name: DKIM | Rebuild the missing public records
+  ansible.builtin.copy:
+    content: "v=DKIM1; k=rsa; p={{ __rspamd_pubkey }}\n"
+    dest: '{{ __rspamd_dkim_dir }}/{{ item.item.item.item.domain | lower }}.{{ item.item.item.item.selector }}.txt'
+    owner: root
+    group: '{{ __rspamd_group }}'
+    mode: '0644'
+  loop: >-
+    {{ __rspamd_dkim_pubkeys.results | default([]) | selectattr('rc', 'defined')
+       | selectattr('rc', 'eq', 0) | list }}
+  loop_control:
+    label: '{{ item.item.item.item.selector }}._domainkey.{{ item.item.item.item.domain | lower }}'
+  vars:
+    # The base64 lines between the PEM markers; the text form follows them
+    __rspamd_pubkey: >-
+      {{ item.stdout_lines[1 : item.stdout_lines.index('-----END PUBLIC KEY-----')] | map('trim') | join('') }}

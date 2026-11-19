@@ -1,0 +1,13 @@
+---
+# The daemon reload makes a drop-in written in this run take effect before
+# the first start: a host where the package did not start the service (EL,
+# Arch Linux, policy-rc.d) starts it here with the new valkey.conf, and on
+# Debian a socket group needs the drop-in at that start. Check mode on a
+# new host has not installed the unit.
+- name: Service | Manage Valkey service
+  ansible.builtin.systemd_service:
+    name: '{{ __valkey_service_name }}'
+    enabled: "{{ valkey_service_enabled | bool }}"
+    state: "{{ valkey_service_enabled | bool | ternary('started', 'stopped') }}"
+    daemon_reload: true
+  when: not __valkey_check_mode_install | default(false) | bool
