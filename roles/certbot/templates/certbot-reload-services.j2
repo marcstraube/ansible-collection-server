@@ -1,0 +1,123 @@
+#!/bin/bash
+{{ ansible_managed | comment }}
+#
+# Reloads the services that read certificates from certbot. The renewal unit
+# passes this script to `certbot renew` as --post-hook, so certbot runs it
+# once per renewal run and only when it attempted a renewal; the role's
+# 'Reload cert services' handler runs it after an issuance in a play.
+#
+# Each running service is reloaded after its configuration check passed and
+# is never restarted: a broken configuration keeps the service running on the
+# old one. A stopped service is skipped, it reads the new certificate when it
+# starts; a unit that does not exist is an error. Every service is tried; the
+# script exits non-zero when a check or a reload failed.
+#
+# A failure leaves the marker {{ __certbot_reload_marker }}. With --retry
+# (the retry timer or cron job) the script runs only while the marker exists,
+# and a run without failures removes it. Runs are serialized with a lock in
+# the marker directory, so a concurrent run cannot clear a fresh marker.
+#
+# Messages go to stdout/stderr and to the journal
+# (journalctl -t certbot-reload-services), as certbot keeps the output of a
+# hook out of the journal of the renewal unit under --quiet.
+
+set -u
+
+# cron runs jobs with PATH=/usr/bin:/bin; the checks live in sbin
+export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+
+readonly TAG='certbot-reload-services'
+readonly MARKER_DIR='{{ __certbot_reload_marker_dir }}'
+readonly MARKER='{{ __certbot_reload_marker }}'
+rc=0
+
+log() {
+    local priority=$1
+    shift
+    if [[ ${priority} == 'err' || ${priority} == 'warning' ]]; then
+        echo "${TAG}: $*" >&2
+    else
+        echo "${TAG}: $*"
+    fi
+    logger -t "${TAG}" -p "daemon.${priority}" -- "$*"
+}
+
+# Configuration check of the services the role knows; others have none
+check_config() {
+    case "${1%.service}" in
+        apache2 | httpd) apachectl configtest ;;
+        nginx) nginx -t -q ;;
+        postfix) postfix check ;;
+        dovecot) doveconf -n > /dev/null ;;
+        *) return 0 ;;
+    esac
+}
+
+reload_service() {
+    local service=$1
+    local output
+
+    local load_state
+
+    load_state=$(systemctl show -p LoadState --value "${service}")
+    case "${load_state}" in
+        loaded | masked) ;;
+        not-found)
+            log err "${service}: unit not found, not reloaded"
+            return 1
+            ;;
+        *)
+            log err "${service}: unit load state '${load_state}', not reloaded"
+            return 1
+            ;;
+    esac
+    if ! systemctl is-active --quiet "${service}"; then
+        log warning "${service} is not active, skipped"
+        return 0
+    fi
+    if ! output=$(check_config "${service}" 2>&1); then
+        log err "${service}: configuration check failed, not reloaded: ${output}"
+        return 1
+    fi
+    if ! output=$(systemctl reload "${service}" 2>&1); then
+        log err "${service}: reload failed: ${output}"
+        return 1
+    fi
+    log info "${service} reloaded"
+    return 0
+}
+
+if ! install -d -m 0700 -- "${MARKER_DIR}" || ! exec 9> "${MARKER_DIR}/lock"; then
+    log err "cannot open the lock in ${MARKER_DIR}"
+    exit 1
+fi
+if ! flock 9; then
+    log err "cannot take the lock in ${MARKER_DIR}"
+    exit 1
+fi
+
+if [[ ${1:-} == '--retry' ]]; then
+    if [[ ! -e ${MARKER} ]]; then
+        exit 0
+    fi
+    log notice 'retrying the reload that failed before'
+fi
+
+{% for service in __certbot_reload_services | unique %}
+reload_service {{ service | quote }} || rc=1
+{% endfor %}
+
+if (( rc == 0 )); then
+    if [[ -e ${MARKER} ]]; then
+        rm -f -- "${MARKER}"
+        log notice 'all services reloaded, retry marker removed'
+    fi
+else
+    if ! touch -- "${MARKER}"; then
+        log err "cannot write the retry marker ${MARKER}"
+    else
+        log err "reload failed, retry pending (${MARKER})"
+    fi
+fi
+
+exit "${rc}"

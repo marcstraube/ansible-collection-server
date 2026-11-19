@@ -3,7 +3,15 @@
   hosts: all
   gather_facts: true
 
+  vars:
+    __verify_script: '/usr/local/sbin/certbot-reload-services'
+    __verify_hook_arg: '--post-hook=/usr/local/sbin/certbot-reload-services'
+
   tasks:
+    - name: Verify | Load the OS variables of the role
+      ansible.builtin.include_vars:
+        file: '{{ playbook_dir }}/../../vars/{{ ansible_facts["os_family"] }}.yml'
+
     #
     # Package Verification
     #
@@ -112,23 +120,6 @@
         success_msg: 'cli.ini contains expected settings'
 
     #
-    # Deploy Hook
-    #
-
-    - name: Verify | Check deploy hook
-      ansible.builtin.stat:
-        path: /etc/letsencrypt/renewal-hooks/deploy/global-deploy-hook.sh
-      register: __certbot_deploy_hook
-
-    - name: Verify | Assert deploy hook exists
-      ansible.builtin.assert:
-        that:
-          - __certbot_deploy_hook.stat.exists
-          - __certbot_deploy_hook.stat.mode == '0755'
-        fail_msg: 'Deploy hook does not exist or has wrong permissions'
-        success_msg: 'Deploy hook exists with correct permissions'
-
-    #
     # Monitoring Script
     #
 
@@ -148,9 +139,9 @@
     #
     # Functional Tests
     #
-    # NOTE: Debian 12 certbot 2.1.0 crashes due to pyOpenSSL/OpenSSL
-    # incompatibility (X509_V_FLAG_NOTIFY_POLICY removed in newer OpenSSL).
-    # Skip functional tests on Debian.
+    # Not on Debian: the test image installs ansible-core with pip, and its
+    # cryptography in /usr/local shadows the one python3-openssl needs, so
+    # certbot cannot start there.
 
     - name: Verify | Test certbot version
       ansible.builtin.command: certbot --version
@@ -209,3 +200,462 @@
           - __certbot_cli_ini.stat.mode == '0644'
         fail_msg: 'cli.ini has incorrect permissions'
         success_msg: 'cli.ini has correct permissions'
+
+    #
+    # Service Reload Script
+    #
+
+    - name: Verify | Check the service reload script
+      ansible.builtin.stat:
+        path: '{{ __verify_script }}'
+      register: __verify_script_stat
+
+    - name: Verify | Assert the service reload script is executable by root only
+      ansible.builtin.assert:
+        that:
+          - __verify_script_stat.stat.exists
+          - __verify_script_stat.stat.mode == '0755'
+          - __verify_script_stat.stat.pw_name == 'root'
+          - __verify_script_stat.stat.gr_name == 'root'
+        fail_msg: 'The service reload script is missing or has wrong permissions'
+        quiet: true
+
+    - name: Verify | Read the service reload script
+      ansible.builtin.slurp:
+        src: '{{ __verify_script }}'
+      register: __verify_script_content
+
+    - name: Verify | Assert the script reloads the configured services and never restarts
+      ansible.builtin.assert:
+        that:
+          - "'reload_service molecule-stopped.service ||' in __verify_content"
+          - "'dovecot) doveconf -n > /dev/null ;;' in __verify_content"
+          - "'reload_service nginx ||' in __verify_content"
+          - "'reload_service molecule-reload-test.service ||' in __verify_content"
+          - "'reload_service postfix' not in __verify_content"
+          - "'nginx) nginx -t -q ;;' in __verify_content"
+          - "'systemctl reload \"${service}\"' in __verify_content"
+          - "'systemctl restart' not in __verify_content"
+          - "'try-reload-or-restart' not in __verify_content"
+          - "'|| true' not in __verify_content"
+          - "'export PATH=' in __verify_content"
+        fail_msg: 'The service reload script has unexpected content'
+        quiet: true
+      vars:
+        __verify_content: '{{ __verify_script_content.content | b64decode }}'
+
+    - name: Verify | Find files in the renewal deploy hook directory
+      ansible.builtin.find:
+        paths: /etc/letsencrypt/renewal-hooks/deploy
+        hidden: true
+        file_type: any
+      register: __verify_deploy_hooks
+
+    # prepare.yml plants the deploy hook of earlier role versions
+    - name: Verify | Assert the renewal deploy hook directory is empty
+      ansible.builtin.assert:
+        that:
+          - __verify_deploy_hooks.matched == 0
+        fail_msg: >-
+          Unexpected deploy hooks: {{ __verify_deploy_hooks.files | map(attribute='path') | list }}
+        quiet: true
+
+    #
+    # Post Hook of the Renewal Unit
+    #
+
+    - name: Verify | Read the state of the renewal unit
+      ansible.builtin.systemd_service:
+        name: '{{ __certbot_service_name }}'
+      register: __verify_renew_unit
+
+    - name: Verify | Read the packaged renewal unit
+      ansible.builtin.slurp:
+        src: '{{ __verify_renew_unit.status.FragmentPath }}'
+      register: __verify_unit
+
+    # Debian and Arch Linux: the drop-in replaces ExecStart with the packaged
+    # renew command plus the post hook. The packaged command must still be
+    # the one in the vars of the role, or the drop-in drops a change of it.
+    - name: Verify | Assert the drop-in adds the post hook to the packaged renew command
+      ansible.builtin.assert:
+        that:
+          - ('ExecStart=' ~ __certbot_renew_command) in (__verify_unit.content | b64decode).splitlines()
+          - __verify_renew_unit.status.ExecStart.count('argv[]=') == 1
+          - >-
+            ('argv[]=' ~ __certbot_renew_command ~ ' ' ~ __verify_hook_arg ~ ' ;')
+            in __verify_renew_unit.status.ExecStart
+        fail_msg: >-
+          ExecStart: {{ __verify_renew_unit.status.ExecStart }}
+        quiet: true
+      when: ansible_facts['os_family'] in ['Archlinux', 'Debian']
+
+    - name: Verify | Check the post hook drop-in
+      ansible.builtin.stat:
+        path: '/etc/systemd/system/{{ __certbot_service_name }}.d/post-hook.conf'
+      register: __verify_dropin
+      when: ansible_facts['os_family'] in ['Archlinux', 'Debian']
+
+    - name: Verify | Assert the post hook drop-in permissions
+      ansible.builtin.assert:
+        that:
+          - __verify_dropin.stat.exists
+          - __verify_dropin.stat.mode == '0644'
+        quiet: true
+      when: ansible_facts['os_family'] in ['Archlinux', 'Debian']
+
+    - name: Verify | Read the environment file of the renewal unit (EL)
+      ansible.builtin.slurp:
+        src: /etc/sysconfig/certbot
+      register: __verify_sysconfig
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    # EL: the packaged unit passes $POST_HOOK; the role only changes that line
+    # and leaves the rest of the packaged file as it is
+    - name: Verify | Assert POST_HOOK carries the post hook as one word (EL)
+      ansible.builtin.assert:
+        that:
+          - "'$POST_HOOK' in __verify_renew_unit.status.ExecStart"
+          - ('POST_HOOK="' ~ __verify_hook_arg ~ '"') in __verify_lines
+          - __verify_lines | select('match', '^POST_HOOK=') | list | length == 1
+          - "'PRE_HOOK=\"\"' in __verify_lines"
+          - "'DEPLOY_HOOK=\"\"' in __verify_lines"
+          - "'CERTBOT_ARGS=\"\"' in __verify_lines"
+          - "'# POST_HOOK=\"--post-hook \\'systemctl restart httpd\\'\"' in __verify_lines"
+        fail_msg: >-
+          /etc/sysconfig/certbot: {{ __verify_lines }}
+        quiet: true
+      vars:
+        __verify_lines: '{{ (__verify_sysconfig.content | b64decode).splitlines() }}'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Verify | Read the reload count of the test unit before the renewal run
+      ansible.builtin.command:
+        cmd: cat /run/molecule-reload-test.log
+      register: __verify_reloads_before_renew
+      changed_when: false
+      failed_when: false
+
+    # No certificate is due, so certbot attempts no renewal and must not run
+    # the post hook; the run still proves that certbot accepts the argument
+    # and finds the script (certbot validates hooks before it starts).
+    # Not on Debian, where certbot cannot start in the test image (see the
+    # functional tests above). The ExecStart check above covers Debian.
+    - name: Verify | Run the renewal unit
+      ansible.builtin.systemd_service:
+        name: '{{ __certbot_service_name }}'
+        state: started
+      changed_when: false
+      when: ansible_facts['os_family'] != 'Debian'
+
+    - name: Verify | Read the result of the renewal unit
+      ansible.builtin.systemd_service:
+        name: '{{ __certbot_service_name }}'
+      register: __verify_renew_result
+      when: ansible_facts['os_family'] != 'Debian'
+
+    - name: Verify | Read the arguments certbot received
+      ansible.builtin.command:
+        cmd: grep -m1 'Arguments:' /var/log/letsencrypt/letsencrypt.log
+      register: __verify_renew_args
+      changed_when: false
+      when: ansible_facts['os_family'] != 'Debian'
+
+    - name: Verify | Read the reload count of the test unit after the renewal run
+      ansible.builtin.command:
+        cmd: cat /run/molecule-reload-test.log
+      register: __verify_reloads_after_renew
+      changed_when: false
+      failed_when: false
+
+    # systemd's argv as certbot logs it (a Python list): the post hook must be
+    # one element, not split at a space or wrapped in quotes from the value
+    - name: Verify | Assert the renewal unit passes the post hook as one argument
+      ansible.builtin.assert:
+        that:
+          - __verify_renew_result.status.Result == 'success'
+          - __verify_renew_args.stdout is search("[\\[ ]'" ~ (__verify_hook_arg | regex_escape) ~ "'[,\\]]")
+          - "'\\'--post-hook\\'' not in __verify_renew_args.stdout"
+          - __verify_reloads_after_renew.stdout_lines | length == __verify_reloads_before_renew.stdout_lines | length
+        fail_msg: >-
+          Result {{ __verify_renew_result.status.Result }}, {{ __verify_renew_args.stdout }}
+        quiet: true
+      when: ansible_facts['os_family'] != 'Debian'
+
+    #
+    # Service Reload
+    #
+
+    - name: Verify | Read the nginx state before the reload
+      ansible.builtin.systemd_service:
+        name: nginx
+      register: __verify_nginx_before
+
+    - name: Verify | Read the nginx worker PIDs before the reload
+      ansible.builtin.command:
+        cmd: 'pgrep -P {{ __verify_nginx_before.status.MainPID }}'
+      register: __verify_nginx_workers_before
+      changed_when: false
+
+    # With cron's PATH: the script sets its own, nginx lives in sbin
+    - name: Verify | Run the service reload script with the PATH of cron
+      ansible.builtin.command:
+        argv:
+          - env
+          - '-i'
+          - 'PATH=/usr/bin:/bin'
+          - '{{ __verify_script }}'
+      register: __verify_reload
+      changed_when: false
+
+    - name: Verify | Assert the script reloaded the running services and skipped the stopped one
+      ansible.builtin.assert:
+        that:
+          - "'certbot-reload-services: nginx reloaded' in __verify_reload.stdout_lines"
+          - "'certbot-reload-services: molecule-reload-test.service reloaded' in __verify_reload.stdout_lines"
+          - "'certbot-reload-services: molecule-stopped.service is not active, skipped' in __verify_reload.stderr_lines"
+        fail_msg: '{{ __verify_reload.stdout_lines + __verify_reload.stderr_lines }}'
+        quiet: true
+
+    # A reload replaces the workers under the same master; a restart would
+    # replace the master
+    - name: Verify | Wait for new nginx workers under the same master
+      ansible.builtin.command:
+        cmd: 'pgrep -P {{ __verify_nginx_before.status.MainPID }}'
+      register: __verify_nginx_workers_after
+      changed_when: false
+      until: >-
+        __verify_nginx_workers_after.rc == 0 and
+        (__verify_nginx_workers_after.stdout_lines
+         | intersect(__verify_nginx_workers_before.stdout_lines) | length == 0)
+      retries: 10
+      delay: 1
+
+    - name: Verify | Read the nginx state after the reload
+      ansible.builtin.systemd_service:
+        name: nginx
+      register: __verify_nginx_after
+
+    - name: Verify | Read the reload count of the test unit after the script
+      ansible.builtin.command:
+        cmd: cat /run/molecule-reload-test.log
+      register: __verify_reloads_after_script
+      changed_when: false
+
+    - name: Verify | Assert nginx was reloaded, not restarted, and the test unit once
+      ansible.builtin.assert:
+        that:
+          - __verify_nginx_after.status.MainPID == __verify_nginx_before.status.MainPID
+          - >-
+            __verify_reloads_after_script.stdout_lines | length
+            == __verify_reloads_after_renew.stdout_lines | length + 1
+        quiet: true
+
+    - name: Verify | Run the script with a broken nginx configuration
+      block:
+        - name: Verify | Break the nginx configuration
+          ansible.builtin.copy:
+            content: "this_is_not_a_directive;\n"
+            dest: /etc/nginx/molecule.d/broken.conf
+            owner: root
+            group: root
+            mode: '0644'
+
+        - name: Verify | Run the service reload script against the broken configuration
+          ansible.builtin.command:
+            cmd: '{{ __verify_script }}'
+          register: __verify_reload_broken
+          changed_when: false
+          failed_when: false
+
+        - name: Verify | Read the nginx state after the failed check
+          ansible.builtin.systemd_service:
+            name: nginx
+          register: __verify_nginx_broken
+
+        - name: Verify | Read the reload count of the test unit after the failed check
+          ansible.builtin.command:
+            cmd: cat /run/molecule-reload-test.log
+          register: __verify_reloads_after_broken
+          changed_when: false
+
+        - name: Verify | Read the journal of the service reload script
+          ansible.builtin.command:
+            cmd: journalctl -t certbot-reload-services --no-pager -o cat
+          register: __verify_reload_journal
+          changed_when: false
+
+        # The script exits non-zero, keeps nginx running on the old
+        # configuration, still reloads the next service and logs the failure
+        - name: Verify | Assert the failed check left nginx running and failed the script
+          ansible.builtin.assert:
+            that:
+              - __verify_reload_broken.rc == 1
+              - __verify_reload_broken.stderr is search('nginx[:] configuration check failed, not reloaded')
+              - __verify_nginx_broken.status.ActiveState == 'active'
+              - __verify_nginx_broken.status.MainPID == __verify_nginx_before.status.MainPID
+              - >-
+                __verify_reloads_after_broken.stdout_lines | length
+                == __verify_reloads_after_script.stdout_lines | length + 1
+              - __verify_reload_journal.stdout is search('nginx[:] configuration check failed')
+              - __verify_reload_broken.stderr is search('retry pending')
+            fail_msg: >-
+              rc {{ __verify_reload_broken.rc }}, stderr {{ __verify_reload_broken.stderr }},
+              nginx {{ __verify_nginx_broken.status.ActiveState }}
+            quiet: true
+
+      always:
+        - name: Verify | Remove the broken nginx configuration
+          ansible.builtin.file:
+            path: /etc/nginx/molecule.d/broken.conf
+            state: absent
+
+    #
+    # Retry of a Failed Reload
+    #
+
+    - name: Verify | Check the retry marker of the failed reload
+      ansible.builtin.stat:
+        path: /var/lib/certbot-reload-services/pending
+      register: __verify_marker_failed
+
+    - name: Verify | Check the retry marker directory
+      ansible.builtin.stat:
+        path: /var/lib/certbot-reload-services
+      register: __verify_marker_dir
+
+    - name: Verify | Read the reload retry timer
+      ansible.builtin.systemd_service:
+        name: certbot-reload-retry.timer
+      register: __verify_retry_timer
+
+    - name: Verify | Assert the failed reload left the marker and the retry timer runs
+      ansible.builtin.assert:
+        that:
+          - __verify_marker_failed.stat.exists
+          - __verify_marker_dir.stat.mode == '0700'
+          - __verify_marker_dir.stat.pw_name == 'root'
+          - __verify_retry_timer.status.ActiveState == 'active'
+          - __verify_retry_timer.status.UnitFileState == 'enabled'
+        quiet: true
+
+    - name: Verify | Read the nginx state before the retry
+      ansible.builtin.systemd_service:
+        name: nginx
+      register: __verify_nginx_retry_before
+
+    - name: Verify | Read the nginx worker PIDs before the retry
+      ansible.builtin.command:
+        cmd: 'pgrep -P {{ __verify_nginx_retry_before.status.MainPID }}'
+      register: __verify_nginx_workers_retry_before
+      changed_when: false
+
+    - name: Verify | Record the time before the retry
+      ansible.builtin.command:
+        cmd: date +%s
+      register: __verify_retry_start
+      changed_when: false
+
+    # The configuration is fixed again (always above), so the retry succeeds
+    - name: Verify | Run the reload retry service with the marker
+      ansible.builtin.systemd_service:
+        name: certbot-reload-retry.service
+        state: started
+      changed_when: false
+
+    - name: Verify | Wait for new nginx workers after the retry
+      ansible.builtin.command:
+        cmd: 'pgrep -P {{ __verify_nginx_retry_before.status.MainPID }}'
+      register: __verify_nginx_workers_retry_after
+      changed_when: false
+      until: >-
+        __verify_nginx_workers_retry_after.rc == 0 and
+        (__verify_nginx_workers_retry_after.stdout_lines
+         | intersect(__verify_nginx_workers_retry_before.stdout_lines) | length == 0)
+      retries: 10
+      delay: 1
+
+    - name: Verify | Read the nginx state after the retry
+      ansible.builtin.systemd_service:
+        name: nginx
+      register: __verify_nginx_retry_after
+
+    - name: Verify | Check the retry marker after the retry
+      ansible.builtin.stat:
+        path: /var/lib/certbot-reload-services/pending
+      register: __verify_marker_retried
+
+    - name: Verify | Read the reload count of the test unit after the retry
+      ansible.builtin.command:
+        cmd: cat /run/molecule-reload-test.log
+      register: __verify_reloads_after_retry
+      changed_when: false
+
+    - name: Verify | Read the journal of the retry
+      ansible.builtin.command:
+        cmd: 'journalctl -t certbot-reload-services --since @{{ __verify_retry_start.stdout }} --no-pager -o cat'
+      register: __verify_retry_journal
+      changed_when: false
+
+    - name: Verify | Assert the retry reloaded without a restart and cleared the marker
+      ansible.builtin.assert:
+        that:
+          - __verify_nginx_retry_after.status.MainPID == __verify_nginx_retry_before.status.MainPID
+          - not __verify_marker_retried.stat.exists
+          - >-
+            __verify_reloads_after_retry.stdout_lines | length
+            == __verify_reloads_after_broken.stdout_lines | length + 1
+          # once: the retry service discards the output the script also logs
+          - >-
+            __verify_retry_journal.stdout_lines
+            | select('equalto', 'retrying the reload that failed before') | list | length == 1
+          - __verify_retry_journal.stdout is search('retry marker removed')
+        quiet: true
+
+    - name: Verify | Run the reload retry service without the marker
+      ansible.builtin.systemd_service:
+        name: certbot-reload-retry.service
+        state: started
+      changed_when: false
+
+    - name: Verify | Read the reload retry service
+      ansible.builtin.systemd_service:
+        name: certbot-reload-retry.service
+      register: __verify_retry_service
+
+    - name: Verify | Read the reload count of the test unit after the idle retry
+      ansible.builtin.command:
+        cmd: cat /run/molecule-reload-test.log
+      register: __verify_reloads_after_idle_retry
+      changed_when: false
+
+    - name: Verify | Assert the retry service does nothing without the marker
+      ansible.builtin.assert:
+        that:
+          - __verify_retry_service.status.ConditionResult == 'no'
+          - >-
+            __verify_reloads_after_idle_retry.stdout_lines | length
+            == __verify_reloads_after_retry.stdout_lines | length
+        quiet: true
+
+    # Runs are serialized: a second run waits for the lock of the first
+    - name: Verify | Run the script while another run holds the lock
+      ansible.builtin.shell:
+        cmd: |
+          flock /var/lib/certbot-reload-services/lock sleep 3 &
+          sleep 0.5
+          start=$(date +%s%N)
+          /usr/local/sbin/certbot-reload-services > /dev/null
+          end=$(date +%s%N)
+          wait
+          echo $(( (end - start) / 1000000 ))
+        executable: /bin/bash
+      register: __verify_lock_wait
+      changed_when: false
+
+    - name: Verify | Assert the second run waited for the lock
+      ansible.builtin.assert:
+        that:
+          - __verify_lock_wait.stdout | int >= 2000
+        fail_msg: 'The second run waited {{ __verify_lock_wait.stdout }} ms'
+        quiet: true

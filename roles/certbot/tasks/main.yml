@@ -28,6 +28,31 @@
   tags:
     - always
 
+# The renew command of the renewal unit passes the service reload script as
+# --post-hook. A post hook on the command line replaces the one certbot saved
+# for a certificate at issuance, and certbot then saves it in place of the
+# certificate's own, so a per-certificate post_hook would never run again.
+- name: Main | Assert no certificate sets its own post hook next to the reload services
+  ansible.builtin.assert:
+    that:
+      - __certbot_reload_services | length == 0 or __certbot_certificate_post_hooks | length == 0
+    fail_msg: >-
+      certbot_certificates sets post_hook while services are reloaded after
+      renewal (certbot_*_enabled, certbot_reload_services). The post hook of
+      the renewal run replaces a certificate's own post hook. Move the command
+      to certbot_post_hook, which certbot runs in addition.
+    quiet: true
+  when: certbot_enabled | bool
+  tags:
+    - always
+
+- name: Main | Import preflight tasks
+  ansible.builtin.import_tasks: preflight.yml
+  when: certbot_enabled | bool
+  tags:
+    - certbot
+    - certbot:renewal
+
 - name: Main | Import installation tasks
   ansible.builtin.import_tasks: install.yml
   when: certbot_enabled | bool

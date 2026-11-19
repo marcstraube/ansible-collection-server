@@ -1,0 +1,99 @@
+---
+#
+# Post Hook of the Renewal Unit (EL)
+#
+# The role owns POST_HOOK in the packaged environment file only while it holds
+# the role's value or nothing. A value of another owner would be replaced by
+# the reload script, so the run fails before any change.
+#
+
+- name: Preflight | Check the environment file of the renewal unit (EL)
+  ansible.builtin.stat:
+    path: '{{ __certbot_sysconfig_file }}'
+  register: __certbot_sysconfig_stat
+  when:
+    - __certbot_sysconfig_file | default('') | length > 0
+    - __certbot_reload_services | length > 0
+
+- name: Preflight | Read the environment file of the renewal unit (EL)
+  ansible.builtin.slurp:
+    src: '{{ __certbot_sysconfig_file }}'
+  register: __certbot_sysconfig_content
+  when:
+    - __certbot_sysconfig_stat is not skipped
+    - __certbot_sysconfig_stat.stat.exists
+
+# systemd uses the last assignment and lineinfile changes the last matching
+# line, so every POST_HOOK line must be empty or the role's
+- name: Preflight | Assert POST_HOOK holds no value of another owner (EL)
+  ansible.builtin.assert:
+    that:
+      - __certbot_post_hook_foreign | length == 0
+    fail_msg: >-
+      POST_HOOK in {{ __certbot_sysconfig_file }} is set to
+      {{ __certbot_post_hook_foreign | join(', ') }}, which the reload of the
+      certificate services would replace. Move the command to
+      certbot_post_hook (or remove it) and leave a single POST_HOOK="" there.
+    quiet: true
+  vars:
+    __certbot_post_hook_foreign: >-
+      {{ (__certbot_sysconfig_content.content | b64decode).splitlines()
+         | select('match', '^POST_HOOK=')
+         | map('regex_replace', '^POST_HOOK=', '')
+         | map('trim')
+         | map('regex_replace', '^"(.*)"$', '\1')
+         | map('regex_replace', "^'(.*)'$", '\1')
+         | map('trim')
+         | reject('in', ['', __certbot_post_hook_arg])
+         | list }}
+  when: __certbot_sysconfig_content is not skipped
+
+#
+# Post Hooks Saved for Certificates
+#
+# The post hook on the renew command replaces the post hook certbot saved for
+# a certificate on its next renewal. Read only; the files stay as they are.
+#
+
+# Top-level renewal configurations only, as certbot reads them, including
+# symlinks; grep follows them and skips directories
+- name: Preflight | Find the renewal configurations
+  ansible.builtin.find:
+    paths: '{{ certbot_config_dir }}/renewal'
+    patterns: '*.conf'
+    file_type: any
+  register: __certbot_renewal_confs
+  when: __certbot_reload_services | length > 0
+
+- name: Preflight | Find post hooks saved for certificates
+  ansible.builtin.command:
+    argv: >-
+      {{ ['grep', '-H', '-s', '-d', 'skip', '-E', '^[[:space:]]*post_hook[[:space:]]*=']
+         + (__certbot_renewal_confs.files | rejectattr('isdir') | map(attribute='path') | sort | list) }}
+  register: __certbot_saved_post_hooks
+  changed_when: false
+  check_mode: false
+  # grep exits with 1 when no file has a post hook, and with 2 and no message
+  # (-s) for a dangling symlink, which only this check skips
+  failed_when:
+    - __certbot_saved_post_hooks.rc > 1
+    - __certbot_saved_post_hooks.stderr | length > 0
+  when:
+    - __certbot_renewal_confs is not skipped
+    - __certbot_renewal_confs.files | rejectattr('isdir') | list | length > 0
+
+- name: Preflight | Warn about saved post hooks the renewal run replaces
+  ansible.builtin.debug:
+    msg: >-
+      These certificates have a post hook of their own, which the post hook of
+      the renewal run ({{ __certbot_reload_script }}) replaces on their next
+      renewal: {{ __certbot_foreign_post_hooks }}. Move the commands to
+      certbot_post_hook.
+  vars:
+    __certbot_foreign_post_hooks: >-
+      {{ __certbot_saved_post_hooks.stdout_lines
+         | reject('search', '=\s*' ~ (__certbot_reload_script | regex_escape) ~ '\s*$')
+         | list }}
+  when:
+    - __certbot_saved_post_hooks is not skipped
+    - __certbot_foreign_post_hooks | length > 0
