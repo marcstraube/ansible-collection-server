@@ -1,0 +1,108 @@
+#!/bin/bash
+{{ ansible_managed | comment }}
+#
+# Writes a compressed dump of the Roundcube database
+{% if roundcube_db_type == 'sqlite' %}
+# {{ roundcube_db_path }} (SQLite) to {{ roundcube_backup_dir }}, named
+# roundcube-<release>-<YYYYmmddTHHMMSS>.db.gz. The role runs it before the
+{% else %}
+# {{ roundcube_db_name }} ({{ roundcube_db_type }} on this host) to
+# {{ roundcube_backup_dir }}, named
+# roundcube-<release>-<YYYYmmddTHHMMSS>.sql.gz. The role runs it before the
+{% endif %}
+# schema upgrade of a new release; <release> is the release the schema in
+# the dump belongs to. With --label it writes a dump of its own kind,
+# roundcube-manual-<label>-<YYYYmmddTHHMMSS>, e.g. before a host backup.
+#
+# Usage: roundcube-backup <release>
+#        roundcube-backup --label <label>
+#
+# The retention is count-based per kind: pre-update dumps and manual dumps
+# rotate separately, so a nightly manual dump never removes the dump of an
+# update. The newest dumps of the kind stay, the one just written among
+# them ({{ roundcube_backup_update_keep | int }} in all); a failing dump removes nothing.
+
+set -euo pipefail
+umask 077
+
+usage() {
+    echo "Usage: roundcube-backup <release> | roundcube-backup --label <label>" >&2
+    exit 2
+}
+
+if [ "$#" -eq 2 ] && [ "$1" = '--label' ]; then
+    KIND='manual'
+    NAME="manual-$2"
+    LABEL="$2"
+elif [ "$#" -eq 1 ] && [[ "$1" != manual* ]]; then
+    KIND='update'
+    NAME="$1"
+    LABEL="$1"
+else
+    usage
+fi
+[[ "${LABEL}" =~ ^[A-Za-z0-9.-]+$ ]] || usage
+
+BACKUP_DIR="{{ roundcube_backup_dir }}"
+BACKUP_DIR="${BACKUP_DIR%/}"
+KEEP={{ roundcube_backup_update_keep | int }}
+{% if roundcube_db_type == 'sqlite' %}
+SUFFIX='db.gz'
+{% else %}
+SUFFIX='sql.gz'
+{% endif %}
+
+DUMP="${BACKUP_DIR}/roundcube-${NAME}-$(date +%Y%m%dT%H%M%S).${SUFFIX}"
+mkdir -p "${BACKUP_DIR}"
+
+# A failed dump leaves no partial file that the rotation would count
+PARTIAL="${DUMP}.partial"
+COPY="${BACKUP_DIR}/.roundcube-copy.db"
+trap 'rm -f -- "${PARTIAL}" "${COPY}"' EXIT
+
+echo "Dumping the Roundcube database to ${DUMP}"
+{% if roundcube_db_type == 'postgresql' %}
+# pg_dump runs as the postgres user through the socket of the server
+# (peer authentication); the socket file is named after the port. The
+# redirect keeps the dump owned by root.
+runuser -u postgres -- pg_dump \
+{% if __roundcube_pg_socket_dir | length > 0 %}
+    --host={{ __roundcube_pg_socket_dir | quote }} \
+{% endif %}
+    --port={{ roundcube_db_port | int }} \
+    --dbname={{ roundcube_db_name | quote }} \
+    | gzip > "${PARTIAL}"
+{% elif roundcube_db_type == 'mariadb' %}
+# root logs in through the socket (unix_socket authentication)
+mariadb-dump --protocol=socket --socket={{ __roundcube_mariadb_login_socket | quote }} \
+    --single-transaction --routines --triggers --events \
+    {{ roundcube_db_name | quote }} \
+    | gzip > "${PARTIAL}"
+{% else %}
+# A consistent copy through SQLite itself (VACUUM INTO), also while
+# PHP-FPM writes to the file
+rm -f -- "${COPY}"
+{{ roundcube_php_cli | quote }} -r '$db = new PDO("sqlite:" . $argv[1]); $db->exec("VACUUM INTO " . $db->quote($argv[2]));' \
+    {{ roundcube_db_path | quote }} "${COPY}"
+gzip -c "${COPY}" > "${PARTIAL}"
+{% endif %}
+mv -f -- "${PARTIAL}" "${DUMP}"
+
+# Rotation per kind: dumps newest first, without the dump just written;
+# everything beyond the retention is removed
+if [ "${KIND}" = 'manual' ]; then
+    SELECT=(-name "roundcube-manual-*.${SUFFIX}")
+else
+    SELECT=(-name "roundcube-*.${SUFFIX}" ! -name "roundcube-manual-*")
+fi
+find "${BACKUP_DIR}" -mindepth 1 -maxdepth 1 -type f "${SELECT[@]}" ! -path "${DUMP}" \
+        -printf '%T@ %p\n' \
+    | sort -rn \
+    | tail -n +$((KEEP > 1 ? KEEP : 1)) \
+    | cut -d' ' -f2- \
+    | while IFS= read -r OLD_DUMP; do
+        echo "Removing ${OLD_DUMP} beyond the retention of ${KEEP}"
+        rm -f -- "${OLD_DUMP}"
+    done
+
+echo "Dump ${DUMP} completed: $(date)"

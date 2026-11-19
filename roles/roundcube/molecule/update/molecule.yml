@@ -1,0 +1,73 @@
+---
+# Update scenario: prepare sets up the environment of the shared scenarios
+# and installs the previous release (1.6, the LTS series that Debian 13 and
+# EPEL 10 ship) with the role; converge updates to the role default, which
+# upgrades the schema after the pre-update dump. Verify checks the release
+# switch, the kept previous release, the schema version, the unchanged
+# configuration and the logins. Side effect rolls back as the README
+# describes: the role refuses the previous release while the schema is
+# newer, then the dump is restored and the role switches back.
+driver:
+  name: podman
+platforms:
+  - name: roundcube-update-debian-trixie
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: prepare.yml
+    converge: ../shared/converge.yml
+    verify: verify.yml
+    side_effect: side_effect.yml
+  inventory:
+    group_vars:
+      all:
+        # Shared by prepare, converge, verify and side_effect; the test data
+        # is in ../shared/vars/main.yml
+        __molecule_db_type: 'postgresql'
+        dovecot_db_host: '127.0.0.1'
+        roundcube_password_db_host: '127.0.0.1'
+        roundcube_backup_update_keep: 2
+        # The SQLite step of side_effect
+        __molecule_php_extra_extensions: ['pdo_sqlite']
+        # Release installed by prepare; converge updates to the role default.
+        # The version bump workflow leaves it pinned, so the scenario keeps
+        # testing a schema upgrade (prepare asserts it is older).
+        __molecule_previous_version: '1.6.21'
+        __molecule_previous_checksum: 'sha256:31b42871e7237c2aa30e4bfaab5e943401cc42e8a4948653abe801504855d5e2'
+        postgresql_enabled: true
+        postgresql_ssl_enabled: false
+        postgresql_firewalld_enabled: false
+        postgresql_shared_buffers: '64MB'
+        postgresql_effective_cache_size: '128MB'
+        postgresql_lc_messages: 'en_US.UTF-8'
+        postgresql_lc_monetary: 'en_US.UTF-8'
+        postgresql_lc_numeric: 'en_US.UTF-8'
+        postgresql_lc_time: 'en_US.UTF-8'
+    host_vars:
+      roundcube-update-debian-trixie:
+        ansible_python_interpreter: /usr/bin/python3
+  config_options:
+    defaults:
+      allow_broken_conditionals: true
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - check
+    - converge
+    - idempotence
+    - verify
+    - side_effect
+    - destroy

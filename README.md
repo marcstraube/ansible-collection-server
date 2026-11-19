@@ -53,6 +53,7 @@ for the base system (podman, pki, firewalld, fail2ban).
 | **dovecot**         | Dovecot 2.4: IMAP, LMTP, SASL, ManageSieve and shared mailboxes |
 | **postfix**         | Postfix MTA with PostfixAdmin lookups, Dovecot LMTP and SASL    |
 | **rspamd**          | rspamd mail filter: milter, DKIM/ARC signing, clamd, Valkey     |
+| **roundcube**       | Roundcube webmail with Sieve filters, sharing, password change  |
 | **mail_autoconfig** | Mail client autoconfiguration (Autoconfig, Autodiscover, Apple) |
 
 ### Applications
