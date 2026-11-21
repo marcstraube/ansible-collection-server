@@ -410,8 +410,9 @@
       {%- set ns = namespace(paths=[]) -%}
       {%- set kept = __rspamd_local_files | map(attribute='name') | list
                      + (rspamd_local_config.keys() | list) -%}
-      {%- set files = __rspamd_backups.files | selectattr('path', 'search', __rspamd_backup_regex) | list -%}
-      {%- for name in kept + __rspamd_extra_removed_names -%}
+      {%- set files = __rspamd_backups.files | default([])
+                     | selectattr('path', 'search', __rspamd_backup_regex) | list -%}
+      {%- for name in kept + (__rspamd_extra_removed_names | default([])) -%}
       {%- set own = files
                     | selectattr('path', 'match', (__rspamd_local_dir ~ '/' ~ name) | regex_escape
                                                    ~ __rspamd_backup_regex)
