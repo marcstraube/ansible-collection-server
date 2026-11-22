@@ -1,0 +1,146 @@
+---
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __prepare_packages:
+      # valkey-server creates the service user and group the test key
+      # belongs to
+      valkey_servers:
+        - systemd
+        - dbus
+        - procps
+        - openssl
+        - valkey-server
+      # valkey-cli comes with valkey-tools, without the server
+      valkey_clients:
+        - systemd
+        - dbus
+        - procps
+        - valkey-tools
+    __prepare_tls_dir: '/etc/molecule-tls'
+    __prepare_server: "{{ groups['valkey_servers'] | first }}"
+
+  tasks:
+    - name: Prepare | Update package cache
+      ansible.builtin.apt:
+        update_cache: true
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name: '{{ __prepare_packages[group_names | first] }}'
+        state: present
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Create the test certificate directory
+      ansible.builtin.file:
+        path: '{{ __prepare_tls_dir }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    #
+    # Test Certificates
+    #
+    # A test CA on the server signs the certificate for the container name,
+    # which the client resolves on the podman network. The key belongs to
+    # the group valkey: the server has no socket group, so the unit keeps
+    # PrivateUsers=true and only the service user's own group can read it
+    # (the role asserts that).
+    #
+
+    - name: Prepare | Create the test CA
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -newkey
+          - rsa:2048
+          - -nodes
+          - -days
+          - '30'
+          - -subj
+          - '/CN=Molecule Test CA'
+          - -keyout
+          - '{{ __prepare_tls_dir }}/ca.key'
+          - -out
+          - '{{ __prepare_tls_dir }}/ca.crt'
+        creates: '{{ __prepare_tls_dir }}/ca.crt'
+      when: inventory_hostname in groups['valkey_servers']
+
+    - name: Prepare | Create the server key and request
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -newkey
+          - rsa:2048
+          - -nodes
+          - -subj
+          - '/CN={{ inventory_hostname }}'
+          - -keyout
+          - '{{ __prepare_tls_dir }}/server.key'
+          - -out
+          - '{{ __prepare_tls_dir }}/server.csr'
+        creates: '{{ __prepare_tls_dir }}/server.csr'
+      when: inventory_hostname in groups['valkey_servers']
+
+    - name: Prepare | Write the server certificate extensions
+      ansible.builtin.copy:
+        content: "subjectAltName=DNS:{{ inventory_hostname }},DNS:localhost,IP:127.0.0.1\n"
+        dest: '{{ __prepare_tls_dir }}/server.ext'
+        owner: root
+        group: root
+        mode: '0644'
+      when: inventory_hostname in groups['valkey_servers']
+
+    - name: Prepare | Sign the server certificate
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -req
+          - -in
+          - '{{ __prepare_tls_dir }}/server.csr'
+          - -CA
+          - '{{ __prepare_tls_dir }}/ca.crt'
+          - -CAkey
+          - '{{ __prepare_tls_dir }}/ca.key'
+          - -CAcreateserial
+          - -days
+          - '30'
+          - -extfile
+          - '{{ __prepare_tls_dir }}/server.ext'
+          - -out
+          - '{{ __prepare_tls_dir }}/server.crt'
+        creates: '{{ __prepare_tls_dir }}/server.crt'
+      when: inventory_hostname in groups['valkey_servers']
+
+    - name: Prepare | Make the server key readable for the service user
+      ansible.builtin.file:
+        path: '{{ __prepare_tls_dir }}/server.key'
+        owner: root
+        group: valkey
+        mode: '0640'
+      when: inventory_hostname in groups['valkey_servers']
+
+    - name: Prepare | Read the test CA
+      ansible.builtin.slurp:
+        src: '{{ __prepare_tls_dir }}/ca.crt'
+      register: __prepare_ca
+      when: inventory_hostname in groups['valkey_servers']
+
+    - name: Prepare | Install the test CA on the client
+      ansible.builtin.copy:
+        content: "{{ hostvars[__prepare_server]['__prepare_ca']['content'] | b64decode }}"
+        dest: '{{ __prepare_tls_dir }}/ca.crt'
+        owner: root
+        group: root
+        mode: '0644'
+      when: inventory_hostname in groups['valkey_clients']

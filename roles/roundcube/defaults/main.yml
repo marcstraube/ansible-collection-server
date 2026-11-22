@@ -1,0 +1,279 @@
+---
+#
+# Role Control
+#
+
+# Enable the roundcube role
+roundcube_enabled: false
+
+#
+# Installation
+#
+# The role installs the complete release archive of Roundcube from GitHub
+# (roundcubemail-<version>-complete.tar.gz, with the PHP and JavaScript
+# dependencies) into roundcube_install_dir/releases/<version> and points
+# roundcube_install_dir/current at the active release. The web server serves
+# roundcube_install_dir/current/public_html through PHP-FPM; neither is
+# managed by this role (see README).
+
+# Roundcube release. The default follows the stable series on GitHub and is
+# bumped by the update-roundcube-version workflow together with
+# roundcube_checksum after it verified the release signature. 'latest'
+# installs the newest release and takes its checksum from the GitHub API.
+roundcube_version: '1.7.6'
+
+# SHA-256 checksum of roundcubemail-<version>-complete.tar.gz
+# ('sha256:<hash>'); ignored with 'latest'
+roundcube_checksum: 'sha256:0168085bf0bfeeb5d4eca3b9730effbe610dbdb380a68567d292fec51f09db36'
+
+# Directory of the releases and of the 'current' link. The role owns
+# releases/ and current; an update keeps the previously active release next
+# to the new one for a rollback.
+roundcube_install_dir: '/var/www/roundcube'
+
+# PHP command line binary the role runs the Roundcube scripts with (schema,
+# maintenance). Use the binary of the version PHP-FPM runs, e.g. 'php8.4'.
+roundcube_php_cli: 'php'
+
+# User and group of the PHP-FPM pool that runs Roundcube: temp and logs of
+# every release are writable for the user, config.inc.php readable for the
+# group. Recommended: the user and group of a dedicated pool (fpm_pools of
+# marcstraube.common.php, see README). Empty uses the www pool default of
+# the platform (Arch Linux 'http', Debian 'www-data', EL 'apache').
+roundcube_php_fpm_user: ''
+roundcube_php_fpm_group: ''
+
+#
+# Database
+#
+# Connection settings of the Roundcube database (users, identities,
+# contacts, settings, caches and, by default, the sessions). The database
+# server may run on another host and does not have to be managed by
+# Ansible. Roundcube needs a user that may create tables in it.
+
+# Database type: 'postgresql', 'mariadb' or 'sqlite'
+roundcube_db_type: 'postgresql'
+
+# Host name, IP address or the path of a unix socket (PostgreSQL: the
+# socket directory, MariaDB: the socket file). 'localhost' with MariaDB
+# connects through the socket of the platform. Ignored with sqlite.
+roundcube_db_host: 'localhost'
+
+# Port; PostgreSQL also uses it for a unix socket (the socket file is named
+# after it), MariaDB ignores it there
+roundcube_db_port: "{{ (roundcube_db_type == 'mariadb') | ternary(3306, 5432) }}"
+
+# Database name, user and password (REQUIRED except with sqlite)
+roundcube_db_name: 'roundcube'
+roundcube_db_user: 'roundcube'
+roundcube_db_password: ''
+
+# Connect with TLS and verify the server certificate against
+# roundcube_db_tls_ca_file and the host name (PostgreSQL sslmode
+# verify-full, MariaDB verify_server_cert). The CA file is required with
+# TLS; use the system bundle for a publicly signed certificate. Not possible
+# through a unix socket. Without TLS the connection is unencrypted: only for
+# a private network or WireGuard.
+roundcube_db_tls: false
+roundcube_db_tls_ca_file: ''
+
+# SQLite database file (roundcube_db_type 'sqlite'); its directory belongs
+# to the PHP-FPM user
+roundcube_db_path: '/var/lib/roundcube/roundcube.db'
+
+# Create the database and its owner roundcube_db_user. Only for a database
+# server on the same host (roundcube_db_host a loopback address or a unix
+# socket); requires the marcstraube.server.postgresql or
+# marcstraube.server.mariadb role to run first.
+roundcube_db_create: false
+
+#
+# Pre-update Backup
+#
+# Roundcube upgrades its schema forward only. Before a release change that
+# upgrades the schema the role dumps the database when its server runs on
+# this host (roundcube_db_host a loopback address or a unix socket, or
+# sqlite) with /usr/local/bin/roundcube-backup: pg_dump as the postgres
+# user, mariadb-dump as root, or a copy of the SQLite file, compressed to
+# roundcube_backup_dir/roundcube-<active release>-<timestamp>.sql.gz
+# (.db.gz for SQLite). A database on another host has to be backed up by
+# its operator before the update (see README). The regular backups come
+# from the database role.
+
+# Dump the database before a schema upgrade
+roundcube_backup_enabled: true
+
+# Directory of the dumps
+roundcube_backup_dir: '/var/backups/roundcube'
+
+# Pre-update dumps to keep (count-based, newest first)
+roundcube_backup_update_keep: 3
+
+#
+# Mail Servers
+#
+# Roundcube logs in to IMAP with the credentials of the user and sends
+# through the submission port of the SMTP server with the same credentials.
+# TLS: 'implicit' (IMAPS on 993, SMTPS on 465), 'starttls' or 'none'. The
+# certificates are verified against roundcube_tls_ca_file and the host
+# name; 'none' is only accepted for a server on this host.
+
+# IMAP server (Dovecot), host name as in its certificate
+roundcube_imap_host: 'localhost'
+roundcube_imap_port: 993
+roundcube_imap_tls: 'implicit'
+
+# SMTP submission server (Postfix)
+roundcube_smtp_host: 'localhost'
+roundcube_smtp_port: 587
+roundcube_smtp_tls: 'starttls'
+
+# CA file to verify the certificates of the IMAP, SMTP and ManageSieve
+# servers ('' = system trust store)
+roundcube_tls_ca_file: ''
+
+#
+# Configuration
+#
+# Settings written to config.inc.php.
+
+# Key that encrypts the IMAP password in the session (des_key), REQUIRED,
+# at least 32 characters (the key length of AES-256); generate it with:
+# openssl rand -base64 24
+# A new key logs out every user.
+roundcube_des_key: ''
+
+# Cipher of the session encryption (cipher_method). Upstream keeps
+# DES-EDE3-CBC for old installations and recommends AES-256-CBC.
+roundcube_cipher_method: 'AES-256-CBC'
+
+# Name shown in the browser title and on the login page
+roundcube_product_name: 'Roundcube Webmail'
+
+# Domain appended to a login name without '@' (username_domain), e.g.
+# 'example.com': users log in with 'alice' as alice@example.com
+roundcube_username_domain: ''
+
+# Message size limit for attachments in a composed message
+# (max_message_size). Keep it at or below the limits of PHP
+# (upload_max_filesize, post_max_size), the web server and Postfix.
+roundcube_max_message_size: '25M'
+
+# Logging: 'syslog' (identifier 'roundcube', the journal on systemd hosts)
+# or 'file' (/var/log/roundcube, owned by the PHP-FPM user, rotated by a
+# logrotate drop-in when logrotate is installed)
+roundcube_log_driver: 'syslog'
+
+# Further config.inc.php settings (key => value); strings, numbers,
+# booleans, lists and mappings are written as PHP values. Keys the role
+# writes from its own variables are rejected; set the role variable
+# instead.
+roundcube_extra_config: {}
+# Example:
+#   trusted_host_patterns: ['webmail.example.com']
+#   skin: 'elastic'
+
+#
+# Sessions
+#
+# Sessions live in the Roundcube database by default. 'redis' stores them
+# in Valkey (or Redis) through the session handler of the PHP extension
+# redis (phpredis), which authenticates with an ACL user and supports TLS.
+
+# Session storage: 'db' or 'redis'
+roundcube_session_storage: 'db'
+
+# Valkey server as '<host>:<port>' or the path of a unix socket
+roundcube_redis_host: '127.0.0.1:6379'
+
+# ACL user and password (valkey_users of marcstraube.server.valkey); an
+# empty user authenticates as 'default' with the password, both empty
+# connects without authentication
+roundcube_redis_user: ''
+roundcube_redis_password: ''
+
+# Database number and key prefix of the sessions; the ACL user needs the
+# key pattern '<prefix>*'
+roundcube_redis_database: 0
+roundcube_redis_prefix: 'roundcube:session:'
+
+# Connect with TLS and verify the server certificate against
+# roundcube_redis_tls_ca_file ('' = system trust store) and the host name.
+# Without TLS the connection is unencrypted: only for a private network or
+# WireGuard.
+roundcube_redis_tls: false
+roundcube_redis_tls_ca_file: ''
+
+#
+# Plugins
+#
+# Bundled plugins of the release to enable, in loading order. The role
+# configures managesieve and password from the variables below; further
+# plugin settings go into roundcube_extra_config.
+
+# Plugins to enable. The password plugin is off by default: a password
+# changed in Roundcube bypasses postfixadmin_password_validation (only the
+# minimum length applies), see README.
+roundcube_plugins:
+  - 'managesieve'
+  - 'acl'
+  - 'markasjunk'
+
+# ManageSieve
+
+# ManageSieve server (Dovecot) for filters, forwarding and out-of-office
+# replies; TLS 'starttls', 'implicit' or 'none' as for IMAP
+roundcube_managesieve_host: '{{ roundcube_imap_host }}'
+roundcube_managesieve_port: 4190
+roundcube_managesieve_tls: 'starttls'
+
+# Separate sections for out-of-office replies and forwarding
+# (managesieve_vacation, managesieve_forward): 0 = none, 1 = add the
+# section, 2 = add the section and hide the filters
+roundcube_managesieve_vacation: 1
+roundcube_managesieve_forward: 1
+
+# Password
+
+# Used when 'password' is in roundcube_plugins. The password plugin changes
+# the password in the PostfixAdmin database (sql driver). Connection settings as for the Roundcube database; the user
+# needs SELECT (username) and UPDATE (password, modified) on the mailbox
+# table only (see README).
+roundcube_password_db_type: 'postgresql'
+roundcube_password_db_host: 'localhost'
+roundcube_password_db_port: "{{ (roundcube_password_db_type == 'mariadb') | ternary(3306, 5432) }}"
+roundcube_password_db_name: 'postfixadmin'
+roundcube_password_db_user: 'roundcube_password'
+roundcube_password_db_password: ''
+roundcube_password_db_tls: false
+roundcube_password_db_tls_ca_file: ''
+
+# Scheme of the new hash: 'ARGON2ID', 'BLF-CRYPT' or 'SHA512-CRYPT'. The
+# hash is stored with the scheme prefix ({ARGON2ID}$argon2id$...) like the
+# ones PostfixAdmin writes; keep it equal to postfixadmin_password_scheme.
+roundcube_password_scheme: 'ARGON2ID'
+
+# Update query ('' = the role's query for the PostfixAdmin schema, see
+# README). %P is the new hash, %u the login name.
+roundcube_password_query: ''
+
+# Minimum length of a new password; keep it in line with
+# postfixadmin_password_validation
+roundcube_password_minimum_length: 12
+
+#
+# Maintenance
+#
+# roundcube-maintenance.timer runs bin/cleandb.sh (removes contacts,
+# groups, identities and responses deleted longer than
+# roundcube_cleandb_days ago) and bin/gc.sh (expired sessions, caches and
+# temp files) as the PHP-FPM user.
+
+# Enable and start the roundcube-maintenance timer
+roundcube_timer_enabled: true
+
+# Schedule of the timer (systemd OnCalendar)
+roundcube_maintenance_on_calendar: 'daily'
+
+# Days a record marked as deleted stays in the database
+roundcube_cleandb_days: 7

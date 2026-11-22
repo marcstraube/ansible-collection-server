@@ -1,0 +1,23 @@
+---
+# rspamd from the stable repository of the rspamd project (Debian 13 ships
+# the 3.12 series); address and signing key are public defaults
+# (rspamd_repo_uris, rspamd_repo_signed_by)
+__rspamd_repo_name: 'rspamd'
+__rspamd_repo_file: '/etc/apt/sources.list.d/{{ __rspamd_repo_name }}.sources'
+
+# Service user of the upstream package
+__rspamd_user: '_rspamd'
+__rspamd_group: '_rspamd'
+
+# Shell of the service user, should the role have to create it
+__rspamd_nologin_shell: '/usr/sbin/nologin'
+
+__rspamd_rspamadm: '/usr/bin/rspamadm'
+
+# Keeps the first install from starting rspamd with the packaged
+# configuration
+__rspamd_policy_rc_file: '/usr/sbin/policy-rc.d'
+
+# Marks the policy-rc.d as the role's own; a file with it is a leftover of an
+# interrupted first run
+__rspamd_policy_rc_marker: 'Managed by Ansible (marcstraube.server.rspamd)'

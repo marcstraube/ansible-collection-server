@@ -1,0 +1,18 @@
+---
+# Facts of both hosts: postfix_mynetworks holds the address of the Dovecot
+# container
+- name: Converge — Facts
+  hosts: all
+  gather_facts: true
+
+- name: Converge
+  hosts: mail
+  gather_facts: false
+
+  vars:
+    mta_enabled: false
+
+  tasks:
+    - name: Converge | Include postfix role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'

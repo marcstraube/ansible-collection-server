@@ -1,0 +1,268 @@
+---
+#
+# Role Control
+#
+
+# Enable the rspamd role
+rspamd_enabled: false
+
+# Enable and start the rspamd service
+rspamd_service_enabled: true
+
+#
+# Package Updates
+#
+
+# State of the rspamd packages:
+#   'present' installs missing packages and never updates (default).
+#   'latest'  updates the installed rspamd packages in one transaction and
+#             restarts the rspamd service while it still runs the replaced
+#             binary.
+# Pass 'latest' for a targeted update instead of setting it in inventory:
+#   --tags rspamd -e rspamd_packages_state=latest
+# Ignored on Arch Linux: updating single packages is a partial upgrade there,
+# rspamd updates with the full system upgrade.
+rspamd_packages_state: 'present'
+
+# Lowest acceptable version, checked before the update (nothing changes when
+# the repository does not offer it yet) and again after it. Meant to be passed
+# with the update command to require a fix. Either an upstream version, which
+# accepts every distribution release of it:
+#   -e rspamd_packages_minimum=4.3.0
+# or the full distribution version, which also covers rebuilds of the same
+# upstream version:
+#   -e rspamd_packages_minimum=4.3.0-1~25c9ecc~trixie
+# A mapping per platform (keys '<os_family>-<major>' or '<os_family>') covers
+# mixed hosts in one run; a host without a matching key fails:
+#   -e @rspamd-minimum.yml
+rspamd_packages_minimum: ''
+
+#
+# Repository (Debian, EL)
+#
+# Stable repository of the rspamd project that the role sets up on Debian
+# and EL (Debian 13 ships the 3.12 series, EL has no package). Arch Linux
+# installs from the distribution and ignores these. Point them at an
+# internal mirror (aptly, Nexus, Satellite, Pulp) for hosts without internet
+# access. $releasever and $basearch stay literal, dnf expands them.
+
+# Debian: repository address and signing key (URL or local key file)
+rspamd_repo_uris: 'https://rspamd.com/apt-stable/'
+rspamd_repo_signed_by: 'https://rspamd.com/apt-stable/gpg.key'
+
+# EL: repository address and signing key
+rspamd_repo_baseurl: 'https://rspamd.com/rpm-stable/centos-$releasever/$basearch'
+rspamd_repo_gpgkey: 'https://rspamd.com/rpm/rspamd.asc'
+
+#
+# Workers
+#
+# Neither listener encrypts: one on another address than the loopback
+# interface belongs on a private network or WireGuard.
+
+# Proxy worker in milter mode for Postfix ('<address>:<port>'); a Postfix
+# on another host needs an address that host reaches
+rspamd_milter_bind: '127.0.0.1:11332'
+
+# Controller (web interface, spam training, statistics) as
+# '<address>:<port>'. Remote access goes through a web server with TLS in
+# front of it (see README).
+rspamd_controller_bind: '127.0.0.1:11334'
+
+# Read password (web interface, statistics) and enable password (learning,
+# configuration changes; Dovecot spam training) of the controller
+# (REQUIRED). The role stores them as hashes.
+rspamd_controller_password: ''
+rspamd_controller_enable_password: ''
+
+# Addresses the controller trusts without a password (secure_ip). Empty:
+# every request needs a password, also from the loopback interface, which a
+# web server in front of the controller connects from.
+rspamd_controller_secure_ips: []
+
+#
+# Valkey / Redis
+#
+# Bayes, greylisting, rate limits, replies and DMARC reports keep their data
+# in Valkey (marcstraube.server.valkey), on this or another host.
+
+# Servers as '<host>:<port>' or the path of a unix socket
+rspamd_redis_servers:
+  - '127.0.0.1:6379'
+
+# ACL user and password (valkey_users of marcstraube.server.valkey). An
+# empty password connects without authentication.
+rspamd_redis_username: 'rspamd'
+rspamd_redis_password: ''
+
+# Database number
+rspamd_redis_db: 0
+
+# Connect with TLS and verify the server certificate against
+# rspamd_redis_tls_ca_file (empty: the system trust store). Without TLS the
+# connection is unencrypted: only for a private network or WireGuard.
+rspamd_redis_tls: false
+rspamd_redis_tls_ca_file: ''
+
+#
+# Classification
+#
+
+# Score thresholds of the actions (reject, add_header, rewrite_subject,
+# greylist); null disables an action. Upstream default; rewrite_subject is
+# not set by default.
+rspamd_actions:
+  reject: 15
+  add_header: 6
+  greylist: 4
+
+# Learn Bayes automatically from the actions: spam from rejected mail, ham
+# from mail with a negative score. Off: Bayes learns from the spam training
+# of the users (Dovecot) only.
+rspamd_bayes_autolearn: false
+
+# Greylisting of mail scoring above the greylist threshold
+rspamd_greylisting_enabled: true
+
+# Rate limits (ratelimit module): name -> settings of the rate, rendered as
+# given. Empty: no limits.
+rspamd_ratelimits: {}
+# Example:
+#   to:
+#     bucket:
+#       burst: 100
+#       rate: '1 / 1m'
+#   user:
+#     selector: 'user.lower'
+#     bucket:
+#       burst: 200
+#       rate: '10 / 1m'
+
+# Headers added to the mail (milter_headers routines). 'x-spam-status' adds
+# the spam flag and the score; the milter itself adds 'X-Spam: Yes' for the
+# action add_header.
+rspamd_milter_headers:
+  - 'x-spam-status'
+
+# Also add X-Spamd-Result (all symbols), X-Rspamd-Server and
+# X-Rspamd-Queue-Id (extended_spam_headers)
+rspamd_milter_extended_headers: false
+
+#
+# DNS
+#
+# DNS blocklists refuse queries from public resolvers; use a local recursive
+# resolver such as marcstraube.common.unbound.
+
+# Resolvers rspamd queries ('<address>' or '<address>:<port>'). Empty: the
+# resolvers of /etc/resolv.conf.
+rspamd_dns_nameservers: []
+
+#
+# DKIM and ARC Signing
+#
+# Mail from authenticated users and from rspamd_signing_networks is DKIM
+# signed with the key of the domain of its From header; forwarded mail gets
+# an ARC seal with the key of the recipient domain. The role creates a key
+# with rspamadm dkim_keygen when none exists and never replaces one.
+
+# Mail domains with their selector and RSA key size (default 2048). A new
+# selector creates a new key and signs with it; the old key stays on the
+# host and its DNS record has to stay published until mail signed with it
+# has been delivered.
+rspamd_dkim_domains: []
+# Example:
+#   - domain: 'example.com'
+#     selector: '2026'
+#     key_size: 2048
+
+# Client networks whose mail is signed without authentication (sign_networks)
+rspamd_signing_networks:
+  - '127.0.0.0/8'
+  - '::1'
+
+#
+# Antivirus
+#
+# clamd through the antivirus module (marcstraube.common.clamav). The clamd
+# protocol has neither authentication nor encryption: a clamd on another
+# host belongs on a private network or WireGuard.
+
+# Scan mail through clamd
+rspamd_antivirus_enabled: false
+
+# Groups the service user joins for the unix sockets of local peers, e.g.
+# the group of the clamd socket ('clamav'; 'clamscan' on EL) or
+# valkey_unix_socket_group. The groups must exist; rspamd restarts while
+# its running process lacks one of them.
+rspamd_socket_groups: []
+
+# clamd as unix socket path or '<host>:<port>'
+rspamd_clamd_address: '/run/clamav/clamd.sock'
+
+# Action for infected mail ('reject', 'add header', 'rewrite subject',
+# 'soft reject')
+rspamd_antivirus_action: 'reject'
+
+# Largest part sent to clamd in bytes; larger parts are not scanned
+rspamd_antivirus_max_size: 20000000
+
+#
+# DMARC Reports
+#
+# Aggregate reports to the domains that ask for them (rua). rspamd collects
+# the data in Valkey; the timer sends the reports of the previous day
+# through the SMTP server below.
+
+# Collect data and send aggregate reports
+rspamd_dmarc_reporting_enabled: false
+
+# Sender address, reporting domain and organization name of the reports
+# (required for reporting)
+rspamd_dmarc_reporting_email: ''
+rspamd_dmarc_reporting_domain: ''
+rspamd_dmarc_reporting_org_name: ''
+
+# SMTP server for the reports
+rspamd_dmarc_reporting_smtp_host: '127.0.0.1'
+rspamd_dmarc_reporting_smtp_port: 25
+
+# Enable and start the rspamd-dmarc-report timer (with reporting only)
+rspamd_dmarc_report_timer_enabled: true
+
+# Schedule of the timer (systemd OnCalendar)
+rspamd_dmarc_report_on_calendar: 'daily'
+
+#
+# DNS Records
+#
+# Print the DKIM and DMARC records of rspamd_dkim_domains and check each
+# one, reported as present, missing or different. A missing record never
+# fails the run; the expected records are printed either way. The check runs
+# on the controller.
+
+# Check the records
+rspamd_dns_check_enabled: true
+
+# Resolver for the check (IPv4 address, several separated by commas).
+# Empty: the system resolver of the controller.
+rspamd_dns_resolver: ''
+
+# Port of the resolver. A port other than 53 needs community.general 9.5.0
+# or later.
+rspamd_dns_resolver_port: 53
+
+# Expected DMARC record of the domains ('' skips the DMARC check)
+rspamd_dns_dmarc: 'v=DMARC1; p=quarantine'
+
+#
+# Extra Configuration
+#
+
+# Further files in local.d: file name -> content (UCL). A file the role
+# writes itself cannot be replaced here. A file removed from the mapping is
+# deleted.
+rspamd_local_config: {}
+# Example:
+#   'phishing.conf': |
+#     openphish_enabled = true;

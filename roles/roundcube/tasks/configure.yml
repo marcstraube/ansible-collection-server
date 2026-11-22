@@ -1,0 +1,89 @@
+---
+# config.inc.php holds the database passwords and des_key: root writes it,
+# the PHP-FPM group reads it. Every release links to it, so an update
+# carries it over and a rollback to the previous release finds it as well.
+
+- name: Configure | Create the configuration directory
+  ansible.builtin.file:
+    path: '{{ __roundcube_config_dir }}'
+    state: directory
+    owner: root
+    group: '{{ __roundcube_fpm_group }}'
+    mode: '0750'
+
+- name: Configure | Deploy config.inc.php
+  ansible.builtin.template:
+    src: config.inc.php.j2
+    dest: '{{ __roundcube_config_file }}'
+    owner: root
+    group: '{{ __roundcube_fpm_group }}'
+    mode: '0640'
+    validate: '{{ roundcube_php_cli }} -l %s'
+  register: __roundcube_config_result
+  no_log: true
+  diff: false
+
+# File logs live outside the releases, so pruning an old release keeps
+# them. Switching back to syslog leaves the directory and its logs (data).
+- name: Configure | Create the log directory
+  ansible.builtin.file:
+    path: '{{ __roundcube_log_dir }}'
+    state: directory
+    owner: '{{ __roundcube_fpm_user }}'
+    group: '{{ __roundcube_fpm_group }}'
+    mode: '0750'
+  register: __roundcube_log_dir_result
+  when: roundcube_log_driver == 'file'
+
+# PHP-FPM (httpd_t) appends to the file logs (httpd_log_t). The rule and
+# the relabel run with the directory, so an existing directory or one
+# created under --tags roundcube:configure gets the label as well.
+- name: Configure | Label the log directory for PHP-FPM (SELinux)
+  community.general.sefcontext:
+    target: '{{ __roundcube_log_dir }}(/.*)?'
+    setype: 'httpd_log_t'
+    state: present
+  register: __roundcube_log_sefcontext
+  when:
+    - roundcube_log_driver == 'file'
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+- name: Configure | Apply the SELinux label to the log directory
+  ansible.builtin.command:
+    argv:
+      - restorecon
+      - '-R'
+      - '-v'
+      - '{{ __roundcube_log_dir }}'
+  register: __roundcube_log_restorecon
+  changed_when: __roundcube_log_restorecon.stdout | length > 0
+  when:
+    - not __roundcube_check_mode
+    - roundcube_log_driver == 'file'
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+    - __roundcube_log_dir_result is changed or __roundcube_log_sefcontext is changed
+
+- name: Configure | Check for the logrotate drop-in directory
+  ansible.builtin.stat:
+    path: '{{ __roundcube_logrotate_file | dirname }}'
+  register: __roundcube_logrotate_dir
+
+# Only where logrotate is installed; the role does not install it
+- name: Configure | Deploy the logrotate drop-in
+  ansible.builtin.template:
+    src: logrotate.j2
+    dest: '{{ __roundcube_logrotate_file }}'
+    owner: root
+    group: root
+    mode: '0644'
+  when:
+    - roundcube_log_driver == 'file'
+    - __roundcube_logrotate_dir.stat.isdir | default(false)
+
+- name: Configure | Remove the logrotate drop-in
+  ansible.builtin.file:
+    path: '{{ __roundcube_logrotate_file }}'
+    state: absent
+  when: roundcube_log_driver != 'file'

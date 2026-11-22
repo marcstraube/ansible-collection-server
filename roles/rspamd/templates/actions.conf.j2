@@ -1,0 +1,4 @@
+{{ ansible_managed | comment }}
+{% for name, score in rspamd_actions.items() %}
+{{ name }} = {{ 'null' if score is none else score }};
+{% endfor %}

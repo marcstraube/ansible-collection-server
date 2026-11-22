@@ -1,0 +1,258 @@
+---
+- name: Verify — Facts
+  hosts: all
+  gather_facts: true
+
+- name: Verify — Postfix host
+  hosts: mail
+  gather_facts: false
+
+  vars_files:
+    - ../shared/vars/accounts.yml
+
+  vars:
+    __verify_run: "{{ ansible_facts['date_time']['epoch'] }}"
+    # The address of this container is not in mynetworks: a client on the
+    # internet
+    __verify_external: "{{ ansible_facts['default_ipv4']['address'] }}"
+    __verify_dovecot_host: '{{ __molecule_backend }}'
+
+  tasks:
+    # Over TCP with TLS (verify-full), through proxymap
+    - name: Verify | Query the lookup tables on the database host
+      ansible.builtin.command:
+        argv:
+          - postmap
+          - '-q'
+          - '{{ item.key }}'
+          - 'proxy:pgsql:/etc/postfix/sql/{{ item.table }}.cf'
+      loop:
+        - {table: 'virtual_mailbox_domains', key: 'example.com', expect: 'example.com'}
+        - {table: 'virtual_mailbox_maps', key: 'alice@example.com', expect: 'alice/'}
+        - {table: 'virtual_alias_maps', key: 'info@example.com', expect: 'alice@example.com'}
+      loop_control:
+        label: '{{ item.table }}'
+      register: __verify_lookups
+      changed_when: false
+      failed_when: __verify_lookups.rc != 0 or item.expect not in __verify_lookups.stdout
+
+    - name: Verify | Wait for the listeners
+      ansible.builtin.wait_for:
+        host: '127.0.0.1'
+        port: '{{ item }}'
+        timeout: 30
+      loop: [25, 465, 587]
+
+    - name: Verify | Run the SMTP sessions
+      ansible.builtin.include_tasks: ../shared/tasks/smtp.yml
+      vars:
+        __verify_sessions:
+          # LMTP over TCP
+          inbound:
+            host: '{{ __verify_external }}'
+            port: 25
+            mail_from: 'carol@example.net'
+            rcpt: ['alice@example.com']
+            data: "From: carol@example.net\nTo: alice@example.com\nSubject: inbound-{{ __verify_run }}\n\nTest.\n"
+          # SASL over TCP
+          submission:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            auth: ['alice@example.com', "{{ __molecule_passwords['alice@example.com'] }}"]
+            mail_from: 'alice@example.com'
+            rcpt: ['bob@example.com']
+            data: "From: alice@example.com\nTo: bob@example.com\nSubject: submission-{{ __verify_run }}\n\nTest.\n"
+          # Relaying from an address outside mynetworks
+          relay_refused:
+            host: '{{ __verify_external }}'
+            port: 25
+            mail_from: 'carol@example.net'
+            rcpt: ['dave@example.net']
+          # Sieve on the Dovecot host: bob redirects, alice replies
+          redirect:
+            host: '{{ __verify_external }}'
+            port: 25
+            mail_from: 'carol@example.net'
+            rcpt: ['bob@example.com']
+            data: "From: carol@example.net\nTo: bob@example.com\nSubject: redirect-test {{ __verify_run }}\n\nTest.\n"
+          vacation:
+            host: '{{ __verify_external }}'
+            port: 25
+            mail_from: 'carol@example.net'
+            rcpt: ['alice@example.com']
+            data: "From: carol@example.net\nTo: alice@example.com\nSubject: vacation-test {{ __verify_run }}\n\nTest.\n"
+
+    - name: Verify | Assert the sessions on the Postfix host
+      ansible.builtin.assert:
+        that:
+          - __s.inbound.rcpt[0][0] == 250
+          - __s.inbound.data[0] == 250
+          - __s.submission.auth[0] == 235
+          - __s.submission.data[0] == 250
+          - __s.relay_refused.rcpt[0][0] == 554
+          - __s.redirect.data[0] == 250
+          - __s.vacation.data[0] == 250
+        fail_msg: '{{ __s | to_json }}'
+      vars:
+        __s: '{{ __verify_smtp }}'
+
+    - name: Verify | Wait for the delivered messages on the Dovecot host
+      ansible.builtin.include_tasks: ../shared/tasks/mailbox.yml
+      vars:
+        __verify_mail:
+          - {user: 'alice@example.com', subject: 'inbound-{{ __verify_run }}'}
+          - {user: 'bob@example.com', subject: 'submission-{{ __verify_run }}'}
+          - {user: 'alice@example.com', subject: 'vacation-test {{ __verify_run }}'}
+
+    # Dovecot sent both through port 25 of this host with STARTTLS; the
+    # relayed mail waits in the queue (defer_transports). The redirect keeps
+    # bob as envelope sender, the vacation reply has the null sender
+    # (postqueue -j shows it as MAILER-DAEMON).
+    - name: Verify | Wait for the Sieve mail in the queue
+      ansible.builtin.command:
+        argv: [postqueue, '-j']
+      register: __verify_queue
+      changed_when: false
+      until: >-
+        __verify_queued | selectattr('recipient', 'eq', 'dave@example.net')
+                        | selectattr('sender', 'eq', 'bob@example.com') | list | length > 0
+        and __verify_queued | selectattr('recipient', 'eq', 'carol@example.net')
+                            | selectattr('sender', 'in', ['', 'MAILER-DAEMON']) | list | length > 0
+      retries: 20
+      delay: 3
+      vars:
+        __verify_queued: >-
+          {%- set ns = namespace(entries=[]) -%}
+          {%- for message in __verify_queue.stdout_lines | default([]) | map('from_json') -%}
+          {%- for recipient in message.recipients -%}
+          {%- set ns.entries = ns.entries + [{'sender': message.sender, 'recipient': recipient.address}] -%}
+          {%- endfor -%}
+          {%- endfor -%}
+          {{ ns.entries }}
+
+    # The redirect came in over TLS from the address of the Dovecot host
+    # (smtpd_tls_received_header)
+    - name: Verify | Read the headers of the redirected message
+      ansible.builtin.command:
+        argv: [postcat, '-h', '-q', '{{ __verify_redirect_id }}']
+      register: __verify_redirect_headers
+      changed_when: false
+      vars:
+        __verify_redirect_id: >-
+          {{ (__verify_queue.stdout_lines | map('from_json')
+              | selectattr('sender', 'eq', 'bob@example.com') | first).queue_id }}
+
+    - name: Verify | Read the headers of the vacation reply
+      ansible.builtin.command:
+        argv: [postcat, '-h', '-q', '{{ __verify_vacation_id }}']
+      register: __verify_vacation_headers
+      changed_when: false
+      vars:
+        __verify_vacation_id: >-
+          {{ (__verify_queue.stdout_lines | map('from_json')
+              | selectattr('sender', 'in', ['', 'MAILER-DAEMON']) | first).queue_id }}
+
+    - name: Verify | Assert the null sender mail is the vacation reply
+      ansible.builtin.assert:
+        that:
+          - __verify_vacation_headers.stdout is search('(?m)^Subject: Away')
+        fail_msg: '{{ __verify_vacation_headers.stdout }}'
+
+    - name: Verify | Assert the Dovecot host sent with STARTTLS
+      ansible.builtin.assert:
+        that:
+          - ('[' ~ __verify_backend_address ~ ']') in __verify_redirect_headers.stdout
+          - __verify_redirect_headers.stdout is search('with (E|UTF8)SMTPS ')
+          - "'redirect-test' in __verify_redirect_headers.stdout"
+        fail_msg: '{{ __verify_redirect_headers.stdout }}'
+      vars:
+        __verify_backend_address: "{{ hostvars[__molecule_backend]['ansible_facts']['default_ipv4']['address'] }}"
+
+    # The first install: the package must not have started Postfix with the
+    # packaged configuration, and the role's temporary policy-rc.d is gone,
+    # also the one side effect left behind on the installed host. The
+    # overlay storage of the container can bring the policy-rc.d of the
+    # image back when the role removes its own file, so the check is that
+    # the file is not the role's.
+    - name: Verify | Read the policy-rc.d
+      ansible.builtin.command:
+        argv: ['cat', '/usr/sbin/policy-rc.d']
+      register: __verify_policy_rc
+      changed_when: false
+      failed_when: false
+
+    - name: Verify | Read the service starts
+      ansible.builtin.command:
+        argv: ['journalctl', '--unit=postfix', '--output=cat', '--no-pager']
+      register: __verify_journal
+      changed_when: false
+
+    - name: Verify | Assert Postfix started once, with the role's configuration
+      ansible.builtin.assert:
+        that:
+          - __verify_policy_rc.stdout is not search('marcstraube\.server\.postfix')
+          - __verify_starts | length == 1
+        fail_msg: >-
+          policy-rc.d: {{ __verify_policy_rc.stdout }}; Postfix started
+          {{ __verify_starts | length }} times, expected once: {{ __verify_starts }}
+        success_msg: 'Only the role started Postfix, the package did not'
+      vars:
+        __verify_starts: "{{ __verify_journal.stdout_lines | select('match', '^Started ') | list }}"
+
+- name: Verify — Dovecot host
+  hosts: backend
+  gather_facts: false
+
+  tasks:
+    # From an address in mynetworks: relaying on port 25, never on
+    # submission
+    - name: Verify | Run the SMTP sessions from the Dovecot host
+      ansible.builtin.include_tasks: ../shared/tasks/smtp.yml
+      vars:
+        __verify_sessions:
+          relay_mynetworks:
+            host: '{{ __molecule_mail }}'
+            port: 25
+            mail_from: 'bob@example.com'
+            rcpt: ['dave@example.net']
+          submission_no_relay:
+            host: '{{ __molecule_mail }}'
+            port: 587
+            mode: 'starttls'
+            mail_from: 'bob@example.com'
+            rcpt: ['dave@example.net']
+
+    - name: Verify | Assert relaying from mynetworks on port 25 only
+      ansible.builtin.assert:
+        that:
+          - __s.relay_mynetworks.rcpt[0][0] == 250
+          - __s.submission_no_relay.rcpt[0][0] >= 500
+        fail_msg: '{{ __s | to_json }}'
+      vars:
+        __s: '{{ __verify_smtp }}'
+
+    # proxymap keeps its connection open for a while after a lookup
+    # (max_idle); a fresh lookup right before the query keeps it in the list
+    - name: Verify | Look up a mailbox on the Postfix host
+      ansible.builtin.command:
+        argv: [postmap, '-q', 'alice@example.com', 'proxy:pgsql:/etc/postfix/sql/virtual_mailbox_maps.cf']
+      delegate_to: '{{ __molecule_mail }}'
+      changed_when: false
+
+    - name: Verify | Read the connections of the Postfix user
+      community.postgresql.postgresql_query:
+        login_db: 'postfixadmin'
+        query: >-
+          SELECT ssl FROM pg_stat_ssl JOIN pg_stat_activity USING (pid)
+          WHERE usename = 'postfix'
+      become: true
+      become_user: postgres
+      register: __verify_pg_ssl
+
+    - name: Verify | Assert the Postfix lookups use TLS
+      ansible.builtin.assert:
+        that:
+          - __verify_pg_ssl.query_result | length > 0
+          - __verify_pg_ssl.query_result | map(attribute='ssl') | unique == [true]
+        fail_msg: '{{ __verify_pg_ssl.query_result | to_json }}'

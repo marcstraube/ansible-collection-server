@@ -1,0 +1,94 @@
+---
+- name: Prepare the environment
+  ansible.builtin.import_playbook: ../shared/prepare.yml
+
+# The previous release with its schema; the schema version and the
+# configuration are recorded for verify.
+- name: Prepare — Previous release
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - ../shared/vars/main.yml
+
+  vars:
+    roundcube_version: '{{ __molecule_previous_version }}'
+    roundcube_checksum: '{{ __molecule_previous_checksum }}'
+
+  tasks:
+    # The workflow that bumps the role default leaves the previous release
+    # pinned here; it has to stay older than the default
+    - name: Prepare | Load role defaults
+      ansible.builtin.include_vars:
+        file: '../../defaults/main.yml'
+        name: __prepare_defaults
+
+    - name: Prepare | Assert the previous release is older than the role default
+      ansible.builtin.assert:
+        that:
+          - __molecule_previous_version is version(__prepare_defaults.roundcube_version, '<')
+        fail_msg: >-
+          __molecule_previous_version {{ __molecule_previous_version }} is not older than
+          the role default {{ __prepare_defaults.roundcube_version }}
+
+    - name: Prepare | Include roundcube role with the previous release  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+
+    - name: Prepare | Read the schema state of the previous release
+      ansible.builtin.command:
+        argv:
+          - php
+          - /usr/local/lib/roundcube-ansible/roundcube-schema.php
+          - /var/www/roundcube/current
+      register: __prepare_status
+      changed_when: false
+
+    - name: Prepare | Stat config.inc.php
+      ansible.builtin.stat:
+        path: /etc/roundcube/config.inc.php
+        checksum_algorithm: sha256
+      register: __prepare_config
+
+    - name: Prepare | Record the state before the update
+      ansible.builtin.copy:
+        content: |
+          {{ {'status': __prepare_status.stdout | from_json,
+              'config_checksum': __prepare_config.stat.checksum} | to_nice_json }}
+        dest: /root/molecule-before-update.json
+        owner: root
+        group: root
+        mode: '0600'
+
+    # Leftover of an interrupted unpack: the update has to remove it
+    - name: Prepare | Leave an incomplete staging directory behind
+      ansible.builtin.file:
+        path: /var/www/roundcube/releases/.staging/leftover
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # A release older than the previous one: the update removes it, the
+    # previous release stays
+    - name: Prepare | Create an older release directory
+      ansible.builtin.file:
+        path: /var/www/roundcube/releases/1.6.0
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # Older pre-update dumps for the rotation (roundcube_backup_update_keep
+    # 2): the update keeps its own dump and the newer of the two
+    - name: Prepare | Create older pre-update dumps
+      ansible.builtin.command:
+        argv:
+          - touch
+          - '-d'
+          - '{{ item.date }}'
+          - '/var/backups/roundcube/roundcube-1.6.0-{{ item.stamp }}.sql.gz'
+        creates: '/var/backups/roundcube/roundcube-1.6.0-{{ item.stamp }}.sql.gz'
+      loop:
+        - {date: '2020-01-01', stamp: '20200101T000000'}
+        - {date: '2020-01-02', stamp: '20200102T000000'}

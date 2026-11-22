@@ -1,0 +1,40 @@
+---
+__dovecot_packages:
+  - dovecot-core
+  - dovecot-imapd
+  - dovecot-lmtpd
+  - dovecot-sieve
+__dovecot_db_packages:
+  postgresql:
+    - dovecot-pgsql
+  mariadb:
+    - dovecot-mysql
+__dovecot_pop3_packages:
+  - dovecot-pop3d
+__dovecot_managesieve_packages:
+  - dovecot-managesieved
+__dovecot_curl_packages:
+  - curl
+
+# Package whose version the role reports and checks
+__dovecot_version_package: 'dovecot-core'
+
+# Installed packages a targeted update moves along: every dovecot-* package
+# pins the exact version of dovecot-core
+__dovecot_update_pattern: '^dovecot-.+$'
+
+__dovecot_service_name: 'dovecot'
+
+# Group of the Dovecot service user (default_internal_group), created by the
+# package
+__dovecot_internal_group: 'dovecot'
+
+# Shell of the virtual mail user
+__dovecot_nologin_shell: '/usr/sbin/nologin'
+
+# Blocks the Dovecot starts of the maintainer scripts while it exists
+__dovecot_policy_rc_file: '/usr/sbin/policy-rc.d'
+
+# Marks the policy-rc.d as the role's own; a file with it is a leftover of an
+# interrupted first install
+__dovecot_policy_rc_marker: 'Managed by Ansible (marcstraube.server.dovecot)'

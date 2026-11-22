@@ -1,0 +1,84 @@
+---
+# Read-only users of the mail services on a database server of this host,
+# with SELECT on the tables (and the SOGo view) they read. The schema tasks
+# ran before, so the tables exist.
+
+- name: Readers | Create the PostgreSQL users
+  community.postgresql.postgresql_user:
+    name: '{{ item.name }}'
+    password: '{{ item.password }}'
+    role_attr_flags: 'NOSUPERUSER,NOCREATEDB,NOCREATEROLE'
+    login_unix_socket: '{{ __postfixadmin_pg_socket_dir | default(omit, true) }}'
+    login_port: '{{ postfixadmin_db_port | int }}'
+    state: present
+  become: true
+  become_user: postgres
+  loop: >-
+    {{ postfixadmin_db_readers | selectattr('state', 'undefined') | list
+       + postfixadmin_db_readers | selectattr('state', 'defined') | selectattr('state', 'eq', 'present') | list }}
+  loop_control:
+    label: '{{ item.name }}'
+  no_log: true
+  when: postfixadmin_db_type == 'postgresql'
+
+# A user to remove loses every privilege on the tables and views of the
+# schema, not only on the tables its entry lists now: a grant left from an
+# earlier 'tables' list would block DROP ROLE.
+- name: Readers | Grant SELECT on the PostfixAdmin tables (PostgreSQL)
+  community.postgresql.postgresql_privs:
+    login_db: '{{ postfixadmin_db_name }}'
+    login_unix_socket: '{{ __postfixadmin_pg_socket_dir | default(omit, true) }}'
+    login_port: '{{ postfixadmin_db_port | int }}'
+    roles: '{{ item.name }}'
+    type: table
+    schema: public
+    objs: >-
+      {{ 'ALL_IN_SCHEMA' if __postfixadmin_absent | bool
+         else item.tables | default(__postfixadmin_reader_tables) | join(',') }}
+    privs: "{{ 'ALL' if __postfixadmin_absent | bool else 'SELECT' }}"
+    state: "{{ 'absent' if __postfixadmin_absent | bool else 'present' }}"
+    # A user removed by an earlier run has nothing left to revoke
+    fail_on_role: '{{ item.state | default("present") == "present" }}'
+  become: true
+  become_user: postgres
+  loop: '{{ __postfixadmin_db_readers_public }}'
+  loop_control:
+    label: '{{ item.name }}'
+  vars:
+    __postfixadmin_absent: "{{ item.state | default('present') == 'absent' }}"
+  when: postfixadmin_db_type == 'postgresql'
+
+# The grants were revoked above; a user that still holds privileges in
+# another database is not dropped and fails the task.
+- name: Readers | Remove the PostgreSQL users
+  community.postgresql.postgresql_user:
+    name: '{{ item.name }}'
+    state: absent
+    login_unix_socket: '{{ __postfixadmin_pg_socket_dir | default(omit, true) }}'
+    login_port: '{{ postfixadmin_db_port | int }}'
+  become: true
+  become_user: postgres
+  loop: >-
+    {{ __postfixadmin_db_readers_public | selectattr('state', 'defined') | selectattr('state', 'eq', 'absent') | list }}
+  loop_control:
+    label: '{{ item.name }}'
+  when: postfixadmin_db_type == 'postgresql'
+
+# priv replaces the privileges of the account, so a table removed from
+# 'tables' loses its grant as well.
+- name: Readers | Manage the MariaDB users
+  ansible.mariadb.mariadb_user:
+    name: '{{ item.name }}'
+    host: '{{ item.host | default("localhost") }}'
+    password: '{{ item.password | default(omit) }}'
+    priv: >-
+      {{ item.tables | default(__postfixadmin_reader_tables)
+         | map('regex_replace', '^', postfixadmin_db_name ~ '.')
+         | map('regex_replace', '$', ':SELECT') | join('/') }}
+    login_unix_socket: '{{ __postfixadmin_mariadb_login_socket }}'
+    state: '{{ item.state | default("present") }}'
+  loop: '{{ postfixadmin_db_readers }}'
+  loop_control:
+    label: '{{ item.name }}@{{ item.host | default("localhost") }}'
+  no_log: true
+  when: postfixadmin_db_type == 'mariadb'

@@ -1,0 +1,46 @@
+---
+# Settings of converge.yml, shared with the plays of side_effect.yml and
+# verify.yml that run the role again without changing the host.
+valkey_enabled: true
+valkey_service_enabled: true
+# Local clients through a socket group the role creates
+valkey_unix_socket: '/run/valkey/valkey.sock'
+valkey_unix_socket_group: 'valkey-clients'
+valkey_tls_enabled: true
+valkey_tls_cert_file: '/etc/molecule-tls/server.crt'
+valkey_tls_key_file: '/etc/molecule-tls/server.key'
+valkey_tls_ca_file: '/etc/molecule-tls/ca.crt'
+# 'app' keeps the default permissions (no @dangerous commands), 'admin'
+# lets verify.yml read the running configuration. The password of 'inject'
+# tries to add a user through a line break, the one of 'backup' ends with
+# a line break that the backup script must keep.
+valkey_users:
+  - name: 'app'
+    password: 'app-secret'
+    keys:
+      - 'app:*'
+  - name: 'admin'
+    password: 'admin-secret'
+    permissions:
+      - '+@all'
+  - name: 'inject'
+    password: "inject secret\nuser evil on nopass ~* +@all"
+    keys:
+      - 'inject:*'
+  - name: 'backup'
+    password: "backup secret\n"
+    permissions:
+      - '+ping'
+      - '+replconf'
+      - '+sync'
+    keys: []
+valkey_maxmemory: '64mb'
+valkey_maxmemory_policy: 'allkeys-lru'
+valkey_save:
+  - '900 1'
+valkey_appendonly: true
+valkey_extra_config:
+  tcp-keepalive: 120
+valkey_backup_enabled: true
+valkey_backup_user: 'backup'
+valkey_backup_keep: 2

@@ -1,0 +1,341 @@
+---
+#
+# Roundcube — Shared Variables
+#
+
+# Release archive on GitHub (with the PHP and JavaScript dependencies)
+__roundcube_release_url: 'https://github.com/roundcube/roundcubemail/releases/download'
+__roundcube_latest_api_url: 'https://api.github.com/repos/roundcube/roundcubemail/releases/latest'
+__roundcube_version_pattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
+__roundcube_archive: 'roundcubemail-{{ __roundcube_release }}-complete.tar.gz'
+
+# Lowest PHP version the 1.7 releases run on (program/include/iniset.php)
+__roundcube_php_minimum_id: 80100
+
+# PHP extensions Roundcube requires (installer/check.php); PDO and the
+# drivers are checked separately
+__roundcube_php_extensions:
+  - 'ctype'
+  - 'dom'
+  - 'filter'
+  - 'intl'
+  - 'json'
+  - 'mbstring'
+  - 'openssl'
+  - 'pcre'
+  - 'session'
+  - 'xml'
+
+# Download cache of the release archive
+__roundcube_cache_dir: '/var/cache/roundcube'
+
+# Releases, one directory per version, and the link to the active one
+__roundcube_releases_dir: '{{ roundcube_install_dir }}/releases'
+__roundcube_current_link: '{{ roundcube_install_dir }}/current'
+__roundcube_release_dir: '{{ __roundcube_releases_dir }}/{{ __roundcube_release }}'
+
+# A release is unpacked here and moved into place when complete; a
+# leftover of an interrupted run is removed
+__roundcube_staging_dir: '{{ __roundcube_releases_dir }}/.staging'
+
+# Marker in a release directory naming the release; written last before
+# the directory is moved into place
+__roundcube_release_marker: '.ansible-release'
+
+# config.inc.php lives outside the releases, so every release links to the
+# same file and an update carries it over
+__roundcube_config_dir: '/etc/roundcube'
+__roundcube_config_file: '{{ __roundcube_config_dir }}/config.inc.php'
+
+# Helper that reads the schema state with Roundcube's own code
+__roundcube_helper_dir: '/usr/local/lib/roundcube-ansible'
+__roundcube_helper: '{{ __roundcube_helper_dir }}/roundcube-schema.php'
+
+# Pre-update backup script; it runs for a database on this host
+__roundcube_backup_script: '/usr/local/bin/roundcube-backup'
+__roundcube_backup_active: >-
+  {{ roundcube_backup_enabled | bool and __roundcube_db_local | bool }}
+
+# Maintenance units (role-created)
+__roundcube_maintenance_service: 'roundcube-maintenance.service'
+__roundcube_maintenance_timer: 'roundcube-maintenance.timer'
+__roundcube_systemd_dir: '/etc/systemd/system'
+
+# PHP-FPM pool user and group
+__roundcube_fpm_user: '{{ roundcube_php_fpm_user or __roundcube_default_fpm_user }}'
+__roundcube_fpm_group: '{{ roundcube_php_fpm_group or __roundcube_default_fpm_group }}'
+
+# DSN scheme per database type
+__roundcube_db_drivers:
+  postgresql: 'pgsql'
+  mariadb: 'mysql'
+  sqlite: 'sqlite'
+
+# PDO driver PHP needs per database type
+__roundcube_pdo_drivers:
+  postgresql: 'pgsql'
+  mariadb: 'mysql'
+  sqlite: 'sqlite'
+
+# Addresses of a database server on the host itself
+__roundcube_loopback_hosts:
+  - 'localhost'
+  - '127.0.0.1'
+  - '::1'
+
+# The Roundcube database is on this host: SQLite, a loopback address or a
+# unix socket
+__roundcube_db_local: >-
+  {{ roundcube_db_type == 'sqlite'
+     or roundcube_db_host in __roundcube_loopback_hosts
+     or roundcube_db_host is match('/') }}
+
+# Unix socket of the Roundcube database: a socket path, or 'localhost'
+# with MariaDB (the convention of the MySQL clients)
+__roundcube_db_socket: >-
+  {{ '' if roundcube_db_type == 'sqlite'
+     else (roundcube_db_host if roundcube_db_host is match('/')
+           else (__roundcube_mariadb_socket
+                 if roundcube_db_type == 'mariadb' and roundcube_db_host == 'localhost'
+                 else '')) }}
+
+# Socket directory the PostgreSQL modules connect through as the postgres
+# user (empty: the default of the client library)
+__roundcube_pg_socket_dir: >-
+  {{ roundcube_db_host if roundcube_db_host is match('/') else '' }}
+
+# Socket the MariaDB modules connect through as root
+__roundcube_mariadb_login_socket: >-
+  {{ roundcube_db_host if roundcube_db_host is match('/') else __roundcube_mariadb_socket }}
+
+# Account host of the database owner on MariaDB: socket connections log in
+# as 'localhost', TCP connections with the loopback address
+__roundcube_db_owner_host: >-
+  {{ 'localhost' if __roundcube_db_socket | length > 0 else roundcube_db_host }}
+
+# Unix socket of the PostfixAdmin database of the password plugin
+__roundcube_password_db_socket: >-
+  {{ roundcube_password_db_host if roundcube_password_db_host is match('/')
+     else (__roundcube_mariadb_socket
+           if roundcube_password_db_type == 'mariadb' and roundcube_password_db_host == 'localhost'
+           else '') }}
+
+# A DSN in the PEAR format Roundcube parses (rcube_db::parse_dsn), built
+# from a connection (type, host, port, name, user, password, tls, ca,
+# socket). User, password and database are URL-encoded; Roundcube decodes
+# them. A socket goes into unix(<path>), with the port for PostgreSQL
+# (.s.PGSQL.<port>). TLS parameters are passed as DSN options.
+__roundcube_db_dsn: >-
+  {{ __roundcube_dsn_template
+     | replace('@TYPE@', __roundcube_db_drivers[roundcube_db_type])
+     | replace('@AUTH@', (roundcube_db_user | urlencode | replace('/', '%2F'))
+                         ~ ':' ~ (roundcube_db_password | urlencode | replace('/', '%2F')))
+     | replace('@HOST@', ('unix(' ~ __roundcube_db_socket
+                          ~ ((':' ~ roundcube_db_port) if roundcube_db_type == 'postgresql' else '') ~ ')')
+                         if __roundcube_db_socket | length > 0
+                         else ((('[' ~ roundcube_db_host ~ ']') if ':' in roundcube_db_host else roundcube_db_host)
+                               ~ ':' ~ roundcube_db_port))
+     | replace('@NAME@', roundcube_db_name | urlencode | replace('/', '%2F'))
+     | replace('@OPTIONS@', __roundcube_tls_options[roundcube_db_type]
+                            | replace('@CA@', roundcube_db_tls_ca_file)
+                            if roundcube_db_tls | bool else '')
+     if roundcube_db_type != 'sqlite'
+     else 'sqlite:///' ~ roundcube_db_path ~ '?mode=0640' }}
+
+__roundcube_password_db_dsn: >-
+  {{ __roundcube_dsn_template
+     | replace('@TYPE@', __roundcube_db_drivers[roundcube_password_db_type] | default(''))
+     | replace('@AUTH@', (roundcube_password_db_user | urlencode | replace('/', '%2F'))
+                         ~ ':' ~ (roundcube_password_db_password | urlencode | replace('/', '%2F')))
+     | replace('@HOST@', ('unix(' ~ __roundcube_password_db_socket
+                          ~ ((':' ~ roundcube_password_db_port)
+                             if roundcube_password_db_type == 'postgresql' else '') ~ ')')
+                         if __roundcube_password_db_socket | length > 0
+                         else ((('[' ~ roundcube_password_db_host ~ ']')
+                                if ':' in roundcube_password_db_host else roundcube_password_db_host)
+                               ~ ':' ~ roundcube_password_db_port))
+     | replace('@NAME@', roundcube_password_db_name | urlencode | replace('/', '%2F'))
+     | replace('@OPTIONS@', __roundcube_tls_options[roundcube_password_db_type] | default('')
+                            | replace('@CA@', roundcube_password_db_tls_ca_file)
+                            if roundcube_password_db_tls | bool else '') }}
+
+__roundcube_dsn_template: '@TYPE@://@AUTH@@@HOST@/@NAME@@OPTIONS@'
+
+# DSN options for TLS with verification of the certificate and the host
+# name per database type
+__roundcube_tls_options:
+  postgresql: '?sslmode=verify-full&sslrootcert=@CA@'
+  mariadb: '?ca=@CA@&verify_server_cert=1'
+
+# Prefix of a host for implicit TLS and STARTTLS in imap_host, smtp_host
+# and managesieve_host
+__roundcube_tls_prefixes:
+  implicit: 'ssl://'
+  starttls: 'tls://'
+  none: ''
+
+# password_algorithm of the password plugin per scheme; with
+# password_algorithm_prefix the plugin writes the scheme prefix
+# ({ARGON2ID}, {BLF-CRYPT}, {SHA512-CRYPT})
+__roundcube_password_algorithms:
+  ARGON2ID: 'hash-argon2id'
+  BLF-CRYPT: 'hash-bcrypt'
+  SHA512-CRYPT: 'sha512-crypt'
+
+# Update query of the password plugin for the PostfixAdmin schema
+__roundcube_password_default_query: >-
+  UPDATE mailbox SET password = %P, modified = NOW() WHERE username = %u
+
+# session.save_path of phpredis for roundcube_session_storage 'redis':
+# tcp:// or tls:// with host and port, or unix:// with the socket path;
+# the ACL user and password, database and prefix as URL parameters
+__roundcube_redis_save_path: >-
+  {%- set ns = namespace(params=[]) -%}
+  {%- if roundcube_redis_user | length > 0 -%}
+  {%- set ns.params = ns.params + ['auth[]=' ~ (roundcube_redis_user | urlencode | replace('/', '%2F'))] -%}
+  {%- endif -%}
+  {%- if roundcube_redis_password | length > 0 -%}
+  {%- set ns.params = ns.params + ['auth[]=' ~ (roundcube_redis_password | urlencode | replace('/', '%2F'))] -%}
+  {%- endif -%}
+  {%- set ns.params = ns.params + ['database=' ~ (roundcube_redis_database | int),
+                                   'prefix=' ~ (roundcube_redis_prefix | urlencode | replace('/', '%2F'))] -%}
+  {%- if roundcube_redis_tls | bool -%}
+  {%- set ns.params = ns.params + ['stream[verify_peer]=1', 'stream[verify_peer_name]=1'] -%}
+  {%- if roundcube_redis_tls_ca_file | length > 0 -%}
+  {%- set ns.params = ns.params + ['stream[cafile]=' ~ (roundcube_redis_tls_ca_file | urlencode)] -%}
+  {%- endif -%}
+  {%- endif -%}
+  {%- if roundcube_redis_host is match('/') -%}
+  unix://{{ roundcube_redis_host }}
+  {%- else -%}
+  {{ 'tls' if roundcube_redis_tls | bool else 'tcp' }}://{{ roundcube_redis_host }}
+  {%- endif -%}
+  ?{{ ns.params | join('&') }}
+
+# config.inc.php keys the role writes from its own variables (key => the
+# variable to set instead); roundcube_extra_config must not override them
+__roundcube_managed_config:
+  db_dsnw: 'roundcube_db_*'
+  db_dsnr: 'roundcube_db_*'
+  des_key: 'roundcube_des_key'
+  cipher_method: 'roundcube_cipher_method'
+  imap_host: 'roundcube_imap_host, roundcube_imap_port, roundcube_imap_tls'
+  imap_conn_options: 'roundcube_tls_ca_file'
+  smtp_host: 'roundcube_smtp_host, roundcube_smtp_port, roundcube_smtp_tls'
+  smtp_conn_options: 'roundcube_tls_ca_file'
+  smtp_user: '(the login of the user, set by the role)'
+  smtp_pass: '(the password of the user, set by the role)'
+  product_name: 'roundcube_product_name'
+  username_domain: 'roundcube_username_domain'
+  max_message_size: 'roundcube_max_message_size'
+  log_driver: 'roundcube_log_driver'
+  session_storage: 'roundcube_session_storage'
+  enable_installer: '(always false, set by the role)'
+  plugins: 'roundcube_plugins'
+  log_dir: 'roundcube_log_driver (file logs in /var/log/roundcube)'
+  syslog_id: '(always roundcube, set by the role)'
+  managesieve_host: 'roundcube_managesieve_host, roundcube_managesieve_port, roundcube_managesieve_tls'
+  managesieve_conn_options: 'roundcube_tls_ca_file'
+  managesieve_vacation: 'roundcube_managesieve_vacation'
+  managesieve_forward: 'roundcube_managesieve_forward'
+  password_driver: '(always sql, set by the role)'
+  password_db_dsn: 'roundcube_password_db_*'
+  password_query: 'roundcube_password_query'
+  password_algorithm: 'roundcube_password_scheme'
+  password_algorithm_prefix: 'roundcube_password_scheme'
+  password_confirm_current: '(always true, set by the role)'
+  password_minimum_length: 'roundcube_password_minimum_length'
+__roundcube_managed_config_prefixes:
+  redis_: 'roundcube_redis_* (sessions go through phpredis)'
+
+# Keys of roundcube_extra_config the role manages itself, each with the
+# variable to set instead
+__roundcube_extra_config_rejected: >-
+  {%- set ns = namespace(keys={}) -%}
+  {%- for key in (roundcube_extra_config if roundcube_extra_config is mapping else {}) -%}
+  {%- if key | string in __roundcube_managed_config -%}
+  {%- set ns.keys = ns.keys | combine({key | string: __roundcube_managed_config[key | string]}) -%}
+  {%- endif -%}
+  {%- for prefix, variable in __roundcube_managed_config_prefixes.items() -%}
+  {%- if (key | string).startswith(prefix) -%}
+  {%- set ns.keys = ns.keys | combine({key | string: variable}) -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {%- endfor -%}
+  {{ ns.keys }}
+
+__roundcube_password_schemes:
+  - 'ARGON2ID'
+  - 'BLF-CRYPT'
+  - 'SHA512-CRYPT'
+
+__roundcube_tls_modes:
+  - 'implicit'
+  - 'starttls'
+  - 'none'
+
+# Plugins whose settings the role writes
+__roundcube_password_enabled: "{{ 'password' in roundcube_plugins }}"
+__roundcube_managesieve_enabled: "{{ 'managesieve' in roundcube_plugins }}"
+
+# Directory of the file logs (roundcube_log_driver 'file'), outside the
+# releases so the logs survive the removal of an old release
+__roundcube_log_dir: '/var/log/roundcube'
+__roundcube_logrotate_file: '/etc/logrotate.d/roundcube'
+
+# Directories that are never taken over as the SQLite or backup directory
+__roundcube_system_dirs:
+  - ''
+  - '/'
+  - '/etc'
+  - '/home'
+  - '/opt'
+  - '/root'
+  - '/srv'
+  - '/tmp'
+  - '/usr'
+  - '/var'
+  - '/var/backups'
+  - '/var/cache'
+  - '/var/lib'
+  - '/var/log'
+  - '/var/tmp'
+  - '/var/www'
+
+# Directories the role creates and owns, with their owner and, for an
+# existing directory, the mode it has to have: the SQLite directory
+# (PHP-FPM user) and the backup directory (root, 0700). 'others' are the
+# paths of the role the directory must not be or lie below.
+__roundcube_owned_dirs: >-
+  {{ ([{'path': roundcube_db_path | dirname | regex_replace('/+$', ''), 'owner': __roundcube_fpm_user,
+        'mode': '', 'variable': 'roundcube_db_path', 'example': '/var/lib/roundcube/roundcube.db',
+        'others': __roundcube_paths + ([roundcube_backup_dir | regex_replace('/+$', '')]
+                                       if __roundcube_backup_active | bool else [])}]
+      if roundcube_db_type == 'sqlite' else [])
+     + ([{'path': roundcube_backup_dir | regex_replace('/+$', ''), 'owner': 'root', 'mode': '0700',
+          'variable': 'roundcube_backup_dir', 'example': '/var/backups/roundcube',
+          'others': __roundcube_paths + ([roundcube_db_path | dirname]
+                                         if roundcube_db_type == 'sqlite' else [])}]
+        if __roundcube_backup_active | bool else []) }}
+
+# Paths of the role itself; neither the SQLite nor the backup directory may
+# be one of them or lie below one
+__roundcube_paths:
+  - '{{ roundcube_install_dir }}'
+  - '{{ __roundcube_config_dir }}'
+  - '{{ __roundcube_cache_dir }}'
+  - '{{ __roundcube_log_dir }}'
+  - '{{ __roundcube_helper_dir }}'
+  - '{{ __roundcube_backup_script }}'
+  - '{{ __roundcube_logrotate_file }}'
+  - '{{ __roundcube_systemd_dir }}/{{ __roundcube_maintenance_service }}'
+  - '{{ __roundcube_systemd_dir }}/{{ __roundcube_maintenance_timer }}'
+
+# Mail servers reached as localhost with TLS
+__roundcube_localhost_servers: >-
+  {{ [{'name': 'roundcube_imap_host', 'host': roundcube_imap_host, 'tls': roundcube_imap_tls},
+      {'name': 'roundcube_smtp_host', 'host': roundcube_smtp_host, 'tls': roundcube_smtp_tls}]
+     + ([{'name': 'roundcube_managesieve_host', 'host': roundcube_managesieve_host,
+          'tls': roundcube_managesieve_tls}] if __roundcube_managesieve_enabled | bool else [])
+     | selectattr('host', 'in', __roundcube_loopback_hosts)
+     | rejectattr('tls', 'eq', 'none') | map(attribute='name') | list }}

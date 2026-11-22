@@ -1,0 +1,37 @@
+# Test resolver of the rspamd scenarios: the resolver of the instance
+# (/etc/resolv.conf) and, published on molecule_dns_port, of the DNS check
+# of the role on the controller. Names below example.com, example.org and
+# example.net come from here; everything else goes to the resolver the
+# instance had before.
+port=53
+# The addresses of the interfaces only: systemd-resolved of the Arch Linux
+# image holds port 53 on 127.0.0.53 and 127.0.0.54
+bind-interfaces
+user=root
+no-resolv
+no-hosts
+{% for server in __prepare_upstream_resolvers %}
+server={{ server }}
+{% endfor %}
+local=/example.com/
+local=/example.org/
+local=/example.net/
+
+# example.com: the signing domain, DMARC record as expected
+txt-record=_dmarc.example.com,"v=DMARC1; p=quarantine"
+
+# example.org: second signing domain, DKIM record missing, DMARC record
+# different
+txt-record=_dmarc.example.org,"v=DMARC1; p=none"
+
+# example.net: the outside world (the sending MTA of the external test
+# messages, SPF passes for it)
+mx-host=example.net,mx.example.net,10
+host-record=mx.example.net,192.0.2.25
+txt-record=example.net,"v=spf1 ip4:192.0.2.25 -all"
+
+# DKIM records of the keys the role created: a second dnsmasq on port 5354
+# that verify.yml starts once the keys exist (a running dnsmasq cannot
+# reload its records, and the container does not let systemd stop it)
+server=/_domainkey.example.com/127.0.0.1#5354
+server=/_domainkey.example.org/127.0.0.1#5354

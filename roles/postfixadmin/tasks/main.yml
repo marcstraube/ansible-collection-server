@@ -1,0 +1,272 @@
+---
+- name: Main | Load OS-specific variables
+  ansible.builtin.include_vars: '{{ item }}'
+  with_first_found:
+    - files:
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}.yml'
+      paths:
+        - 'vars'
+  tags:
+    - always
+
+# ansible_check_mode follows --check only, not the check_mode keyword of a
+# play, block or include. A command without check_mode: false is skipped in
+# either case, so the probe tells the helper calls (check_mode: false) and
+# the guards below whether this run is a check run.
+- name: Main | Detect check mode
+  ansible.builtin.command: 'true'
+  register: __postfixadmin_check_probe
+  changed_when: false
+  tags:
+    - always
+
+- name: Main | Store the check mode
+  ansible.builtin.set_fact:
+    __postfixadmin_check_mode: '{{ __postfixadmin_check_probe is skipped }}'
+  tags:
+    - always
+
+- name: Main | Validate the release and installation settings
+  ansible.builtin.assert:
+    that:
+      - postfixadmin_version == 'latest' or postfixadmin_version is match(__postfixadmin_version_pattern)
+      - postfixadmin_version == 'latest' or postfixadmin_checksum is match('^sha256:[0-9a-f]{64}$')
+      - postfixadmin_install_dir is match('^/.+[^/]$')
+      - postfixadmin_php_cli | length > 0
+      - postfixadmin_backup_dir is match('^/.+')
+      - postfixadmin_backup_update_keep | int >= 1
+    fail_msg: |
+      postfixadmin_version must be a release such as '4.0.6' (without 'v')
+      or 'latest', postfixadmin_checksum 'sha256:<hash>' of its archive,
+      postfixadmin_install_dir an absolute path without a trailing slash,
+      postfixadmin_php_cli the PHP command line binary,
+      postfixadmin_backup_dir an absolute path and
+      postfixadmin_backup_update_keep at least 1.
+  when:
+    - postfixadmin_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate the database settings
+  ansible.builtin.assert:
+    that:
+      - postfixadmin_db_type in __postfixadmin_db_drivers
+      - postfixadmin_db_host | length > 0
+      - postfixadmin_db_name is match('^[A-Za-z0-9_]+$')
+      - postfixadmin_db_user | length > 0
+      - postfixadmin_db_password | length > 0
+      - not (postfixadmin_db_create | bool) or __postfixadmin_db_local | bool
+      - postfixadmin_db_readers | length == 0 or __postfixadmin_db_local | bool
+    fail_msg: |
+      postfixadmin_db_type must be 'postgresql' or 'mariadb';
+      postfixadmin_db_host, postfixadmin_db_name, postfixadmin_db_user and
+      postfixadmin_db_password must be set (store the password in the vault).
+      postfixadmin_db_create and postfixadmin_db_readers need a database
+      server on this host (postfixadmin_db_host a loopback address or a unix
+      socket); create the database and the users on a remote server with its
+      own role.
+  when:
+    - postfixadmin_enabled | bool
+  tags:
+    - always
+
+# TLS is optional; a connection without it is meant for a private network
+# or WireGuard. A unix socket (a socket path, or 'localhost' with MariaDB)
+# stays on the host and takes no TLS.
+- name: Main | Validate the database TLS settings
+  ansible.builtin.assert:
+    that:
+      - not (postfixadmin_db_tls | bool) or postfixadmin_db_tls_ca_file | length > 0
+      - not (postfixadmin_db_tls | bool) or __postfixadmin_db_socket | length == 0
+    fail_msg: |
+      {% if postfixadmin_db_tls_ca_file | length == 0 %}
+      postfixadmin_db_tls needs postfixadmin_db_tls_ca_file.
+      {% else %}
+      postfixadmin_db_tls needs a TCP connection; '{{ postfixadmin_db_host }}'
+      connects through the unix socket {{ __postfixadmin_db_socket }}
+      (use the host name of the server certificate).
+      {% endif %}
+  when:
+    - postfixadmin_enabled | bool
+  tags:
+    - always
+
+# The loop runs over the entries without their passwords: a failed item
+# prints its loop item.
+- name: Main | Validate the read-only database users
+  ansible.builtin.assert:
+    that:
+      - item.name is match('^[A-Za-z0-9_]+$')
+      - item.state in ['present', 'absent']
+      - item.state == 'absent' or item.password_set
+      - item.tables | select('match', '^[a-z_][a-z0-9_]*$') | list | length == item.tables | length
+    fail_msg: >-
+      Every entry of postfixadmin_db_readers needs a name, a password (unless
+      state: absent) and tables of lowercase names.
+  loop: >-
+    {%- set ns = namespace(entries=[]) -%}
+    {%- for reader in postfixadmin_db_readers -%}
+    {%- set ns.entries = ns.entries + [{
+          'name': reader.name | default(''), 'state': reader.state | default('present'),
+          'tables': reader.tables | default(__postfixadmin_reader_tables),
+          'password_set': reader.password | default('') | length > 0}] -%}
+    {%- endfor -%}
+    {{ ns.entries }}
+  loop_control:
+    label: '{{ item.name }}'
+  when:
+    - postfixadmin_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate the password scheme and the configuration
+  ansible.builtin.assert:
+    that:
+      - postfixadmin_password_scheme in __postfixadmin_password_schemes
+      - postfixadmin_account_mode in __postfixadmin_account_modes
+      - not (postfixadmin_vacation_enabled | bool) or postfixadmin_vacation_domain | length > 0
+      - postfixadmin_default_aliases is mapping
+      - postfixadmin_extra_config is mapping
+      - postfixadmin_password_validation is mapping
+      # pattern => '<message key>' or '<message key> <value>'
+      - >-
+        postfixadmin_password_validation.values() | select('string')
+        | select('match', '^[A-Za-z0-9_]+( .+)?$') | list | length
+        == postfixadmin_password_validation | length
+      - postfixadmin_sogo_view_name is match('^[a-z_][a-z0-9_]*$')
+    fail_msg: |
+      postfixadmin_password_scheme must be one of {{ __postfixadmin_password_schemes | join(', ') }},
+      postfixadmin_account_mode one of {{ __postfixadmin_account_modes | join(', ') }}.
+      postfixadmin_vacation_enabled needs postfixadmin_vacation_domain.
+      postfixadmin_default_aliases and postfixadmin_extra_config are mappings,
+      postfixadmin_password_validation a mapping of '/pattern/' => '<message key> [value]',
+      postfixadmin_sogo_view_name a lowercase SQL name.
+  when:
+    - postfixadmin_enabled | bool
+  tags:
+    - always
+
+# config.local.php writes postfixadmin_extra_config after the settings of
+# the role variables, so a managed key there would override a setting the
+# role validates (the password scheme, the database connection).
+- name: Main | Validate postfixadmin_extra_config against the managed settings
+  ansible.builtin.assert:
+    that:
+      - __postfixadmin_extra_config_rejected | length == 0
+    fail_msg: |
+      postfixadmin_extra_config sets keys the role writes from its own variables;
+      set these variables instead:
+      {% for key, variable in __postfixadmin_extra_config_rejected.items() %}
+      - {{ key }}: {{ variable }}
+      {% endfor %}
+  when:
+    - postfixadmin_enabled | bool
+  tags:
+    - always
+
+# Passwords have no default: an entry that creates or manages an admin or a
+# mailbox fails here, before anything changes.
+- name: Main | Validate the account entries
+  ansible.builtin.assert:
+    that:
+      - __postfixadmin_type_entries | rejectattr(item.key, 'defined') | list | length == 0
+      - >-
+        __postfixadmin_type_entries | map(attribute='mode')
+        | reject('in', __postfixadmin_account_modes) | list | length == 0
+      - __postfixadmin_type_entries | map(attribute='state') | reject('in', ['present', 'absent']) | list | length == 0
+      - __postfixadmin_missing_passwords | length == 0
+      - item.type != 'alias' or __postfixadmin_active | rejectattr('goto', 'defined') | list | length == 0
+      - >-
+        item.type != 'alias'
+        or __postfixadmin_active | map(attribute='goto', default=[]) | select('string') | list | length == 0
+      - >-
+        item.type != 'alias'
+        or __postfixadmin_active | map(attribute='goto', default=[])
+           | map('length') | select('eq', 0) | list | length == 0
+      - >-
+        item.type != 'alias_domain'
+        or __postfixadmin_active | rejectattr('target_domain', 'defined') | list | length == 0
+    fail_msg: |
+      {{ item.variable }}: every entry needs '{{ item.key }}', mode one of
+      {{ __postfixadmin_account_modes | join(', ') }} and state present or absent.
+      {% if item.password %}
+      A password is required for every entry that is not absent or disabled;
+      missing for: {{ __postfixadmin_missing_passwords | join(', ') }}
+      {% endif %}
+      {% if item.type == 'alias' %}
+      Aliases need goto as a non-empty list of targets.
+      {% endif %}
+      {% if item.type == 'alias_domain' %}
+      Alias domains need target_domain.
+      {% endif %}
+  vars:
+    __postfixadmin_active: >-
+      {{ __postfixadmin_type_entries | selectattr('state', 'eq', 'present')
+         | rejectattr('mode', 'eq', 'disabled') | list }}
+    __postfixadmin_missing_passwords: >-
+      {{ (__postfixadmin_active | selectattr('password', 'undefined') | list
+          + __postfixadmin_active | selectattr('password', 'defined') | selectattr('password', 'eq', '') | list)
+         | map(attribute=item.key, default='(no ' ~ item.key ~ ')') | list
+         if item.password else [] }}
+  loop: '{{ __postfixadmin_account_types }}'
+  loop_control:
+    label: '{{ item.variable }}'
+  when:
+    - postfixadmin_enabled | bool
+  tags:
+    - always
+
+- name: Main | Import install tasks
+  ansible.builtin.import_tasks: install.yml
+  when: postfixadmin_enabled | bool
+  tags:
+    - postfixadmin
+    - postfixadmin:install
+
+- name: Main | Import database tasks
+  ansible.builtin.import_tasks: database.yml
+  when:
+    - postfixadmin_enabled | bool
+    - postfixadmin_db_create | bool
+  tags:
+    - postfixadmin
+    - postfixadmin:database
+
+- name: Main | Import configure tasks
+  ansible.builtin.import_tasks: configure.yml
+  when: postfixadmin_enabled | bool
+  tags:
+    - postfixadmin
+    - postfixadmin:configure
+
+# The schema upgrade tasks in schema.yml also carry postfixadmin:install:
+# a release change under --tags postfixadmin:install upgrades the schema
+# as well.
+- name: Main | Import schema tasks
+  ansible.builtin.import_tasks: schema.yml
+  when: postfixadmin_enabled | bool
+  tags:
+    - postfixadmin
+    - postfixadmin:schema
+
+# The grants need the tables (and the SOGo view) of the schema tasks.
+- name: Main | Import readers tasks
+  ansible.builtin.import_tasks: readers.yml
+  when:
+    - postfixadmin_enabled | bool
+    - postfixadmin_db_readers | length > 0
+    - not (__postfixadmin_check_mode and __postfixadmin_release_changed | default(false) | bool)
+  tags:
+    - postfixadmin
+    - postfixadmin:database
+
+- name: Main | Import accounts tasks
+  ansible.builtin.import_tasks: accounts.yml
+  when: postfixadmin_enabled | bool
+  tags:
+    - postfixadmin
+    - postfixadmin:accounts

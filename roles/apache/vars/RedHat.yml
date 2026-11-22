@@ -28,6 +28,11 @@ __apache_tools_packages:
 __apache_ssl_packages:
   - mod_ssl
 
+# HTTP/2 package, a weak dependency of httpd that is missing where weak
+# dependencies are not installed
+__apache_http2_packages:
+  - mod_http2
+
 # Ports the SELinux policy labels http_port_t out of the box; listen ports
 # outside this list get the label from the role.
 __apache_selinux_default_ports:
@@ -47,3 +52,8 @@ __apache_pid_file: '/run/httpd/httpd.pid'
 # Installed packages a targeted update moves along (httpd, httpd-core,
 # httpd-filesystem, httpd-tools, mod_ssl)
 __apache_update_pattern: '^(httpd(-.+)?|mod_ssl)$'
+
+# SELinux management tools: semanage for the port labels (seport) and the
+# file contexts of apache_writable_paths (sefcontext)
+__apache_selinux_packages:
+  - policycoreutils-python-utils
