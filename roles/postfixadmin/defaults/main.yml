@@ -87,7 +87,9 @@ postfixadmin_db_create: false
 # MariaDB account host (default 'localhost'); PostgreSQL controls the
 # client addresses in pg_hba.conf. 'tables' defaults to domain, mailbox,
 # alias and alias_domain; the SOGo user needs the view
-# (postfixadmin_sogo_view_name). state: absent removes the user.
+# (postfixadmin_sogo_view_name). 'update_columns' grants UPDATE on single columns
+# ('<table>.<column>' of 'tables'), e.g. the c_password column of the view
+# for password changes in SOGo. state: absent removes the user.
 postfixadmin_db_readers: []
 # Example:
 #   - name: 'postfix'
@@ -96,9 +98,12 @@ postfixadmin_db_readers: []
 #   - name: 'dovecot'
 #     password: '{{ vault_postfixadmin_db_dovecot_password }}'
 #     tables: ['domain', 'mailbox', 'alias_domain']
-#   - name: 'sogo'
+#   - name: 'sogo_view'
 #     password: '{{ vault_postfixadmin_db_sogo_password }}'
+#     host: '127.0.0.1'
 #     tables: ['sogo_users']
+#     # Only with sogo_password_change_enabled
+#     update_columns: ['sogo_users.c_password']
 
 #
 # Pre-update Backup

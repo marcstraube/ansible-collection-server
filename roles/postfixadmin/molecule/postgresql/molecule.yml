@@ -72,6 +72,8 @@ provisioner:
           - name: 'sogo_ro'
             password: 'sogo-Reader-42'
             tables: ['sogo_users']
+            # Password changes in SOGo
+            update_columns: ['sogo_users.c_password']
         postfixadmin_sogo_view_enabled: true
         # A dedicated PHP-FPM pool with a user of its own (prepare creates
         # both); verify requests PostfixAdmin through its socket

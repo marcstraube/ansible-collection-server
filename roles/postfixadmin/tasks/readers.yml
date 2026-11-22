@@ -48,6 +48,64 @@
     __postfixadmin_absent: "{{ item.state | default('present') == 'absent' }}"
   when: postfixadmin_db_type == 'postgresql'
 
+# UPDATE on single columns ('update_columns': SOGo changes a password
+# through the c_password column of its view). postgresql_privs grants on
+# whole tables only, so the column privileges are read from the column ACLs
+# (pg_attribute.attacl, which a table-level grant does not fill) and granted
+# or revoked here; a column taken out of 'update_columns' loses the grant.
+- name: Readers | Read the column privileges (PostgreSQL)
+  community.postgresql.postgresql_query:
+    login_db: '{{ postfixadmin_db_name }}'
+    login_unix_socket: '{{ __postfixadmin_pg_socket_dir | default(omit, true) }}'
+    login_port: '{{ postfixadmin_db_port | int }}'
+    query: >-
+      SELECT c.relname || '.' || a.attname AS col FROM pg_attribute a
+      JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+      CROSS JOIN LATERAL aclexplode(a.attacl) x JOIN pg_roles r ON r.oid = x.grantee
+      WHERE n.nspname = 'public' AND x.privilege_type = 'UPDATE' AND r.rolname = %(role)s
+    named_args:
+      role: '{{ item.name }}'
+  become: true
+  become_user: postgres
+  loop: "{{ __postfixadmin_db_readers_public | rejectattr('state', 'defined') | list
+            + __postfixadmin_db_readers_public | selectattr('state', 'defined')
+              | selectattr('state', 'eq', 'present') | list }}"
+  loop_control:
+    label: '{{ item.name }}'
+  register: __postfixadmin_column_privs
+  changed_when: false
+  check_mode: false
+  when: postfixadmin_db_type == 'postgresql'
+
+# Identifiers are validated in main.yml (lowercase SQL names)
+- name: Readers | Grant and revoke UPDATE on columns (PostgreSQL)
+  community.postgresql.postgresql_query:
+    login_db: '{{ postfixadmin_db_name }}'
+    login_unix_socket: '{{ __postfixadmin_pg_socket_dir | default(omit, true) }}'
+    login_port: '{{ postfixadmin_db_port | int }}'
+    query: >-
+      {{ 'GRANT' if item.1.grant else 'REVOKE' }} UPDATE ({{ item.1.column.split('.') | last }})
+      ON public.{{ item.1.column.split('.') | first }}
+      {{ 'TO' if item.1.grant else 'FROM' }} "{{ item.0.item.name }}"
+  become: true
+  become_user: postgres
+  loop: >-
+    {%- set ns = namespace(pairs=[]) -%}
+    {%- for result in __postfixadmin_column_privs.results | default([]) | selectattr('query_result', 'defined') -%}
+    {%- set current = result.query_result | map(attribute='col') | list -%}
+    {%- set wanted = result.item.update_columns | default([]) -%}
+    {%- for column in wanted | reject('in', current) -%}
+    {%- set ns.pairs = ns.pairs + [[result, {'column': column, 'grant': true}]] -%}
+    {%- endfor -%}
+    {%- for column in current | reject('in', wanted) -%}
+    {%- set ns.pairs = ns.pairs + [[result, {'column': column, 'grant': false}]] -%}
+    {%- endfor -%}
+    {%- endfor -%}
+    {{ ns.pairs }}
+  loop_control:
+    label: "{{ item.0.item.name }}: {{ 'GRANT' if item.1.grant else 'REVOKE' }} UPDATE {{ item.1.column }}"
+  when: postfixadmin_db_type == 'postgresql'
+
 # The grants were revoked above; a user that still holds privileges in
 # another database is not dropped and fails the task.
 - name: Readers | Remove the PostgreSQL users
@@ -71,10 +129,19 @@
     name: '{{ item.name }}'
     host: '{{ item.host | default("localhost") }}'
     password: '{{ item.password | default(omit) }}'
+    # SELECT on every table, UPDATE on the columns of 'update_columns' in the form
+    # SHOW GRANTS prints it (sorted, quoted), so a run without a change
+    # reports none
     priv: >-
-      {{ item.tables | default(__postfixadmin_reader_tables)
-         | map('regex_replace', '^', postfixadmin_db_name ~ '.')
-         | map('regex_replace', '$', ':SELECT') | join('/') }}
+      {%- set ns = namespace(privs=[]) -%}
+      {%- for table in item.tables | default(__postfixadmin_reader_tables) -%}
+      {%- set columns = item.update_columns | default([]) | select('match', '^' ~ table ~ '[.]')
+                        | map('regex_replace', '^[^.]*[.]', '') | sort | list -%}
+      {%- set ns.privs = ns.privs + [postfixadmin_db_name ~ '.' ~ table ~ ':SELECT'
+            ~ ((',UPDATE (' ~ columns | map('regex_replace', '^(.*)$', '`\\1`') | join(', ') ~ ')')
+               if columns | length > 0 else '')] -%}
+      {%- endfor -%}
+      {{ ns.privs | join('/') }}
     login_unix_socket: '{{ __postfixadmin_mariadb_login_socket }}'
     state: '{{ item.state | default("present") }}'
   loop: '{{ postfixadmin_db_readers }}'

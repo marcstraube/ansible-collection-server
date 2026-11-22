@@ -228,13 +228,14 @@ PostfixAdmin tables, each with `SELECT` on its tables only. Same
 requirement as `postfixadmin_db_create` (a server on this host); for a
 remote server grant the privileges there.
 
-| Key        | Default                                      | Description                                      |
-| ---------- | -------------------------------------------- | ------------------------------------------------ |
-| `name`     | —                                            | Database user                                    |
-| `password` | —                                            | **REQUIRED** unless `state: absent`              |
-| `host`     | `'localhost'`                                | MariaDB account host (PostgreSQL: `pg_hba.conf`) |
-| `tables`   | `domain`, `mailbox`, `alias`, `alias_domain` | Tables (or the SOGo view) with `SELECT`          |
-| `state`    | `present`                                    | `absent` revokes the grants and drops the user   |
+| Key              | Default                                      | Description                                      |
+| ---------------- | -------------------------------------------- | ------------------------------------------------ |
+| `name`           | —                                            | Database user                                    |
+| `password`       | —                                            | **REQUIRED** unless `state: absent`              |
+| `host`           | `'localhost'`                                | MariaDB account host (PostgreSQL: `pg_hba.conf`) |
+| `tables`         | `domain`, `mailbox`, `alias`, `alias_domain` | Tables (or the SOGo view) with `SELECT`          |
+| `update_columns` | `[]`                                         | `<table>.<column>` of `tables` with `UPDATE`     |
+| `state`          | `present`                                    | `absent` revokes the grants and drops the user   |
 
 ```yaml
 postfixadmin_db_readers:
@@ -243,10 +244,18 @@ postfixadmin_db_readers:
   - name: 'dovecot'
     password: '{{ vault_postfixadmin_db_dovecot_password }}'
     tables: ['domain', 'mailbox', 'alias_domain']
-  - name: 'sogo'
+  # sogo_postfixadmin_db_user of marcstraube.server.sogo; SOGo connects
+  # over TCP (MariaDB account host)
+  - name: 'sogo_view'
     password: '{{ vault_postfixadmin_db_sogo_password }}'
+    host: '127.0.0.1'
     tables: ['sogo_users']
+    # Only for password changes in SOGo (sogo_password_change_enabled)
+    update_columns: ['sogo_users.c_password']
 ```
+
+`update_columns` grants `UPDATE` on single columns only, never on a whole table, and
+takes a column out of the list away again on both database types.
 
 On MariaDB the grants of a user are replaced by `tables`, so a table taken
 out of the list loses its grant; on PostgreSQL the role only grants, a
@@ -460,8 +469,14 @@ of SOGo:
 
 It lists the active mailboxes of active domains. The SOGo database user
 needs `SELECT` on the view (`tables: ['sogo_users']` in
-`postfixadmin_db_readers`). Turning the option off drops the view, but only
-when it still has exactly these columns.
+`postfixadmin_db_readers`). SOGo changes a password with an `UPDATE` of
+`c_password` on the view, so the view selects from `mailbox` alone (the
+active domains in a subquery), which PostgreSQL and MariaDB both accept as
+an updatable view; a view of the role that cannot take an `UPDATE` (the
+join of earlier versions) is replaced on the next run. For password changes
+in SOGo the user also needs `UPDATE` on that column
+(`update_columns: ['sogo_users.c_password']`). Turning the option off drops the
+view, but only when it still has exactly these columns.
 
 ### Vacation
 

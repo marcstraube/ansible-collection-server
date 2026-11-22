@@ -178,6 +178,100 @@
              | map(attribute='stdout') | list }}
 
     #
+    # Column privileges: update_columns taken away and given back
+    #
+
+    - name: Side Effect | Include postfixadmin role without update_columns  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        postfixadmin_db_readers:
+          - name: 'postfix_ro'
+            password: 'postfix-Reader-42'
+          - name: 'sogo_ro'
+            password: 'sogo-Reader-42'
+            tables: ['sogo_users']
+
+    - name: Side Effect | Change a password as sogo_ro without the grant (PostgreSQL)
+      community.postgresql.postgresql_query:
+        login_host: '127.0.0.1'
+        login_user: 'sogo_ro'
+        login_password: 'sogo-Reader-42'
+        login_db: 'postfixadmin'
+        query: "UPDATE sogo_users SET c_password = c_password WHERE c_uid = 'x'"
+      register: __side_effect_revoked_pg
+      failed_when: __side_effect_revoked_pg is succeeded
+      when: postfixadmin_db_type == 'postgresql'
+
+    - name: Side Effect | Change a password as sogo_ro without the grant (MariaDB)
+      ansible.mariadb.mariadb_query:
+        login_unix_socket: '{{ __side_effect_mariadb_sockets[ansible_facts["os_family"]] }}'
+        login_user: 'sogo_ro'
+        login_password: 'sogo-Reader-42'
+        login_db: 'postfixadmin'
+        query: "UPDATE sogo_users SET c_password = c_password WHERE c_uid = 'x'"
+      register: __side_effect_revoked_mariadb
+      failed_when: __side_effect_revoked_mariadb is succeeded
+      when: postfixadmin_db_type == 'mariadb'
+
+    # The view of earlier role versions: a join, which takes no UPDATE on
+    # PostgreSQL. The role replaces it and keeps or restores the grants.
+    - name: Side Effect | Recreate the join view of earlier versions (PostgreSQL)
+      ansible.builtin.command:
+        argv:
+          - php
+          - '{{ __side_effect_query }}'
+          - exec
+          - '{{ __side_effect_dir }}'
+          - >-
+            CREATE OR REPLACE VIEW sogo_users AS
+            SELECT m.username AS c_uid, m.username AS c_name, m.password AS c_password,
+            m.name AS c_cn, m.username AS mail, m.domain AS domain
+            FROM mailbox m JOIN domain d ON d.domain = m.domain WHERE m.active AND d.active
+      changed_when: true
+      when: postfixadmin_db_type == 'postgresql'
+
+    - name: Side Effect | Include postfixadmin role with update_columns again  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+
+    - name: Side Effect | Look up whether the SOGo view takes an UPDATE
+      ansible.builtin.command:
+        argv:
+          - php
+          - '{{ __side_effect_query }}'
+          - sql
+          - '{{ __side_effect_dir }}'
+          - "SELECT is_updatable FROM information_schema.views WHERE table_name = 'sogo_users'"
+      register: __side_effect_updatable
+      changed_when: false
+
+    - name: Side Effect | Change a password as sogo_ro with the grant (PostgreSQL)
+      community.postgresql.postgresql_query:
+        login_host: '127.0.0.1'
+        login_user: 'sogo_ro'
+        login_password: 'sogo-Reader-42'
+        login_db: 'postfixadmin'
+        query: "UPDATE sogo_users SET c_password = c_password WHERE c_uid = 'x'"
+      when: postfixadmin_db_type == 'postgresql'
+
+    - name: Side Effect | Change a password as sogo_ro with the grant (MariaDB)
+      ansible.mariadb.mariadb_query:
+        login_unix_socket: '{{ __side_effect_mariadb_sockets[ansible_facts["os_family"]] }}'
+        login_user: 'sogo_ro'
+        login_password: 'sogo-Reader-42'
+        login_db: 'postfixadmin'
+        query: "UPDATE sogo_users SET c_password = c_password WHERE c_uid = 'x'"
+      when: postfixadmin_db_type == 'mariadb'
+
+    - name: Side Effect | Assert the view was replaced by an updatable one
+      ansible.builtin.assert:
+        that:
+          - (__side_effect_updatable.stdout | from_json | first).values() | first | upper == 'YES'
+          - postfixadmin_db_type != 'postgresql' or __postfixadmin_sogo_view is changed
+        fail_msg: '{{ __side_effect_updatable.stdout }}'
+
+    #
     # Check mode of the helper on the configured host
     #
 
