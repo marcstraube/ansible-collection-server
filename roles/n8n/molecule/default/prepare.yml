@@ -91,12 +91,12 @@
         validate: 'visudo -cf %s'
       when: ansible_facts['os_family'] == 'RedHat'
 
-    # The Arch Linux and Rocky 10 test images ship newuidmap/newgidmap
+    # The Arch Linux and Rocky Linux test images ship newuidmap/newgidmap
     # without the file capabilities the shadow package sets on a real host;
     # rootless podman as the n8n user cannot create its user namespace
     # without them (test container only).
 
-    - name: Prepare | Restore the ID map helper capabilities (Arch and Rocky 10 containers)
+    - name: Prepare | Restore the ID map helper capabilities (Arch and Rocky containers)
       community.general.capabilities:
         path: '/usr/bin/{{ item.helper }}'
         capability: '{{ item.capability }}'
@@ -104,10 +104,7 @@
       loop:
         - { helper: newuidmap, capability: cap_setuid+ep }
         - { helper: newgidmap, capability: cap_setgid+ep }
-      when: >-
-        ansible_facts['os_family'] == 'Archlinux'
-        or (ansible_facts['os_family'] == 'RedHat'
-            and ansible_facts['distribution_major_version'] == '10')
+      when: ansible_facts['os_family'] in ['Archlinux', 'RedHat']
 
     - name: Prepare | Update package cache (Arch)
       community.general.pacman:
