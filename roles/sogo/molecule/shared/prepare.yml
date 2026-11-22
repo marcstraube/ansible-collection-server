@@ -1,0 +1,566 @@
+---
+# Test environment of the postgresql and mariadb scenarios, everything on one
+# instance as on a single mail host: the database server of molecule_db_type,
+# PostfixAdmin with the test accounts, the SOGo view and the read-only user
+# of SOGo (roles of this collection, PHP through marcstraube.common.php),
+# Postfix, Dovecot with ManageSieve, a shared mailbox and the Sieve
+# administrator, nginx with the site of the README, the test CA in the trust
+# store and the test resolver. Rocky Linux gets podman
+# (marcstraube.common.podman) and a tmpfs for the podman storage of the sogo
+# user; Arch Linux the AUR build user. Debian starts with the oldest SOGo
+# release of the mirror (with package files of the release before it from
+# snapshot.debian.org when the mirror has one release only), so side_effect
+# has an update to install.
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - vars/main.yml
+
+  vars:
+    __prepare_packages:
+      Archlinux:
+        - systemd
+        - dbus
+        - procps-ng
+        - iproute2
+        - openssl
+        - dnsmasq
+        - python-cryptography
+        - base-devel
+        - git
+        - curl
+      Debian:
+        - systemd
+        - dbus
+        - procps
+        - iproute2
+        - locales
+        - openssl
+        - dnsmasq-base
+        - ca-certificates
+        - python3-cryptography
+        - curl
+      RedHat:
+        - systemd
+        - dbus
+        - procps-ng
+        - iproute
+        - glibc-langpack-en
+        - openssl
+        - dnsmasq
+        - python3-cryptography
+    # PHP extensions PostfixAdmin needs besides the PDO driver: Debian and
+    # EL compile iconv in, Arch Linux builds mbstring in
+    __prepare_php_extensions:
+      postgresql:
+        Archlinux: ['pdo_pgsql', 'iconv']
+        Debian: ['pdo_pgsql', 'mbstring']
+        RedHat: ['pdo_pgsql', 'mbstring']
+      mariadb:
+        Archlinux: ['pdo_mysql', 'iconv']
+        Debian: ['pdo_mysql', 'mbstring']
+        RedHat: ['pdo_mysql', 'mbstring']
+    # EL 9: the php:8.3 module stream, the first with Argon2
+    __prepare_php_version: >-
+      {{ '8.3' if ansible_facts['os_family'] == 'RedHat'
+                 and ansible_facts['distribution_major_version'] == '9' else 'auto' }}
+    # mail.example.com for Postfix, Dovecot and nginx; the MariaDB server
+    # also for the TLS connection of SOGo to 127.0.0.1
+    __prepare_certificates: >-
+      {{ [{'name': 'mail', 'names': ['mail.example.com']}]
+         + ([{'name': 'db', 'names': ['db.example.com', 'localhost'], 'ips': ['127.0.0.1'], 'key_mode': '0644'}]
+            if molecule_db_type == 'mariadb' else []) }}
+    __prepare_mail_address: '127.0.0.1'
+    __prepare_trust_anchor:
+      Archlinux: '/etc/ca-certificates/trust-source/anchors/sogo-molecule-ca.crt'
+      Debian: '/usr/local/share/ca-certificates/sogo-molecule-ca.crt'
+      RedHat: '/etc/pki/ca-trust/source/anchors/sogo-molecule-ca.crt'
+    __prepare_trust_update:
+      Archlinux: ['update-ca-trust']
+      Debian: ['update-ca-certificates']
+      RedHat: ['update-ca-trust']
+
+  tasks:
+    # Sudo PAM bypass — required for tasks using `become_user` on
+    # geerlingguy Rocky containers under GitHub-hosted runners
+    # (test container only).
+
+    - name: Prepare | Bypass sudo PAM stack (RedHat container)
+      ansible.builtin.copy:
+        content: |
+          #%PAM-1.0
+          auth       sufficient   pam_permit.so
+          account    sufficient   pam_permit.so
+          password   sufficient   pam_permit.so
+          session    sufficient   pam_permit.so
+        dest: /etc/pam.d/sudo
+        owner: root
+        group: root
+        mode: '0644'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Disable sudoers authentication (RedHat container)
+      ansible.builtin.copy:
+        content: 'Defaults !authenticate'
+        dest: /etc/sudoers.d/molecule-no-auth
+        owner: root
+        group: root
+        mode: '0440'
+        validate: 'visudo -cf %s'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Update package cache (Arch)
+      community.general.pacman:
+        update_cache: true
+        upgrade: true
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    # The pacman ignore drop-in setup of marcstraube.common.package_management
+    # that the database roles expect; pacman fails on an Include glob
+    # without a match, so a file is in place before the Include line
+    - name: Prepare | Create pacman ignore drop-in directory (Arch)
+      ansible.builtin.file:
+        path: /etc/pacman.d/ignore.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Create pacman ignore drop-in (Arch)
+      ansible.builtin.copy:
+        content: "# molecule\n"
+        dest: /etc/pacman.d/ignore.d/00-molecule.conf
+        owner: root
+        group: root
+        mode: '0644'
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Include pacman ignore drop-ins (Arch)
+      ansible.builtin.lineinfile:
+        path: /etc/pacman.conf
+        line: 'Include = /etc/pacman.d/ignore.d/*.conf'
+        insertafter: '^\[options\]'
+        firstmatch: true
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Update package cache (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Update package cache (RedHat)
+      ansible.builtin.dnf:
+        update_cache: true
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    # The upstream Dovecot packages for EL depend on libunwind from EPEL
+    # (README of the dovecot role)
+    - name: Prepare | Enable EPEL (RedHat)
+      ansible.builtin.dnf:
+        name: epel-release
+        state: present
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name: '{{ __prepare_packages[ansible_facts["os_family"]] }}'
+        state: present
+      retries: 3
+      delay: 5
+
+    # The PostgreSQL role sets the en_US.UTF-8 locale in the molecule vars
+    - name: Prepare | Generate en_US.UTF-8 locale (Debian)
+      community.general.locale_gen:
+        name: en_US.UTF-8
+        state: present
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Enable PostgreSQL 16 module stream (EL9)
+      ansible.builtin.dnf:
+        name: '@postgresql:16'
+        state: present
+      when:
+        - molecule_db_type == 'postgresql'
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['distribution_major_version'] == '9'
+
+    #
+    # AUR build user (Arch Linux)
+    #
+
+    - name: Prepare | Create aur_builder user for AUR packages (Arch)
+      ansible.builtin.user:
+        name: aur_builder
+        group: wheel
+        create_home: true
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Allow aur_builder passwordless sudo (Arch)
+      ansible.builtin.copy:
+        content: "aur_builder ALL=(ALL) NOPASSWD: /usr/bin/pacman\n"
+        dest: /etc/sudoers.d/99-aur_builder
+        owner: root
+        group: root
+        mode: '0440'
+        validate: 'visudo -cf %s'
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    #
+    # Rootless podman of the sogo user (Rocky Linux)
+    #
+    # The podman storage of the sogo user lives on a tmpfs (test container
+    # only): the root file system of the container is an overlay, and
+    # extracting an image layer there fails because the whiteouts of the
+    # layer are character devices an overlay refuses to create. The user and
+    # group are the ones the role creates, so the role finds them in place.
+    #
+
+    - name: Prepare | Create sogo system group (RedHat)
+      ansible.builtin.group:
+        name: sogo
+        system: true
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Create sogo system user (RedHat)
+      ansible.builtin.user:
+        name: sogo
+        group: sogo
+        home: /var/lib/sogo
+        shell: /usr/sbin/nologin
+        system: true
+        create_home: true
+      register: __prepare_sogo_user
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Create the podman storage directory of the sogo user (RedHat)
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: directory
+        owner: sogo
+        group: sogo
+        mode: '0700'
+      loop:
+        - /var/lib/sogo/.local
+        - /var/lib/sogo/.local/share
+        - /var/lib/sogo/.local/share/containers
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Mount a tmpfs on the podman storage directory (RedHat)
+      ansible.posix.mount:
+        path: /var/lib/sogo/.local/share/containers
+        src: tmpfs
+        fstype: tmpfs
+        opts: 'size=4g,uid={{ __prepare_sogo_user.uid }},gid={{ __prepare_sogo_user.group }},mode=0700'
+        state: ephemeral
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    # The Rocky 10 test image ships newuidmap/newgidmap without the file
+    # capabilities the shadow package sets on a real host; rootless podman
+    # cannot create its user namespace without them (test container only)
+    - name: Prepare | Restore the ID map helper capabilities (Rocky 10 container)
+      community.general.capabilities:
+        path: '/usr/bin/{{ item.helper }}'
+        capability: '{{ item.capability }}'
+        state: present
+      loop:
+        - { helper: newuidmap, capability: cap_setuid+ep }
+        - { helper: newgidmap, capability: cap_setgid+ep }
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['distribution_major_version'] == '10'
+
+    - name: Prepare | Include podman role (RedHat)
+      ansible.builtin.include_role:
+        name: marcstraube.common.podman
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    #
+    # Test CA
+    #
+
+    - name: Prepare | Create the test certificates
+      ansible.builtin.include_tasks: tasks/certificates.yml
+
+    # SOGo verifies the certificates of Dovecot, Postfix and the database
+    # server against the system trust store (on Rocky Linux the copy the
+    # role mounts into the container); the MariaDB 11.8 clients verify the
+    # server certificate as well
+    - name: Prepare | Add the test CA to the trust store
+      ansible.builtin.copy:
+        src: /etc/molecule-tls/ca.pem
+        dest: '{{ __prepare_trust_anchor[ansible_facts["os_family"]] }}'
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Update the trust store
+      ansible.builtin.command:
+        argv: '{{ __prepare_trust_update[ansible_facts["os_family"]] }}'
+      changed_when: true
+
+    #
+    # Database, PostfixAdmin, Postfix and Dovecot
+    #
+
+    - name: Prepare | Include php role
+      ansible.builtin.include_role:
+        name: marcstraube.common.php
+      vars:
+        php_versions:
+          - version: '{{ __prepare_php_version }}'
+            extensions: '{{ __prepare_php_extensions[molecule_db_type][ansible_facts["os_family"]] }}'
+            fpm: true
+        php_default_version: '{{ __prepare_php_version }}'
+
+    - name: Prepare | Include postgresql role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postgresql'
+      when: molecule_db_type == 'postgresql'
+
+    - name: Prepare | Include mariadb role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../mariadb'
+      when: molecule_db_type == 'mariadb'
+
+    # Creates the database, the schema, the SOGo view, the read-only users
+    # and the test accounts
+    - name: Prepare | Include postfixadmin role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postfixadmin'
+
+    # The reader of the view may only connect with TLS: a login through
+    # SOGo proves that sogo_db_tls encrypts the connection
+    - name: Prepare | Require TLS for the SOGo reader (MariaDB)
+      ansible.builtin.command:
+        argv: ['mariadb', '--execute', "ALTER USER 'sogo_view'@'127.0.0.1' REQUIRE SSL"]
+      changed_when: true
+      when: molecule_db_type == 'mariadb'
+
+    # In the Rocky Linux 10 test container the data directory of Postfix
+    # was missing after the package install (postfix 3.8.5-11.el10); the
+    # postfix role writes its PostgreSQL password file there before Postfix
+    # first starts and would create it (test container only)
+    - name: Prepare | Install the Postfix package (RedHat)
+      ansible.builtin.dnf:
+        name: postfix
+        state: present
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Create the Postfix data directory (RedHat)
+      ansible.builtin.file:
+        path: /var/lib/postfix
+        state: directory
+        owner: postfix
+        group: root
+        mode: '0700'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    # The run order of the mail stack contract: Postfix before Dovecot
+    - name: Prepare | Include postfix role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postfix'
+
+    # passwd-file of the Dovecot master user (dovecot_extra_config)
+    - name: Prepare | Hash the password of the Sieve administrator
+      ansible.builtin.command:
+        argv: ['openssl', 'passwd', '-6', '-stdin']
+        stdin: '{{ __molecule_sieve_admin_password }}'
+      register: __prepare_sieve_admin_hash
+      changed_when: false
+      no_log: true
+
+    - name: Prepare | Create the Dovecot configuration directory
+      ansible.builtin.file:
+        path: /etc/dovecot
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Write the Dovecot master users
+      ansible.builtin.copy:
+        content: "{{ __molecule_sieve_admin }}:{SHA512-CRYPT}{{ __prepare_sieve_admin_hash.stdout }}\n"
+        dest: /etc/dovecot/molecule-masters
+        owner: root
+        group: root
+        mode: '0644'
+      no_log: true
+
+    - name: Prepare | Include dovecot role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../dovecot'
+
+    #
+    # SOGo of the Debian update test
+    #
+
+    - name: Prepare | List the SOGo releases of the mirror (Debian)
+      ansible.builtin.command:
+        argv: ['apt-cache', 'madison', 'sogo']
+      register: __prepare_sogo_madison
+      changed_when: false
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Record the SOGo releases of the mirror (Debian)
+      ansible.builtin.set_fact:
+        __prepare_sogo_versions: >-
+          {{ __prepare_sogo_madison.stdout_lines | map('split', '|') | map(attribute=1) | map('trim') | unique | list }}
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # The oldest release with its matching sogo-common (and sogo-activesync),
+    # so the update of side_effect has something to install
+    - name: Prepare | Install the oldest SOGo release of the mirror (Debian)
+      ansible.builtin.apt:
+        name: >-
+          {{ (['sogo', 'sogo-common']
+              + (['sogo-activesync'] if sogo_activesync_enabled | default(false) | bool else []))
+             | map('regex_replace', '$', '=' ~ __prepare_sogo_versions | last) | list }}
+        state: present
+        install_recommends: false
+      retries: 3
+      delay: 5
+      when:
+        - ansible_facts['os_family'] == 'Debian'
+        - __prepare_sogo_versions | length > 1
+
+    # After a point release the mirror carries the newest release only (main
+    # and security alike). The release before it comes as package files from
+    # the snapshot archive of Debian (addressed by their SHA-1, which get_url
+    # checks); apt installs them with their dependencies from the mirror. No
+    # apt source of the snapshot remains.
+    - name: Prepare | Install an older SOGo release from the snapshot archive (Debian)
+      when:
+        - ansible_facts['os_family'] == 'Debian'
+        - __prepare_sogo_versions | length < 2
+      vars:
+        __prepare_snapshot_debs:
+          - {name: sogo-common, sha1: 9ef00f938e7712fc740eec5a3a3206d00b448818}  # pragma: allowlist secret
+          - {name: sogo, sha1: cdb285d51462b249accc00074bb1edff6131a6d0}  # pragma: allowlist secret
+          - {name: sogo-activesync, sha1: 7c860029e5da294b848e4a9f6bb48f5cdf823064}  # pragma: allowlist secret
+        __prepare_snapshot_selected: >-
+          {{ __prepare_snapshot_debs
+             | selectattr('name', 'in', ['sogo-common', 'sogo']
+                          + (['sogo-activesync'] if sogo_activesync_enabled | default(false) | bool else []))
+             | list }}
+      block:
+        - name: Prepare | Assert a snapshot release is known for this Debian release
+          ansible.builtin.assert:
+            that:
+              - ansible_facts['distribution_release'] == 'trixie'
+              - ansible_facts['architecture'] == 'x86_64'
+            fail_msg: >-
+              The mirror offers one SOGo release only and the test knows an
+              older one for trixie on x86_64 only; the update test of
+              side_effect needs an older release.
+
+        - name: Prepare | Create the download directory of the snapshot packages
+          ansible.builtin.file:
+            path: /root/molecule-sogo-debs
+            state: directory
+            owner: root
+            group: root
+            mode: '0700'
+
+        - name: Prepare | Download SOGo 5.12.1-3+deb13u2 from the snapshot archive
+          ansible.builtin.get_url:
+            url: 'https://snapshot.debian.org/file/{{ item.sha1 }}'
+            dest: '/root/molecule-sogo-debs/{{ item.name }}_5.12.1-3+deb13u2.deb'
+            checksum: 'sha1:{{ item.sha1 }}'
+            owner: root
+            group: root
+            mode: '0644'
+            timeout: 60
+          loop: '{{ __prepare_snapshot_selected }}'
+          loop_control:
+            label: '{{ item.name }}'
+          register: __prepare_snapshot_download
+          until: __prepare_snapshot_download is succeeded
+          retries: 5
+          delay: 30
+
+        # sogo-common first: sogo needs exactly this version of it
+        - name: Prepare | Install SOGo 5.12.1-3+deb13u2
+          ansible.builtin.apt:
+            deb: '/root/molecule-sogo-debs/{{ item.name }}_5.12.1-3+deb13u2.deb'
+            install_recommends: false
+          loop: '{{ __prepare_snapshot_selected }}'
+          loop_control:
+            label: '{{ item.name }}'
+      rescue:
+        - name: Prepare | Fail on the snapshot archive
+          ansible.builtin.fail:
+            msg: >-
+              {{ ansible_failed_result.msg | default('') }} — snapshot.debian.org
+              unreachable or the older SOGo release could not be installed; the
+              update test needs an older SOGo release, re-run later.
+      always:
+        - name: Prepare | Remove the snapshot packages
+          ansible.builtin.file:
+            path: /root/molecule-sogo-debs
+            state: absent
+
+    - name: Prepare | Read the installed SOGo release (Debian)
+      ansible.builtin.command:
+        argv: ['dpkg-query', '--show', '--showformat=${Version}', 'sogo']
+      register: __prepare_sogo_installed
+      changed_when: false
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # side_effect needs an update to install: the installed release must be
+    # older than the newest of the mirror (dpkg order, not just different)
+    - name: Prepare | Compare the installed SOGo release with the mirror (Debian)
+      ansible.builtin.command:
+        argv:
+          - dpkg
+          - --compare-versions
+          - '{{ __prepare_sogo_installed.stdout }}'
+          - lt
+          - '{{ __prepare_sogo_versions | first }}'
+      register: __prepare_sogo_older
+      changed_when: false
+      failed_when: false
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Assert an older SOGo release is installed (Debian)
+      ansible.builtin.assert:
+        that:
+          - __prepare_sogo_older.rc == 0
+        fail_msg: >-
+          SOGo {{ __prepare_sogo_installed.stdout }} is not older than the
+          newest release of the mirror ({{ __prepare_sogo_versions | first }});
+          the update test of side_effect needs an older one installed.
+      when: ansible_facts['os_family'] == 'Debian'
+
+    #
+    # Web server and test tools
+    #
+
+    - name: Prepare | Include nginx role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../nginx'
+
+    - name: Prepare | Install the SOGo test client
+      ansible.builtin.copy:
+        src: '{{ playbook_dir }}/../shared/files/sogo_client.py'
+        dest: /usr/local/bin/molecule-sogo-client
+        owner: root
+        group: root
+        mode: '0755'
+
+    # Last: every download above went through the resolver of the image
+    - name: Prepare | Set up the test resolver
+      ansible.builtin.include_tasks: tasks/resolver.yml

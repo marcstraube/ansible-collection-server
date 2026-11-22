@@ -1,0 +1,72 @@
+{{ ansible_managed | comment }}
+# SOGo in a rootless podman container under the sogo user
+# (marcstraube.server.sogo); the image is built by the role with
+# {{ __sogo_container_build_script }}.
+
+[Unit]
+Description=SOGo groupware server (podman)
+Documentation=https://www.sogo.nu/support/documentation.html
+Wants=network-online.target
+After=network-online.target{{ ' memcached.service' if __sogo_memcached_local | bool else '' }} postgresql.service mariadb.service dovecot.service postfix.service
+
+[Service]
+Type=simple
+User={{ __sogo_user }}
+Group={{ __sogo_group }}
+
+# The service runs rootless podman without a systemd user session, so
+# podman falls back to cgroupfs and cannot create a cgroup of its own.
+# Delegate lets the service user manage its cgroup, and --cgroups=split
+# places the container below it.
+Delegate=yes
+
+# Rootless podman keeps its runtime state in XDG_RUNTIME_DIR; systemd
+# creates the directory and keeps it across restarts
+RuntimeDirectory={{ __sogo_runtime_dir | basename }}
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+Environment="XDG_RUNTIME_DIR={{ __sogo_runtime_dir }}"
+
+# The first start of a new image copies its layers into the user namespace
+# of the sogo user
+TimeoutStartSec={{ sogo_service_start_timeout }}
+
+ExecStartPre=-/usr/bin/podman rm --force --ignore {{ __sogo_container_name }}
+
+# Host network: sogod binds {{ sogo_bind }} on the host and reaches the
+# database, memcached, Dovecot and Postfix like a process on the host.
+# keep-id maps the sogo user of the host onto the sogo user of the image,
+# so the group sogo of the host reads /etc/sogo (mounted read-only) and the
+# spool stays owned by sogo. The CA bundle of the host replaces the one of
+# the image (see configure.yml). The periodic jobs run in containers of
+# their own with the same mounts (shared SELinux label, :z).
+ExecStart=/usr/bin/podman run \
+  --name={{ __sogo_container_name }} \
+  --rm \
+  --cgroups=split \
+  --replace \
+  --log-driver=passthrough \
+  --network=host \
+  --userns=keep-id:uid={{ __sogo_container_uid }},gid={{ __sogo_container_gid }} \
+  --cap-drop=all \
+  --security-opt=no-new-privileges \
+{% for name, value in __sogo_db_environment.items() %}
+  --env={{ name }}={{ value }} \
+{% endfor %}
+{% for volume in __sogo_container_volumes %}
+  --volume={{ volume }} \
+{% endfor %}
+  {{ __sogo_container_image }} \
+  -WOWorkersCount {{ sogo_workers | int }}
+
+ExecStop=/usr/bin/podman stop --time=30 {{ __sogo_container_name }}
+
+Restart=on-failure
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sogo
+
+[Install]
+WantedBy=multi-user.target

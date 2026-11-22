@@ -1,0 +1,106 @@
+---
+# MariaDB scenario: the playbooks of the postgresql scenario with the
+# mariadb role of this collection. SOGo connects over TCP with TLS
+# (sogo_db_tls, the certificate of 127.0.0.1 verified against the test CA;
+# prepare requires TLS for the reader of the view), without ActiveSync, and
+# with the backup: side_effect runs it twice, verify checks the rotation.
+driver:
+  name: podman
+platforms:
+  - name: sogo-mariadb-archlinux
+    image: docker.io/marcstraube/archlinux-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+      /var/tmp: rw,nosuid,nodev
+  - name: sogo-mariadb-debian-trixie
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+      /var/tmp: rw,nosuid,nodev
+  - name: sogo-mariadb-rocky-9
+    image: docker.io/geerlingguy/docker-rockylinux9-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+      /var/tmp: rw,nosuid,nodev
+  - name: sogo-mariadb-rocky-10
+    image: docker.io/geerlingguy/docker-rockylinux10-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+      /var/tmp: rw,nosuid,nodev
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: ../shared/prepare.yml
+    converge: ../shared/converge.yml
+    side_effect: ../shared/side_effect.yml
+    verify: ../shared/verify.yml
+  inventory:
+    group_vars:
+      all:
+        molecule_db_type: 'mariadb'
+        sogo_db_tls: true
+        sogo_db_tls_ca_file: '/etc/molecule-tls/ca.pem'
+        sogo_backup_enabled: true
+        sogo_backup_dir: '/var/lib/sogo/backups'
+        sogo_backup_keep: 1
+        # The timer runs, but never during a test: a backup at midnight would
+        # rotate the sets side_effect works with
+        sogo_backup_on_calendar: '2099-01-01 00:00:00'
+        # MariaDB on the instance, from the distribution packages, with TLS
+        mariadb_enabled: true
+        mariadb_repo: 'distro'
+        mariadb_version: '11.8'
+        mariadb_arch_package: 'mariadb'
+        mariadb_ssl_enabled: true
+        mariadb_ssl_cert_file: '/etc/molecule-tls/db.pem'
+        mariadb_ssl_key_file: '/etc/molecule-tls/db.key'
+    host_vars:
+      sogo-mariadb-archlinux:
+        ansible_python_interpreter: /usr/bin/python
+      sogo-mariadb-debian-trixie:
+        ansible_python_interpreter: /usr/bin/python3
+      sogo-mariadb-rocky-9:
+        ansible_python_interpreter: /usr/bin/python3
+      sogo-mariadb-rocky-10:
+        ansible_python_interpreter: /usr/bin/python3
+  config_options:
+    defaults:
+      allow_broken_conditionals: true
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - check
+    - converge
+    - idempotence
+    - check
+    - side_effect
+    - verify
+    - destroy

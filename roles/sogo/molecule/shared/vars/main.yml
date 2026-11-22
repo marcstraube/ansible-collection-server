@@ -1,0 +1,217 @@
+---
+# Test data of the postgresql and mariadb scenarios, read by prepare,
+# converge, side_effect and verify: the mail stack on one instance
+# (database, PostfixAdmin, Postfix, Dovecot, nginx and SOGo). The database
+# type comes from the scenario (molecule_db_type).
+
+# Passwords of the mailboxes. carol changes hers in SOGo (verify), so she has
+# a second one; support is the shared mailbox alice sees.
+__molecule_passwords:
+  alice@example.com: 'alice-Secret-42'
+  bob@example.com: 'bob-Secret-42'
+  carol@example.com: 'carol-Secret-42'
+  support@example.com: 'support-Secret-42'
+  dave@example.com: 'dave-Secret-42'
+__molecule_carol_new_password: 'carol-Changed-77'
+
+# Dovecot master user: the Sieve administrator of sogo-tool update-autoreply
+__molecule_sieve_admin: 'sieveadmin'
+__molecule_sieve_admin_password: 'sieve-Admin-42'
+
+# Test CA and certificates (prepare): mail.example.com resolves to the
+# instance through the test resolver
+__molecule_mail_host: 'mail.example.com'
+
+#
+# PostfixAdmin
+#
+
+postfixadmin_enabled: true
+postfixadmin_db_type: '{{ molecule_db_type }}'
+postfixadmin_db_password: 'test-db-Password-42'
+postfixadmin_db_create: true
+postfixadmin_sogo_view_enabled: true
+# SOGo connects over TCP (127.0.0.1) and changes passwords through the view
+postfixadmin_db_readers:
+  - name: 'postfix'
+    password: 'postfix-Reader-42'
+  - name: 'dovecot'
+    password: 'dovecot-Reader-42'
+  - name: 'sogo_view'
+    password: 'sogo-Reader-42'
+    host: '127.0.0.1'
+    tables: ['sogo_users']
+    update_columns: ['sogo_users.c_password']
+postfixadmin_domains:
+  - domain: 'example.com'
+postfixadmin_mailboxes:
+  - username: 'alice@example.com'
+    password: "{{ __molecule_passwords['alice@example.com'] }}"
+    name: 'Alice'
+  - username: 'bob@example.com'
+    password: "{{ __molecule_passwords['bob@example.com'] }}"
+    name: 'Bob'
+  # 'initial': the password SOGo sets in verify survives later runs
+  - username: 'carol@example.com'
+    password: "{{ __molecule_passwords['carol@example.com'] }}"
+    name: 'Carol'
+    mode: 'initial'
+  - username: 'support@example.com'
+    password: "{{ __molecule_passwords['support@example.com'] }}"
+    name: 'Support'
+  # Blocked by the brute-force protection in verify
+  - username: 'dave@example.com'
+    password: "{{ __molecule_passwords['dave@example.com'] }}"
+    name: 'Dave'
+# The test domains under .example have no DNS records for PostfixAdmin's own
+# check of every domain and address
+postfixadmin_extra_config:
+  emailcheck_resolve_domain: 'NO'
+
+#
+# Postfix
+#
+
+postfix_enabled: true
+postfix_db_type: '{{ molecule_db_type }}'
+postfix_db_password: 'postfix-Reader-42'
+postfix_myhostname: 'mail.example.com'
+postfix_mydomain: 'example.com'
+postfix_tls_cert_file: '/etc/molecule-tls/mail.pem'
+postfix_tls_key_file: '/etc/molecule-tls/mail.key'
+postfix_milters: []
+postfix_dns_check_enabled: false
+mta_enabled: false
+
+#
+# Dovecot
+#
+
+dovecot_enabled: true
+dovecot_db_type: '{{ molecule_db_type }}'
+dovecot_db_password: 'dovecot-Reader-42'
+dovecot_tls_cert_file: '/etc/molecule-tls/mail.pem'
+dovecot_tls_key_file: '/etc/molecule-tls/mail.key'
+dovecot_managesieve_enabled: true
+dovecot_shared_mailboxes:
+  - owner: 'support@example.com'
+    user: 'alice@example.com'
+    rights: 'lrws'
+# The Sieve administrator of SOGo: a master user that may log in as every
+# user (SASL PLAIN with an authorization identity)
+dovecot_extra_config: |
+  protocol sieve {
+    passdb molecule-masters {
+      driver = passwd-file
+      passwd_file_path = /etc/dovecot/molecule-masters
+      master = yes
+      result_success = continue
+    }
+  }
+
+#
+# nginx: the site of the README with the test certificate
+#
+
+nginx_enabled: true
+nginx_selinux_network_connect: true
+nginx_sites:
+  - name: 'sogo'
+    server_names:
+      - 'mail.example.com'
+    type: 'custom'
+    ssl:
+      enabled: true
+      certificate: '/etc/molecule-tls/mail.pem'
+      certificate_key: '/etc/molecule-tls/mail.key'
+    http_redirect: true
+    client_max_body_size: '50m'
+    locations:
+      - path: '= /'
+        config: 'return 302 /SOGo/;'
+      - path: '= /.well-known/caldav'
+        config: 'return 301 /SOGo/dav/;'
+      - path: '= /.well-known/carddav'
+        config: 'return 301 /SOGo/dav/;'
+      - path: '^~ /SOGo.woa/WebServerResources/'
+        config: |
+          alias {{ molecule_sogo_resources }}/;
+          expires max;
+      - path: '^~ /SOGo/WebServerResources/'
+        config: |
+          alias {{ molecule_sogo_resources }}/;
+          expires max;
+      - path: '^~ /SOGo'
+        config: |
+          proxy_pass http://127.0.0.1:20000;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header x-webobjects-server-protocol HTTP/1.0;
+          proxy_set_header x-webobjects-remote-host $remote_addr;
+          proxy_set_header x-webobjects-server-name $server_name;
+          proxy_set_header x-webobjects-server-url $scheme://$host;
+          proxy_set_header x-webobjects-server-port $server_port;
+          proxy_read_timeout 300;
+      - path: '^~ /Microsoft-Server-ActiveSync'
+        config: |
+          proxy_pass http://127.0.0.1:20000/SOGo/Microsoft-Server-ActiveSync;
+          proxy_set_header Host $host;
+          proxy_set_header x-webobjects-server-protocol HTTP/1.0;
+          proxy_set_header x-webobjects-remote-host $remote_addr;
+          proxy_set_header x-webobjects-server-name $server_name;
+          proxy_set_header x-webobjects-server-url $scheme://$host;
+          proxy_set_header x-webobjects-server-port $server_port;
+          proxy_read_timeout 3600;
+
+#
+# podman (Rocky Linux): the rootless container of SOGo
+#
+
+podman_compose_enabled: false
+podman_docker_enabled: false
+podman_docker_alias_enabled: false
+podman_docker_socket_symlink_enabled: false
+podman_tools: []
+# Files of the base image owned by IDs above the reduced subordinate range
+# stay root's instead of failing the build
+podman_storage_options:
+  overlay:
+    mountopt: 'nodev,metacopy=on'
+    ignore_chown_errors: 'true'
+
+#
+# SOGo
+#
+
+sogo_enabled: true
+sogo_db_type: '{{ molecule_db_type }}'
+sogo_db_password: 'sogo-db-Password-42'
+sogo_db_create: true
+sogo_postfixadmin_db_password: 'sogo-Reader-42'
+sogo_mail_domain: 'example.com'
+sogo_imap_server: 'imaps://mail.example.com:993'
+sogo_smtp_server: 'smtp://mail.example.com:587/?tls=YES'
+sogo_sieve_server: 'sieve://mail.example.com:4190/?tls=YES'
+sogo_sieve_admin_username: '{{ __molecule_sieve_admin }}'
+sogo_sieve_admin_password: '{{ __molecule_sieve_admin_password }}'
+# Off by default (README); the scenarios test the password change
+sogo_password_change_enabled: true
+# Low limits keep the brute-force test of verify short
+sogo_failed_login_count: 3
+sogo_failed_login_interval: 60
+sogo_failed_login_block_interval: 120
+sogo_workers: 2
+sogo_session_timeout: 30
+# The molecule instance is a rootless container itself and maps 65536 IDs,
+# so the subordinate range of the sogo user has to fit below that
+sogo_subid_start: 10000
+sogo_subid_count: 50000
+sogo_service_start_timeout: 900
+
+# WebServerResources the nginx site serves, per platform (README)
+molecule_sogo_resources: >-
+  {{ {'Debian': '/usr/share/GNUstep/SOGo/WebServerResources',
+      'Archlinux': '/usr/lib/GNUstep/SOGo/WebServerResources',
+      'RedHat': '/usr/local/share/sogo/WebServerResources'}[ansible_facts['os_family']] }}

@@ -1,0 +1,156 @@
+---
+# Check mode creates no directory: files that would go into a directory the
+# run creates are skipped there (the directory task reports the change).
+#
+# The configuration directory is readable by the sogo group only: sogo.conf
+# holds the database passwords, sieve.creds the Sieve administrator. On
+# Rocky Linux the container mounts the directory read-only; the host group
+# sogo maps onto the sogo group of the image there.
+
+- name: Configure | Create the configuration directory
+  ansible.builtin.file:
+    path: '{{ __sogo_config_dir }}'
+    state: directory
+    owner: root
+    group: '{{ __sogo_group }}'
+    mode: '0750'
+  register: __sogo_config_dir_result
+  when: not __sogo_check_mode_install | default(false) | bool
+
+# plparse checks the property list syntax on Debian and Arch Linux; the
+# parser is only in the image on Rocky Linux. The previous version stays as
+# sogo.conf.<timestamp>~ next to it (same owner and mode); no_log hides the
+# diff, which would show the passwords.
+- name: Configure | Deploy sogo.conf
+  ansible.builtin.template:
+    src: sogo.conf.j2
+    dest: '{{ __sogo_config_file }}'
+    owner: root
+    group: '{{ __sogo_group }}'
+    mode: '0640'
+    backup: true
+    validate: '{{ __sogo_config_validate if __sogo_config_validate | length > 0 else omit }}'
+  no_log: true
+  notify: Restart SOGo
+  when:
+    - not __sogo_check_mode_install | default(false) | bool
+    - not (ansible_check_mode and (__sogo_config_dir_result | default({})) is changed)
+
+# The unit of the Debian package passes the worker count from here
+- name: Configure | Deploy the service defaults (Debian)
+  ansible.builtin.template:
+    src: sogo-default.j2
+    dest: '{{ __sogo_defaults_file }}'
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart SOGo
+  when:
+    - __sogo_defaults_file | length > 0
+    - not __sogo_check_mode_install | default(false) | bool
+
+- name: Configure | Deploy the Sieve administrator credentials
+  ansible.builtin.copy:
+    content: '{{ sogo_sieve_admin_username }}:{{ sogo_sieve_admin_password }}'
+    dest: '{{ __sogo_sieve_creds_file }}'
+    owner: root
+    group: '{{ __sogo_group }}'
+    mode: '0640'
+  no_log: true
+  when:
+    - __sogo_sieve_admin_set | bool
+    - not __sogo_check_mode_install | default(false) | bool
+    - not (ansible_check_mode and (__sogo_config_dir_result | default({})) is changed)
+
+- name: Configure | Remove the Sieve administrator credentials
+  ansible.builtin.file:
+    path: '{{ __sogo_sieve_creds_file }}'
+    state: absent
+  when: not __sogo_sieve_admin_set | bool
+
+# libpq takes TLS settings from the environment only (SOGo has no setting
+# for them); the drop-in adds it to the unit of the package
+- name: Configure | Create the drop-in directory of the SOGo service
+  ansible.builtin.file:
+    path: '{{ __sogo_dropin_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  register: __sogo_dropin_dir_result
+  when:
+    - __sogo_install_method != 'container'
+    - __sogo_db_environment | length > 0
+
+- name: Configure | Deploy the environment drop-in of the SOGo service
+  ansible.builtin.template:
+    src: sogo-environment.conf.j2
+    dest: '{{ __sogo_dropin_dir }}/ansible.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - Reload SOGo systemd units
+    - Restart SOGo
+  when:
+    - __sogo_install_method != 'container'
+    - __sogo_db_environment | length > 0
+    - not (ansible_check_mode and (__sogo_dropin_dir_result | default({})) is changed)
+
+- name: Configure | Remove the environment drop-in of the SOGo service
+  ansible.builtin.file:
+    path: '{{ __sogo_dropin_dir }}/ansible.conf'
+    state: absent
+  notify:
+    - Reload SOGo systemd units
+    - Restart SOGo
+  when:
+    - __sogo_install_method != 'container'
+    - __sogo_db_environment | length == 0
+
+#
+# Rocky Linux: trust store of the container
+#
+# The image trusts the certificate authorities of Debian; the copy of the
+# host's trust store replaces its CA bundle, so SOGo trusts the same
+# authorities as the host (an internal CA of Dovecot and Postfix included).
+# The CA of the database server is copied next to it.
+#
+
+- name: Configure | Copy the trust store of the host for the container (RedHat)
+  ansible.builtin.copy:
+    src: '{{ __sogo_host_ca_bundle }}'
+    dest: '{{ __sogo_container_ca_bundle }}'
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart SOGo
+  when:
+    - __sogo_install_method == 'container'
+    - not __sogo_check_mode_install | default(false) | bool
+    - not (ansible_check_mode and (__sogo_config_dir_result | default({})) is changed)
+
+- name: Configure | Copy the CA of the database server for the container (RedHat)
+  ansible.builtin.copy:
+    src: '{{ sogo_db_tls_ca_file }}'
+    dest: '{{ __sogo_container_db_ca_file }}'
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart SOGo
+  when:
+    - __sogo_install_method == 'container'
+    - sogo_db_tls | bool
+    - not __sogo_check_mode_install | default(false) | bool
+    - not (ansible_check_mode and (__sogo_config_dir_result | default({})) is changed)
+
+- name: Configure | Remove the CA of the database server for the container (RedHat)
+  ansible.builtin.file:
+    path: '{{ __sogo_container_db_ca_file }}'
+    state: absent
+  notify: Restart SOGo
+  when:
+    - __sogo_install_method == 'container'
+    - not sogo_db_tls | bool

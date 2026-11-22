@@ -54,6 +54,7 @@ for the base system (podman, pki, firewalld, fail2ban).
 | **postfix**         | Postfix MTA with PostfixAdmin lookups, Dovecot LMTP and SASL    |
 | **rspamd**          | rspamd mail filter: milter, DKIM/ARC signing, clamd, Valkey     |
 | **roundcube**       | Roundcube webmail with Sieve filters, sharing, password change  |
+| **sogo**            | SOGo groupware: webmail, CalDAV, CardDAV, optional ActiveSync   |
 | **mail_autoconfig** | Mail client autoconfiguration (Autoconfig, Autodiscover, Apple) |
 
 ### Applications

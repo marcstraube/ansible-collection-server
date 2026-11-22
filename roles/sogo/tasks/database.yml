@@ -1,0 +1,52 @@
+---
+# Creates the SOGo database and its owner on a database server of this
+# host. Requires the marcstraube.server.postgresql or
+# marcstraube.server.mariadb role to run first. SOGo creates its tables
+# itself.
+
+- name: Database | Create the SOGo PostgreSQL user
+  community.postgresql.postgresql_user:
+    name: '{{ sogo_db_user }}'
+    password: '{{ sogo_db_password }}'
+    login_port: '{{ sogo_db_port | int }}'
+    state: present
+  become: true
+  become_user: postgres
+  no_log: true
+  when: sogo_db_type == 'postgresql'
+
+# The owner may create tables in the public schema of its database, also
+# on PostgreSQL 15 and newer.
+- name: Database | Create the SOGo PostgreSQL database
+  community.postgresql.postgresql_db:
+    name: '{{ sogo_db_name }}'
+    login_port: '{{ sogo_db_port | int }}'
+    owner: '{{ sogo_db_user }}'
+    encoding: UTF8
+    template: template0
+    state: present
+  become: true
+  become_user: postgres
+  when: sogo_db_type == 'postgresql'
+
+- name: Database | Create the SOGo MariaDB database
+  ansible.mariadb.mariadb_db:
+    name: '{{ sogo_db_name }}'
+    encoding: utf8mb4
+    collation: utf8mb4_unicode_ci
+    login_unix_socket: '{{ __sogo_mariadb_socket }}'
+    state: present
+  when: sogo_db_type == 'mariadb'
+
+# SOGo connects over TCP: the account host is the loopback address SOGo
+# connects from ('localhost' covers a connection through 'localhost')
+- name: Database | Create the SOGo MariaDB user
+  ansible.mariadb.mariadb_user:
+    name: '{{ sogo_db_user }}'
+    host: "{{ 'localhost' if sogo_db_host == 'localhost' else sogo_db_host }}"
+    password: '{{ sogo_db_password }}'
+    priv: '{{ sogo_db_name }}.*:ALL'
+    login_unix_socket: '{{ __sogo_mariadb_socket }}'
+    state: present
+  no_log: true
+  when: sogo_db_type == 'mariadb'

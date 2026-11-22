@@ -1,0 +1,273 @@
+---
+# Backend (Debian 13): PostgreSQL with TLS, PostfixAdmin, Postfix and
+# Dovecot with the test CA, the master user and the test resolver. SOGo host
+# (Rocky Linux 10): podman with the tmpfs storage of the sogo user, the test
+# CA in the trust store and nginx with the certificate of its name.
+- name: Prepare — Backend
+  hosts: backend
+  gather_facts: true
+
+  vars_files:
+    - vars/main.yml
+
+  vars:
+    __prepare_certificates:
+      - name: 'backend'
+        names: ['sogo-split-backend', 'mail.example.com']
+        group: 'ssl-cert'
+      - name: 'web'
+        names: ['sogo-split-sogo']
+    __prepare_mail_address: "{{ ansible_facts['default_ipv4']['address'] }}"
+
+  tasks:
+    - name: Prepare | Update package cache (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+      retries: 3
+      delay: 5
+
+    # ssl-cert: the group that may read the server key; the postgresql
+    # package adds the postgres user to it
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name:
+          - systemd
+          - dbus
+          - procps
+          - iproute2
+          - locales
+          - openssl
+          - ssl-cert
+          - ca-certificates
+          - dnsmasq-base
+          - python3-cryptography
+        state: present
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Generate en_US.UTF-8 locale (Debian)
+      community.general.locale_gen:
+        name: en_US.UTF-8
+        state: present
+
+    - name: Prepare | Create the test certificates
+      ansible.builtin.include_tasks: ../shared/tasks/certificates.yml
+
+    - name: Prepare | Fetch the CA and the certificate of the SOGo host
+      ansible.builtin.fetch:
+        src: '/etc/molecule-tls/{{ item }}'
+        dest: '{{ lookup("env", "MOLECULE_EPHEMERAL_DIRECTORY") }}/sogo-split-{{ item }}'
+        flat: true
+      loop:
+        - 'ca.pem'
+        - 'web.pem'
+        - 'web.key'
+
+    - name: Prepare | Include php role
+      ansible.builtin.include_role:
+        name: marcstraube.common.php
+      vars:
+        php_versions:
+          - version: 'auto'
+            extensions: ['pdo_pgsql', 'mbstring']
+            fpm: true
+        php_default_version: 'auto'
+
+    - name: Prepare | Include postgresql role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postgresql'
+
+    - name: Prepare | Include postfixadmin role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postfixadmin'
+
+    - name: Prepare | Include postfix role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postfix'
+
+    - name: Prepare | Hash the password of the Sieve administrator
+      ansible.builtin.command:
+        argv: ['openssl', 'passwd', '-6', '-stdin']
+        stdin: '{{ __molecule_sieve_admin_password }}'
+      register: __prepare_sieve_admin_hash
+      changed_when: false
+      no_log: true
+
+    - name: Prepare | Create the Dovecot configuration directory
+      ansible.builtin.file:
+        path: /etc/dovecot
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Write the Dovecot master users
+      ansible.builtin.copy:
+        content: "{{ __molecule_sieve_admin }}:{SHA512-CRYPT}{{ __prepare_sieve_admin_hash.stdout }}\n"
+        dest: /etc/dovecot/molecule-masters
+        owner: root
+        group: root
+        mode: '0644'
+      no_log: true
+
+    - name: Prepare | Include dovecot role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../dovecot'
+
+    # Postfix checks the sender domain of the test messages in DNS
+    - name: Prepare | Set up the test resolver
+      ansible.builtin.include_tasks: ../shared/tasks/resolver.yml
+
+- name: Prepare — SOGo host
+  hosts: sogo
+  gather_facts: true
+
+  vars_files:
+    - vars/main.yml
+
+  tasks:
+    # Sudo PAM bypass — required for tasks using `become_user` on
+    # geerlingguy Rocky containers under GitHub-hosted runners
+    # (test container only).
+
+    - name: Prepare | Bypass sudo PAM stack (RedHat container)
+      ansible.builtin.copy:
+        content: |
+          #%PAM-1.0
+          auth       sufficient   pam_permit.so
+          account    sufficient   pam_permit.so
+          password   sufficient   pam_permit.so
+          session    sufficient   pam_permit.so
+        dest: /etc/pam.d/sudo
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Disable sudoers authentication (RedHat container)
+      ansible.builtin.copy:
+        content: 'Defaults !authenticate'
+        dest: /etc/sudoers.d/molecule-no-auth
+        owner: root
+        group: root
+        mode: '0440'
+        validate: 'visudo -cf %s'
+
+    - name: Prepare | Update package cache (RedHat)
+      ansible.builtin.dnf:
+        update_cache: true
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name:
+          - systemd
+          - dbus
+          - procps-ng
+          - iproute
+          - openssl
+          - python3-cryptography
+        state: present
+      retries: 3
+      delay: 5
+
+    # The podman storage of the sogo user lives on a tmpfs (see
+    # ../shared/prepare.yml)
+    - name: Prepare | Create sogo system group
+      ansible.builtin.group:
+        name: sogo
+        system: true
+
+    - name: Prepare | Create sogo system user
+      ansible.builtin.user:
+        name: sogo
+        group: sogo
+        home: /var/lib/sogo
+        shell: /usr/sbin/nologin
+        system: true
+        create_home: true
+      register: __prepare_sogo_user
+
+    - name: Prepare | Create the podman storage directory of the sogo user
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: directory
+        owner: sogo
+        group: sogo
+        mode: '0700'
+      loop:
+        - /var/lib/sogo/.local
+        - /var/lib/sogo/.local/share
+        - /var/lib/sogo/.local/share/containers
+
+    - name: Prepare | Mount a tmpfs on the podman storage directory
+      ansible.posix.mount:
+        path: /var/lib/sogo/.local/share/containers
+        src: tmpfs
+        fstype: tmpfs
+        opts: 'size=4g,uid={{ __prepare_sogo_user.uid }},gid={{ __prepare_sogo_user.group }},mode=0700'
+        state: ephemeral
+
+    - name: Prepare | Restore the ID map helper capabilities (Rocky 10 container)
+      community.general.capabilities:
+        path: '/usr/bin/{{ item.helper }}'
+        capability: '{{ item.capability }}'
+        state: present
+      loop:
+        - { helper: newuidmap, capability: cap_setuid+ep }
+        - { helper: newgidmap, capability: cap_setgid+ep }
+
+    - name: Prepare | Include podman role
+      ansible.builtin.include_role:
+        name: marcstraube.common.podman
+
+    - name: Prepare | Create the TLS directory
+      ansible.builtin.file:
+        path: /etc/molecule-tls
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Install the CA and the certificate of nginx
+      ansible.builtin.copy:
+        src: '{{ lookup("env", "MOLECULE_EPHEMERAL_DIRECTORY") }}/sogo-split-{{ item.name }}'
+        dest: '/etc/molecule-tls/{{ item.name }}'
+        owner: root
+        group: root
+        mode: '{{ item.mode }}'
+      loop:
+        - {name: 'ca.pem', mode: '0644'}
+        - {name: 'web.pem', mode: '0644'}
+        - {name: 'web.key', mode: '0600'}
+      loop_control:
+        label: '{{ item.name }}'
+
+    # SOGo verifies Dovecot, Postfix and PostgreSQL of the backend against
+    # the trust store of the host (the copy the role mounts into the
+    # container)
+    - name: Prepare | Add the test CA to the trust store
+      ansible.builtin.copy:
+        src: /etc/molecule-tls/ca.pem
+        dest: /etc/pki/ca-trust/source/anchors/sogo-molecule-ca.crt
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Update the trust store
+      ansible.builtin.command:
+        argv: ['update-ca-trust']
+      changed_when: true
+
+    - name: Prepare | Include nginx role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../nginx'
+
+    - name: Prepare | Install the SOGo test client
+      ansible.builtin.copy:
+        src: '{{ playbook_dir }}/../shared/files/sogo_client.py'
+        dest: /usr/local/bin/molecule-sogo-client
+        owner: root
+        group: root
+        mode: '0755'
