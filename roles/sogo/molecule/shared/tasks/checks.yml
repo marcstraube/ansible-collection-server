@@ -490,11 +490,14 @@
   changed_when: false
   failed_when: __verify_timers.stdout != 'active'
 
-# A failing job fails the start of its oneshot service
+# A failing job fails the start of its oneshot service. restarted, not
+# started: a run the timer began earlier counts as started and may have read
+# the state before the checks above changed it; a restart waits for a fresh
+# run to finish
 - name: Verify | Run every job once
   ansible.builtin.systemd_service:
     name: '{{ item }}.service'
-    state: started
+    state: restarted
   loop:
     - sogo-expire-sessions
     - sogo-ealarms-notify
