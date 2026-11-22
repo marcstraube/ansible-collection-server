@@ -154,7 +154,8 @@
     - "{{ __molecule_passwords['alice@example.com'] }}"
     - 'wrong-Password-1'
   loop_control:
-    label: "{{ 'correct' if loop.first else 'wrong' }}"
+    index_var: __verify_login_index
+    label: "{{ 'correct' if __verify_login_index == 0 else 'wrong' }}"
   register: __verify_logins
   changed_when: false
   no_log: true
@@ -230,7 +231,8 @@
     - '{{ __molecule_carol_new_password }}'
     - "{{ __molecule_passwords['carol@example.com'] }}"
   loop_control:
-    label: "{{ 'new' if loop.first else 'old' }}"
+    index_var: __verify_carol_index
+    label: "{{ 'new' if __verify_carol_index == 0 else 'old' }}"
   delegate_to: '{{ __verify_backend | default(inventory_hostname) }}'
   register: __verify_carol_dovecot
   changed_when: false

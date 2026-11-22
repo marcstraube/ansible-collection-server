@@ -265,10 +265,10 @@
         state: ephemeral
       when: ansible_facts['os_family'] == 'RedHat'
 
-    # The Rocky 10 test image ships newuidmap/newgidmap without the file
+    # The Rocky Linux test images ship newuidmap/newgidmap without the file
     # capabilities the shadow package sets on a real host; rootless podman
     # cannot create its user namespace without them (test container only)
-    - name: Prepare | Restore the ID map helper capabilities (Rocky 10 container)
+    - name: Prepare | Restore the ID map helper capabilities (Rocky containers)
       community.general.capabilities:
         path: '/usr/bin/{{ item.helper }}'
         capability: '{{ item.capability }}'
@@ -276,9 +276,7 @@
       loop:
         - { helper: newuidmap, capability: cap_setuid+ep }
         - { helper: newgidmap, capability: cap_setgid+ep }
-      when:
-        - ansible_facts['os_family'] == 'RedHat'
-        - ansible_facts['distribution_major_version'] == '10'
+      when: ansible_facts['os_family'] == 'RedHat'
 
     - name: Prepare | Include podman role (RedHat)
       ansible.builtin.include_role:
