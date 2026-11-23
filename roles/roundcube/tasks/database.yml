@@ -1,0 +1,112 @@
+---
+#
+# Database and Owner
+#
+# Created on a database server of this host with roundcube_db_create
+# (requires the marcstraube.server.postgresql or marcstraube.server.mariadb
+# role to run first). Roundcube creates and upgrades its tables itself.
+#
+
+- name: Database | Create the Roundcube PostgreSQL user
+  community.postgresql.postgresql_user:
+    name: '{{ roundcube_db_user }}'
+    password: '{{ roundcube_db_password }}'
+    login_unix_socket: '{{ __roundcube_pg_socket_dir | default(omit, true) }}'
+    login_port: '{{ roundcube_db_port | int }}'
+    state: present
+  become: true
+  become_user: postgres
+  no_log: true
+  when:
+    - roundcube_db_create | bool
+    - roundcube_db_type == 'postgresql'
+
+# The owner may create tables in the public schema of its database, also
+# on PostgreSQL 15 and newer.
+- name: Database | Create the Roundcube PostgreSQL database
+  community.postgresql.postgresql_db:
+    name: '{{ roundcube_db_name }}'
+    login_unix_socket: '{{ __roundcube_pg_socket_dir | default(omit, true) }}'
+    login_port: '{{ roundcube_db_port | int }}'
+    owner: '{{ roundcube_db_user }}'
+    encoding: UTF8
+    template: template0
+    state: present
+  become: true
+  become_user: postgres
+  when:
+    - roundcube_db_create | bool
+    - roundcube_db_type == 'postgresql'
+
+- name: Database | Create the Roundcube MariaDB database
+  ansible.mariadb.mariadb_db:
+    name: '{{ roundcube_db_name }}'
+    encoding: utf8mb4
+    collation: utf8mb4_unicode_ci
+    login_unix_socket: '{{ __roundcube_mariadb_login_socket }}'
+    state: present
+  when:
+    - roundcube_db_create | bool
+    - roundcube_db_type == 'mariadb'
+
+- name: Database | Create the Roundcube MariaDB user
+  ansible.mariadb.mariadb_user:
+    name: '{{ roundcube_db_user }}'
+    host: '{{ __roundcube_db_owner_host }}'
+    password: '{{ roundcube_db_password }}'
+    priv: '{{ roundcube_db_name }}.*:ALL'
+    login_unix_socket: '{{ __roundcube_mariadb_login_socket }}'
+    state: present
+  no_log: true
+  when:
+    - roundcube_db_create | bool
+    - roundcube_db_type == 'mariadb'
+
+#
+# SQLite
+#
+# The database file and its directory belong to the PHP-FPM user, which
+# writes the file and its journal (WAL). The role creates the empty file;
+# Roundcube creates the schema in it on the first connection, the schema
+# read of the role as that user. The directory is one of its own (asserted
+# in main.yml).
+#
+
+- name: Database | Create the SQLite directory
+  ansible.builtin.file:
+    path: '{{ roundcube_db_path | dirname }}'
+    state: directory
+    owner: '{{ __roundcube_fpm_user }}'
+    group: '{{ __roundcube_fpm_group }}'
+    mode: '0750'
+  register: __roundcube_sqlite_dir
+  when: roundcube_db_type == 'sqlite'
+
+- name: Database | Create the SQLite database file
+  ansible.builtin.file:
+    path: '{{ roundcube_db_path }}'
+    state: touch
+    owner: '{{ __roundcube_fpm_user }}'
+    group: '{{ __roundcube_fpm_group }}'
+    mode: '0640'
+    access_time: preserve
+    modification_time: preserve
+  when:
+    - roundcube_db_type == 'sqlite'
+    - not (__roundcube_check_mode and __roundcube_sqlite_dir is changed)
+
+- name: Database | Apply the SELinux labels to the SQLite directory
+  ansible.builtin.command:
+    argv:
+      - restorecon
+      - '-R'
+      - '-v'
+      - '{{ roundcube_db_path | dirname }}'
+  register: __roundcube_sqlite_restorecon
+  changed_when: __roundcube_sqlite_restorecon.stdout | length > 0
+  when:
+    - not __roundcube_check_mode
+    - roundcube_db_type == 'sqlite'
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+    - __roundcube_sqlite_dir is changed or __roundcube_sefcontext | default({}) is changed

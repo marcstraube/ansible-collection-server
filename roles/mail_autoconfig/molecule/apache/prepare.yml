@@ -1,0 +1,63 @@
+---
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - ../shared/vars/main.yml
+
+  vars:
+    # Web server example of the README, one SSL vhost per mail domain; the
+    # web host name (target of the Autodiscover SRV records) in the first one
+    apache_enabled: true
+    apache_ssl_enabled: true
+    apache_vhosts_ssl:
+      - server_name: 'autoconfig.example.com'
+        server_alias:
+          - 'autodiscover.example.com'
+          - '{{ mail_autoconfig_web_host }}'
+        document_root: '/var/www/mail-autoconfig'
+        certificate_file: '/etc/letsencrypt/live/autoconfig.example.com/fullchain.pem'
+        certificate_key_file: '/etc/letsencrypt/live/autoconfig.example.com/privkey.pem'
+        certificate_chain_file: ''
+        custom_config: |
+          AddType application/x-apple-aspen-config .mobileconfig
+      - server_name: 'autoconfig.example.org'
+        server_alias:
+          - 'autodiscover.example.org'
+        document_root: '/var/www/mail-autoconfig'
+        certificate_file: '/etc/letsencrypt/live/autoconfig.example.org/fullchain.pem'
+        certificate_key_file: '/etc/letsencrypt/live/autoconfig.example.org/privkey.pem'
+        certificate_chain_file: ''
+        custom_config: |
+          AddType application/x-apple-aspen-config .mobileconfig
+
+  tasks:
+    - name: Prepare | Import shared environment tasks
+      ansible.builtin.import_tasks: ../shared/tasks/prepare.yml
+
+    # RedHat httpd uses Type=notify which times out in containers
+    - name: Prepare | Create httpd systemd override directory (RedHat)
+      ansible.builtin.file:
+        path: /etc/systemd/system/httpd.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Override httpd service type for containers (RedHat)
+      ansible.builtin.copy:
+        content: |
+          [Service]
+          Type=simple
+          TimeoutStartSec=300
+        dest: /etc/systemd/system/httpd.service.d/override.conf
+        owner: root
+        group: root
+        mode: '0644'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Set up Apache  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../apache'

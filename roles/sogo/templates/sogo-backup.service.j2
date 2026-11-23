@@ -1,0 +1,24 @@
+{{ ansible_managed | comment }}
+# Backup of SOGo, started by {{ __sogo_backup_timer_name }}
+# (marcstraube.server.sogo)
+
+[Unit]
+Description=Back up the SOGo data of all users
+After=network.target {{ __sogo_service_name }}
+
+[Service]
+Type=oneshot
+User={{ __sogo_user }}
+Group={{ __sogo_group }}
+{% if __sogo_install_method == 'container' %}
+Environment="XDG_RUNTIME_DIR={{ __sogo_runtime_dir }}"
+{% else %}
+{% for name, value in __sogo_db_environment.items() %}
+Environment="{{ name }}={{ value }}"
+{% endfor %}
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+{% endif %}
+ExecStart={{ __sogo_backup_script }}

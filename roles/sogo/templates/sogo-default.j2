@@ -1,0 +1,8 @@
+{{ ansible_managed | comment }}
+# Read by the sogo unit of the Debian package (marcstraube.server.sogo)
+
+# The amount of processes that should be spawned (-WOWorkersCount)
+PREFORK={{ sogo_workers | int }}
+
+# The name of the account under which SOGo will be running
+USER={{ __sogo_user }}

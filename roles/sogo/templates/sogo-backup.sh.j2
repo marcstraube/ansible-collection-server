@@ -1,0 +1,57 @@
+#!/bin/bash
+{{ ansible_managed | comment }}
+#
+# Backs up the SOGo data of all users (calendars, address books,
+# preferences, filters) with sogo-tool backup into a new set
+# {{ sogo_backup_dir }}/sogo-<timestamp>/ (one file per user) and keeps the
+# newest {{ sogo_backup_keep }} sets. Runs as the sogo user
+# ({{ __sogo_backup_service_name }}); the role restores a set with
+# sogo_restore (see README).
+#
+# Usage: sogo-backup [-k <set>]
+#   -k <set>  never rotate this set (the one a restore is about to load)
+
+set -euo pipefail
+umask 077
+
+dir={{ sogo_backup_dir | quote }}
+keep={{ sogo_backup_keep | int }}
+name="sogo-$(date +%Y%m%d-%H%M%S)"
+protect=''
+while getopts 'k:' opt; do
+  case "$opt" in
+    k) protect="$OPTARG" ;;
+    *) echo "usage: $0 [-k <set>]" >&2; exit 2 ;;
+  esac
+done
+
+mkdir "$dir/$name.partial"
+rc=0
+out=$({{ (__sogo_command_prefix + [__sogo_tool]) | join(' ') }} backup "$dir/$name.partial" ALL 2>&1) || rc=$?
+printf '%s\n' "$out"
+if [ "$rc" -ne 0 ]; then
+  # sogo-tool backup ALL ends with status 255 and no output at all when no
+  # user has a folder yet (a new server, or one whose SOGo database is
+  # empty, the case of a restore after a disaster): there is nothing to save
+  # then. A crash ends with another status (128 + signal: 137 OOM kill, 139
+  # segmentation fault); any other status, or a message of a user lookup or
+  # the database (with the database unreachable sogo-tool reports the user
+  # 'ALL' unknown) is a real failure.
+  if [ "$rc" -eq 255 ] && [ -z "$(ls -A "$dir/$name.partial")" ] \
+    && ! grep -qiE 'unknown|not found|could not|error|exception|fatal|segmentation' <<<"$out"; then
+    echo "sogo-backup: no SOGo user has data yet, nothing to back up"
+    rmdir "$dir/$name.partial"
+    exit 0
+  fi
+  echo "sogo-backup: sogo-tool backup failed with status $rc" >&2
+  exit "$rc"
+fi
+mv "$dir/$name.partial" "$dir/$name"
+
+# Count-based rotation of the complete sets, newest first; a failed run
+# leaves a .partial directory and removes nothing
+find "$dir" -mindepth 1 -maxdepth 1 -type d -name 'sogo-*' ! -name '*.partial' -printf '%f\n' \
+  | sort -r | tail -n "+$((keep + 1))" \
+  | while read -r old; do
+      [ "$old" = "$protect" ] || rm -rf -- "${dir:?}/$old"
+    done

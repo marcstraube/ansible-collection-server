@@ -1,0 +1,206 @@
+---
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Prepare | Update package cache (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+      retries: 3
+      delay: 5
+
+    # ssl-cert: the group that may read the server key; the postgresql
+    # package adds the postgres user to it
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name:
+          - systemd
+          - dbus
+          - procps
+          - iproute2
+          - locales
+          - ssl-cert
+          - python3-cryptography
+        state: present
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Generate en_US.UTF-8 locale (Debian)
+      community.general.locale_gen:
+        name: en_US.UTF-8
+        state: present
+
+# A CA and a server certificate for the host name of the database
+# container, which the Dovecot container verifies; PostgreSQL, PHP and
+# PostfixAdmin with the test mailbox and the Dovecot reader.
+- name: Prepare — Database server
+  hosts: database
+  gather_facts: true
+
+  tasks:
+    - name: Prepare | Create the TLS directory
+      ansible.builtin.file:
+        path: /etc/postgresql-tls
+        state: directory
+        owner: root
+        group: ssl-cert
+        mode: '0750'
+
+    - name: Prepare | Create the CA key
+      community.crypto.openssl_privatekey:
+        path: /etc/postgresql-tls/ca.key
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Prepare | Create the CA certificate request
+      community.crypto.openssl_csr_pipe:
+        privatekey_path: /etc/postgresql-tls/ca.key
+        common_name: 'Dovecot split test CA'
+        basic_constraints:
+          - 'CA:TRUE'
+        basic_constraints_critical: true
+        key_usage:
+          - keyCertSign
+        key_usage_critical: true
+      register: __prepare_ca_csr
+      changed_when: false
+
+    - name: Prepare | Create the CA certificate
+      community.crypto.x509_certificate:
+        path: /etc/postgresql-tls/ca.crt
+        csr_content: '{{ __prepare_ca_csr.csr }}'
+        privatekey_path: /etc/postgresql-tls/ca.key
+        provider: selfsigned
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Create the server key
+      community.crypto.openssl_privatekey:
+        path: /etc/postgresql-tls/server.key
+        owner: root
+        group: ssl-cert
+        mode: '0640'
+
+    - name: Prepare | Create the server certificate request
+      community.crypto.openssl_csr_pipe:
+        privatekey_path: /etc/postgresql-tls/server.key
+        common_name: 'dovecot-split-db'
+        subject_alt_name:
+          - 'DNS:dovecot-split-db'
+      register: __prepare_server_csr
+      changed_when: false
+
+    - name: Prepare | Create the server certificate
+      community.crypto.x509_certificate:
+        path: /etc/postgresql-tls/server.crt
+        csr_content: '{{ __prepare_server_csr.csr }}'
+        provider: ownca
+        ownca_path: /etc/postgresql-tls/ca.crt
+        ownca_privatekey_path: /etc/postgresql-tls/ca.key
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Include postgresql role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postgresql'
+
+    - name: Prepare | Include php role
+      ansible.builtin.include_role:
+        name: marcstraube.common.php
+      vars:
+        php_versions:
+          - version: 'auto'
+            extensions: ['pdo_pgsql', 'mbstring']
+            fpm: true
+        php_default_version: 'auto'
+
+    - name: Prepare | Include postfixadmin role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postfixadmin'
+
+    - name: Prepare | Fetch the CA certificate
+      ansible.builtin.fetch:
+        src: /etc/postgresql-tls/ca.crt
+        dest: '{{ lookup("env", "MOLECULE_EPHEMERAL_DIRECTORY") }}/dovecot-split-db-ca.pem'
+        flat: true
+
+# The IMAP certificate of the Dovecot container (self-signed for its
+# container name), which the client on the database container verifies
+- name: Prepare — Dovecot host
+  hosts: mail
+  gather_facts: true
+
+  tasks:
+    # The image ships a policy-rc.d that keeps every package from starting
+    # its service; a Debian host has none. Without it the role has to keep
+    # the first install of Dovecot from starting with the packaged
+    # configuration itself.
+    - name: Prepare | Remove the policy-rc.d of the image
+      ansible.builtin.file:
+        path: /usr/sbin/policy-rc.d
+        state: absent
+
+    - name: Prepare | Install the CA certificate of the database server
+      ansible.builtin.copy:
+        src: '{{ lookup("env", "MOLECULE_EPHEMERAL_DIRECTORY") }}/dovecot-split-db-ca.pem'
+        dest: '{{ __molecule_db_ca_file }}'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Create the private key directory
+      ansible.builtin.file:
+        path: /etc/ssl/private
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Prepare | Create the IMAP key
+      community.crypto.openssl_privatekey:
+        path: '{{ dovecot_tls_key_file }}'
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Prepare | Create the IMAP certificate request
+      community.crypto.openssl_csr_pipe:
+        privatekey_path: '{{ dovecot_tls_key_file }}'
+        common_name: 'dovecot-split-mail'
+        subject_alt_name:
+          - 'DNS:dovecot-split-mail'
+      register: __prepare_mail_csr
+      changed_when: false
+
+    - name: Prepare | Create the IMAP certificate
+      community.crypto.x509_certificate:
+        path: '{{ dovecot_tls_cert_file }}'
+        csr_content: '{{ __prepare_mail_csr.csr }}'
+        privatekey_path: '{{ dovecot_tls_key_file }}'
+        provider: selfsigned
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Fetch the IMAP certificate
+      ansible.builtin.fetch:
+        src: '{{ dovecot_tls_cert_file }}'
+        dest: '{{ lookup("env", "MOLECULE_EPHEMERAL_DIRECTORY") }}/dovecot-split-mail.pem'
+        flat: true
+
+- name: Prepare — Client
+  hosts: database
+  gather_facts: false
+
+  tasks:
+    - name: Prepare | Install the IMAP certificate as CA on the client
+      ansible.builtin.copy:
+        src: '{{ lookup("env", "MOLECULE_EPHEMERAL_DIRECTORY") }}/dovecot-split-mail.pem'
+        dest: '{{ __molecule_mail_ca_file }}'
+        owner: root
+        group: root
+        mode: '0644'

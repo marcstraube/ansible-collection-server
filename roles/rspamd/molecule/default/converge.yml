@@ -1,0 +1,24 @@
+---
+- name: Converge
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Converge | Include rspamd role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+
+# Last play (verify reads the first task of the enabled run from the check
+# run output): imports the role statically with the role off, as a stack
+# playbook does for hosts that do not run rspamd: every task must be skipped
+# without a templating error.
+- name: Converge | Role imported and disabled
+  hosts: all
+  gather_facts: true
+  vars:
+    rspamd_enabled: false
+
+  tasks:
+    - name: Converge | Import rspamd role disabled  # noqa: role-name[path]
+      ansible.builtin.import_role:
+        name: '{{ playbook_dir }}/../..'

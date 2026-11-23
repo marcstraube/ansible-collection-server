@@ -1,0 +1,41 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - ../shared/vars/main.yml
+
+  tasks:
+    - name: Verify | Import shared assertions
+      ansible.builtin.import_tasks: ../shared/tasks/verify.yml
+
+    # The control site serves the same web root without error_page: nginx
+    # refuses the POST on the static file there, so the README site needs it
+    - name: Verify | Send Autodiscover POST to the control site
+      ansible.builtin.command:
+        argv:
+          - curl
+          - --silent
+          - --show-error
+          - --resolve
+          - control.example.net:8080:127.0.0.1
+          - --request
+          - POST
+          - --header
+          - 'Content-Type: text/xml'
+          - --data-binary
+          - '@/tmp/mail-autoconfig-request.xml'
+          - --output
+          - /dev/null
+          - --write-out
+          - '%{http_code}'
+          - http://control.example.net:8080/autodiscover/autodiscover.xml
+      register: __verify_control
+      changed_when: false
+
+    - name: Verify | Assert nginx refuses the POST without error_page
+      ansible.builtin.assert:
+        that:
+          - __verify_control.stdout == '405'
+        fail_msg: 'Control site answered {{ __verify_control.stdout }}'

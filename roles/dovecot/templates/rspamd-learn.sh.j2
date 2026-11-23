@@ -1,0 +1,15 @@
+#!/bin/sh
+{{ ansible_managed | comment }}
+# Reports the message on stdin to the rspamd controller as {{ __dovecot_learn_class }}.
+# Started by the IMAPSieve scripts of Dovecot as the mail user; the password
+# header comes from a file, never from the command line. The response body
+# is discarded; errors still reach the Dovecot log through stderr and the
+# exit status.
+exec /usr/bin/curl --silent --show-error --fail --max-time 30 \
+  --output /dev/null \
+{% if dovecot_rspamd_controller_ca_file | length > 0 %}
+  --cacert '{{ dovecot_rspamd_controller_ca_file }}' \
+{% endif %}
+  --header '@{{ __dovecot_rspamd_header_file }}' \
+  --data-binary @- \
+  '{{ dovecot_rspamd_controller_url | regex_replace('/+$', '') }}/learn{{ __dovecot_learn_class }}'

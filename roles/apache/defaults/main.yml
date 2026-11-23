@@ -258,7 +258,9 @@ apache_ssl_stapling_cache: '{{ __apache_ssl_stapling_cache }}'
 # HTTP/2
 #
 
-# Enable HTTP/2 (requires mod_http2)
+# Server default for HTTP/2 over TLS (h2). An SSL vhost overrides it with its
+# own http2 key (true or false); without the key it inherits this value.
+# mod_http2 is loaded when this or any SSL vhost enables HTTP/2.
 apache_http2_enabled: false
 apache_http2_max_session_streams: 100
 apache_http2_initial_window_size: 65535
@@ -415,15 +417,47 @@ apache_document_root_policy: 'disabled'
 apache_vhosts: []
 
 # SSL virtual hosts
+# http2 (optional, true or false) overrides apache_http2_enabled for the
+# vhost; without it the vhost inherits the server default.
 # Example:
 #   - server_name: 'www.example.com'
 #     document_root: '/var/www/example.com'
 #     certificate_file: '/etc/letsencrypt/live/example.com/fullchain.pem'
 #     certificate_key_file: '/etc/letsencrypt/live/example.com/privkey.pem'
 #     certificate_chain_file: ''
+#     http2: false
 #     custom_config: |
 #       Header always set Strict-Transport-Security "max-age=63072000"
 apache_vhosts_ssl: []
+
+#
+# Writable Paths
+#
+# Directories the applications write to (cache, uploads, logs). On RedHat with
+# SELinux enabled each path gets a persistent file context for '<path>(/.*)?'
+# and its labels are restored; elsewhere only the directory is created.
+
+# Directories the web server and its PHP-FPM workers write to. Keys:
+#   path:  absolute path without a trailing slash; letters, digits and
+#          '.', '_', '@', '-' only
+#   type:  SELinux type, 'httpd_sys_rw_content_t' (default), 'httpd_log_t'
+#          for log directories, 'httpd_sys_ra_content_t' for append-only
+#          directories or 'httpd_cache_t'
+#   owner, group, mode: when any of them is set, the role creates the
+#          directory and enforces all three on every run; unset ones default
+#          to the Apache user, the Apache group and '0755'. Without them the
+#          path is only labeled.
+# Example:
+#   - path: '/var/www/app.example.com/var/cache'
+#     owner: 'apache'
+#     group: 'apache'
+#     mode: '0750'
+#   - path: '/var/log/app'
+#     type: 'httpd_log_t'
+#     owner: 'apache'
+#     group: 'apache'
+#     mode: '0750'
+apache_writable_paths: []
 
 #
 # Reverse Proxy

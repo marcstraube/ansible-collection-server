@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+{{ ansible_managed | comment('xml') }}
+{% set identifier = item.split('.') | reverse | join('.') ~ '.mail-autoconfig' %}
+{% set submission = __mail_autoconfig_submission | first %}
+<plist version="1.0">
+<dict>
+  <key>PayloadContent</key>
+  <array>
+    <dict>
+      <key>EmailAccountDescription</key>
+      <string>{{ item | e }}</string>
+      <key>EmailAccountType</key>
+      <string>EmailTypeIMAP</string>
+      <key>IncomingMailServerAuthentication</key>
+      <string>EmailAuthPassword</string>
+      <key>IncomingMailServerHostName</key>
+      <string>{{ mail_autoconfig_imap_host | e }}</string>
+      <key>IncomingMailServerPortNumber</key>
+      <integer>{{ mail_autoconfig_imap_port | int }}</integer>
+      <key>IncomingMailServerUseSSL</key>
+      <true/>
+      <key>OutgoingMailServerAuthentication</key>
+      <string>EmailAuthPassword</string>
+      <key>OutgoingMailServerHostName</key>
+      <string>{{ mail_autoconfig_submission_host | e }}</string>
+      <key>OutgoingMailServerPortNumber</key>
+      <integer>{{ submission.port }}</integer>
+{# The payload has no setting for STARTTLS: UseSSL requires TLS on the
+   connection, which the device negotiates with STARTTLS on a submission port
+   such as 587 and as implicit TLS on 465. False would allow the password in
+   clear text. #}
+      <key>OutgoingMailServerUseSSL</key>
+      <true/>
+      <key>OutgoingPasswordSameAsIncomingPassword</key>
+      <true/>
+      <key>PayloadDisplayName</key>
+      <string>{{ item | e }}</string>
+      <key>PayloadIdentifier</key>
+      <string>{{ identifier | e }}.account</string>
+      <key>PayloadType</key>
+      <string>com.apple.mail.managed</string>
+      <key>PayloadUUID</key>
+      <string>{{ ('mail_autoconfig.account.' ~ item) | to_uuid | upper }}</string>
+      <key>PayloadVersion</key>
+      <integer>1</integer>
+    </dict>
+  </array>
+  <key>PayloadDescription</key>
+  <string>{{ ('Mail account settings for ' ~ item) | e }}</string>
+  <key>PayloadDisplayName</key>
+  <string>{{ (__mail_autoconfig_display_name ~ ' (' ~ item ~ ')') | e }}</string>
+  <key>PayloadIdentifier</key>
+  <string>{{ identifier | e }}</string>
+  <key>PayloadType</key>
+  <string>Configuration</string>
+  <key>PayloadUUID</key>
+  <string>{{ ('mail_autoconfig.profile.' ~ item) | to_uuid | upper }}</string>
+  <key>PayloadVersion</key>
+  <integer>1</integer>
+</dict>
+</plist>

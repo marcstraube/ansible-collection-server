@@ -1,0 +1,24 @@
+---
+# Runs the SMTP sessions of __verify_sessions (name: session, see
+# files/smtp_session.py) and stores the replies in __verify_smtp (name:
+# replies). The client runs on the host of the play.
+
+- name: Verify | Run the SMTP sessions
+  ansible.builtin.command:
+    argv:
+      - '{{ ansible_python_interpreter | default("/usr/bin/python3") }}'
+      - '-I'
+      - /usr/local/bin/molecule-smtp-session
+    stdin: '{{ item.value | to_json }}'
+  loop: '{{ __verify_sessions | dict2items }}'
+  loop_control:
+    label: '{{ item.key }}'
+  register: __verify_session_results
+  changed_when: false
+
+- name: Verify | Collect the SMTP replies
+  ansible.builtin.set_fact:
+    __verify_smtp: >-
+      {{ __verify_smtp | default({})
+         | combine(dict(__verify_session_results.results | map(attribute='item.key')
+                        | zip(__verify_session_results.results | map(attribute='stdout') | map('from_json')))) }}

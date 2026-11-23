@@ -1,0 +1,192 @@
+---
+# Roundcube on the web host reaches everything on the mail host with TLS:
+# the login stores the session in Valkey (ACL user, key prefix) and not in
+# the database, the folder list comes from Dovecot, a Sieve filter goes
+# through ManageSieve, a password change writes the {ARGON2ID} hash into the
+# PostfixAdmin database and Dovecot accepts the new password.
+- name: Verify
+  hosts: web
+  gather_facts: true
+
+  vars:
+    __verify_dir: '/usr/local/lib/molecule-roundcube'
+    __verify_web: >-
+      {{ ansible_facts['python']['executable'] }} -I {{ __verify_dir }}/webmail.py
+    __verify_mail: "{{ groups['mail'] | first }}"
+    __verify_valkey_cli: >-
+      {{ ['valkey-cli', '--tls', '--cacert', '/etc/molecule-tls/ca.crt', '-h', __verify_mail,
+          '-p', '6380', '--user', 'roundcube', '--askpass'] }}
+
+  tasks:
+    # A filter name of its own per run: Roundcube refuses a second filter
+    # of the same name, and verify may run again
+    - name: Verify | Name the test filter
+      ansible.builtin.set_fact:
+        __verify_filter: "molecule-archive-{{ now(utc=true).strftime('%Y%m%d%H%M%S') }}"
+
+    - name: Verify | Create the test directory
+      ansible.builtin.file:
+        path: '{{ __verify_dir }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Verify | Deploy webmail.py
+      ansible.builtin.copy:
+        src: ../shared/files/webmail.py
+        dest: '{{ __verify_dir }}/webmail.py'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Verify | Read config.inc.php
+      ansible.builtin.slurp:
+        src: /etc/roundcube/config.inc.php
+      register: __verify_config_raw
+      no_log: true
+
+    - name: Verify | Assert the TLS settings of config.inc.php
+      ansible.builtin.assert:
+        that:
+          - "'sslmode=verify-full&sslrootcert=' ~ __molecule_ca_file in __verify_config"
+          - "\"$config['imap_host'] = 'ssl://\" ~ __verify_mail ~ \":993';\" in __verify_config"
+          - "\"$config['managesieve_host'] = 'tls://\" ~ __verify_mail ~ \":4190';\" in __verify_config"
+          - "\"$config['session_storage'] = 'php';\" in __verify_config"
+          - "\"ini_set('session.save_handler', 'redis');\" in __verify_config"
+          - "'tls://' ~ __verify_mail ~ ':6380?auth[]=roundcube&auth[]=' in __verify_config"
+          - "'stream[verify_peer]=1' in __verify_config"
+        quiet: true
+      vars:
+        __verify_config: '{{ __verify_config_raw.content | b64decode }}'
+      no_log: true
+
+    - name: Verify | Count the sessions in Valkey before the login
+      ansible.builtin.command:
+        argv: "{{ __verify_valkey_cli + ['--scan', '--pattern', 'roundcube:session:*'] }}"
+        stdin: '{{ __molecule_redis_password }}'
+      register: __verify_sessions_before
+      changed_when: false
+      delegate_to: '{{ __verify_mail }}'
+
+    - name: Verify | Log in with a wrong password
+      ansible.builtin.command:
+        argv: "{{ __verify_web.split() + ['login', '--user', 'alice@example.com'] }}"
+        stdin: '{{ {"password": "wrong-Secret-42"} | to_json }}'
+      register: __verify_wrong
+      changed_when: false
+
+    - name: Verify | Log in with a PostfixAdmin mailbox
+      ansible.builtin.command:
+        argv: "{{ __verify_web.split() + ['login', '--user', 'alice@example.com'] }}"
+        stdin: '{{ {"password": "alice-Secret-42"} | to_json }}'
+      register: __verify_login
+      changed_when: false
+
+    - name: Verify | Count the sessions in Valkey after the login
+      ansible.builtin.command:
+        argv: "{{ __verify_valkey_cli + ['--scan', '--pattern', 'roundcube:session:*'] }}"
+        stdin: '{{ __molecule_redis_password }}'
+      register: __verify_sessions_after
+      changed_when: false
+      delegate_to: '{{ __verify_mail }}'
+
+    - name: Verify | Count the sessions in the Roundcube database
+      ansible.builtin.command:
+        argv: ['runuser', '-u', 'postgres', '--', 'psql', '-At', '-d', 'roundcube',
+               '-c', 'SELECT COUNT(*) FROM session']
+      register: __verify_db_sessions
+      changed_when: false
+      delegate_to: '{{ __verify_mail }}'
+
+    - name: Verify | Assert the login with the session in Valkey
+      ansible.builtin.assert:
+        that:
+          - not (__verify_wrong.stdout | from_json).login_ok
+          - (__verify_wrong.stdout | from_json).login_status == 401
+          - (__verify_login.stdout | from_json).login_ok
+          - "'INBOX' in (__verify_login.stdout | from_json).folders"
+          - "'Junk' in (__verify_login.stdout | from_json).folders"
+          - __verify_sessions_after.stdout_lines | length > __verify_sessions_before.stdout_lines | length
+          - __verify_db_sessions.stdout | trim == '0'
+        fail_msg: >-
+          {{ __verify_wrong.stdout }} / {{ __verify_login.stdout }} /
+          sessions in Valkey {{ __verify_sessions_before.stdout_lines | length }} →
+          {{ __verify_sessions_after.stdout_lines | length }}, in the database {{ __verify_db_sessions.stdout }}
+
+    - name: Verify | Save a filter through the managesieve plugin
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_web.split() + ['sieve', '--user', 'alice@example.com',
+             '--name', __verify_filter, '--folder', 'Archive'] }}
+        stdin: '{{ {"password": "alice-Secret-42"} | to_json }}'
+      register: __verify_sieve
+      changed_when: false
+
+    - name: Verify | Read the Roundcube Sieve script from Dovecot
+      ansible.builtin.command:
+        argv: ['doveadm', 'sieve', 'get', '-u', 'alice@example.com', 'roundcube']
+      register: __verify_sieve_script
+      changed_when: false
+      delegate_to: '{{ __verify_mail }}'
+
+    - name: Verify | Assert the filter is stored in Dovecot
+      ansible.builtin.assert:
+        that:
+          - (__verify_sieve.stdout | from_json).saved
+          - __verify_sieve_script.stdout is search('fileinto "Archive"')
+        fail_msg: '{{ __verify_sieve.stdout }} / {{ __verify_sieve_script.stdout }}'
+
+    - name: Verify | Change the password through the password plugin
+      ansible.builtin.command:
+        argv: "{{ __verify_web.split() + ['password', '--user', 'alice@example.com'] }}"
+        stdin: '{{ {"password": "alice-Secret-42", "new_password": "alice-Changed-Secret-42"} | to_json }}'
+      register: __verify_password
+      changed_when: false
+
+    - name: Verify | Read the stored hash
+      ansible.builtin.command:
+        argv:
+          - runuser
+          - -u
+          - postgres
+          - --
+          - psql
+          - -At
+          - -d
+          - postfixadmin
+          - -c
+          - "SELECT password FROM mailbox WHERE username = 'alice@example.com'"
+      register: __verify_hash
+      changed_when: false
+      delegate_to: '{{ __verify_mail }}'
+
+    - name: Verify | Log in to Dovecot with the new password
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_web.split() + ['imap', '--user', 'alice@example.com', '--ca', __molecule_ca_file,
+             '--imap-host', __verify_mail] }}
+        stdin: '{{ {"password": "alice-Changed-Secret-42"} | to_json }}'
+      register: __verify_new_imap
+      changed_when: false
+
+    - name: Verify | Assert the hash and the IMAP login
+      ansible.builtin.assert:
+        that:
+          - (__verify_password.stdout | from_json).saved
+          - __verify_hash.stdout | trim is match('^\{ARGON2ID\}\$argon2id\$v=19\$')
+          - (__verify_new_imap.stdout | from_json).login
+        fail_msg: '{{ __verify_password.stdout }} / {{ __verify_hash.stdout[:20] }} / {{ __verify_new_imap.stdout }}'
+
+    - name: Verify | Change the password back
+      ansible.builtin.command:
+        argv: "{{ __verify_web.split() + ['password', '--user', 'alice@example.com'] }}"
+        stdin: '{{ {"password": "alice-Changed-Secret-42", "new_password": "alice-Secret-42"} | to_json }}'
+      register: __verify_password_back
+      changed_when: false
+
+    - name: Verify | Assert the password is changed back
+      ansible.builtin.assert:
+        that:
+          - (__verify_password_back.stdout | from_json).saved
+        fail_msg: '{{ __verify_password_back.stdout }}'

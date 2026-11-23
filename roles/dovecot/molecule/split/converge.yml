@@ -1,0 +1,9 @@
+---
+- name: Converge
+  hosts: mail
+  gather_facts: true
+
+  tasks:
+    - name: Converge | Include dovecot role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'

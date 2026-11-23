@@ -1,0 +1,61 @@
+---
+# Compares the SOGo main package with the minimum version, using the
+# distribution's own version rules (epochs, Debian revisions such as
+# +deb13u1). Passes when the installed version or the version the update
+# would install meets the minimum. Rocky Linux compares the Debian package
+# of the image with dpkg in the base image.
+#
+# Input:
+#   __sogo_check_stage      'pre' (before the package task or build) or 'post'
+#   __sogo_check_installed  installed version, '' when not installed
+#   __sogo_check_candidate  version the update would install, '' if none
+#
+# A minimum without an epoch takes the epoch of the compared version: dpkg
+# and vercmp treat a missing epoch as 0.
+
+- name: Version Check | Compare with the minimum version
+  ansible.builtin.command:
+    argv: '{{ __sogo_vercmp_argv[__sogo_install_method] }}'
+  vars:
+    __sogo_check_minimum: >-
+      {{ (item.split(':') | first ~ ':' ~ __sogo_minimum)
+         if (':' not in (__sogo_minimum | string) and item is match('^[0-9]+:'))
+         else (__sogo_minimum | string) }}
+    # dpkg answers with its exit code, vercmp prints -1, 0 or 1
+    __sogo_vercmp_argv:
+      package: ['dpkg', '--compare-versions', '{{ item }}', 'ge', '{{ __sogo_check_minimum }}']
+      aur: ['vercmp', '{{ item }}', '{{ __sogo_check_minimum }}']
+      container: ['podman', 'run', '--rm', '--cgroups=disabled', '--userns=host', '--pull=missing',
+                  '--network=none', '--entrypoint=dpkg',
+                  '{{ sogo_container_base_image }}', '--compare-versions', '{{ item }}', 'ge',
+                  '{{ __sogo_check_minimum }}']
+  loop: '{{ [__sogo_check_installed, __sogo_check_candidate] | select | unique | list }}'
+  register: __sogo_check_result
+  changed_when: false
+  failed_when: __sogo_check_result.rc not in [0, 1]
+  check_mode: false
+  become: "{{ __sogo_install_method == 'container' }}"
+  become_user: "{{ __sogo_user if __sogo_install_method == 'container' else omit }}"
+  environment:
+    XDG_RUNTIME_DIR: '{{ __sogo_runtime_dir }}'
+
+- name: Version Check | Assert the minimum version
+  ansible.builtin.assert:
+    that:
+      - __sogo_check_met | length > 0
+    fail_msg: >-
+      sogo_packages_minimum requires {{ __sogo_minimum }};
+      installed: {{ __sogo_check_installed | default('none', true) }}{{
+        ('; the update would install: ' ~ (__sogo_check_candidate | default('none', true)))
+        if __sogo_check_stage == 'pre' else '' }}.
+      The repository does not carry the required version yet{{
+        ', nothing was changed' if __sogo_check_stage == 'pre' else '' }}.
+    success_msg: >-
+      {{ __sogo_packages | first }} {{ (__sogo_check_met + ['']) | first }} meets the
+      minimum {{ __sogo_minimum }}
+  vars:
+    __sogo_check_met: >-
+      {{ (__sogo_check_result.results | default([]) | selectattr('rc', 'eq', 0) | map(attribute='item') | list)
+         if __sogo_install_method != 'aur'
+         else (__sogo_check_result.results | default([]) | selectattr('stdout', 'in', ['0', '1'])
+               | map(attribute='item') | list) }}

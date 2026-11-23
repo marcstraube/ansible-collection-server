@@ -1,0 +1,170 @@
+---
+# Split scenario: the mail host runs PostgreSQL, PostfixAdmin, Dovecot and
+# Valkey, the web host nginx, PHP-FPM and Roundcube, both on a podman
+# network. Every connection of Roundcube goes over the network with TLS and
+# certificate verification against the test CA of the mail host: the
+# Roundcube database and the PostfixAdmin database of the password plugin
+# (PostgreSQL accepts both users with TLS only), IMAP, ManageSieve and the
+# sessions in Valkey with an ACL user. Both containers run in one job: the
+# scenario needs both platforms at once.
+driver:
+  name: podman
+platforms:
+  - name: roundcube-split-mail
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    network: roundcube-split
+    groups:
+      - mail
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: roundcube-split-web
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    network: roundcube-split
+    groups:
+      - web
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: prepare.yml
+    converge: converge.yml
+    verify: verify.yml
+  inventory:
+    group_vars:
+      all:
+        __molecule_mail_host: 'roundcube-split-mail'
+        __molecule_ca_file: '/etc/ssl/certs/roundcube-split-ca.pem'
+        __molecule_db_password: 'rc-db-Password-42'
+        __molecule_password_db_password: 'rc-Password-Changer-42'
+        __molecule_redis_password: 'rc-Valkey-Secret-42'
+      mail:
+        # PostgreSQL for the web host with TLS only: there is no host
+        # entry for its users
+        postgresql_enabled: true
+        postgresql_listen_addresses: '*'
+        postgresql_firewalld_enabled: false
+        postgresql_shared_buffers: '64MB'
+        postgresql_effective_cache_size: '128MB'
+        postgresql_lc_messages: 'en_US.UTF-8'
+        postgresql_lc_monetary: 'en_US.UTF-8'
+        postgresql_lc_numeric: 'en_US.UTF-8'
+        postgresql_lc_time: 'en_US.UTF-8'
+        postgresql_ssl_enabled: true
+        postgresql_ssl_cert_file: '/etc/molecule-tls/server.crt'
+        postgresql_ssl_key_file: '/etc/molecule-tls/server.key'
+        postgresql_hba_additional:
+          - type: 'hostssl'
+            database: 'roundcube'
+            user: 'roundcube'
+            address: '0.0.0.0/0'
+            method: 'scram-sha-256'
+          - type: 'hostssl'
+            database: 'postfixadmin'
+            user: 'roundcube_password'
+            address: '0.0.0.0/0'
+            method: 'scram-sha-256'
+        postgresql_users:
+          - name: 'roundcube'
+            password: '{{ __molecule_db_password }}'
+          - name: 'roundcube_password'
+            password: '{{ __molecule_password_db_password }}'
+        postgresql_databases:
+          - name: 'roundcube'
+            owner: 'roundcube'
+        # PostfixAdmin with the test mailboxes and the reader of Dovecot
+        postfixadmin_enabled: true
+        postfixadmin_db_password: 'pfa-db-Password-42'
+        postfixadmin_db_create: true
+        postfixadmin_db_readers:
+          - name: 'dovecot'
+            password: 'dovecot-Reader-42'
+            tables: ['mailbox', 'domain']
+        postfixadmin_extra_config:
+          emailcheck_resolve_domain: 'NO'
+        postfixadmin_domains:
+          - domain: 'example.com'
+        postfixadmin_mailboxes:
+          - username: 'alice@example.com'
+            password: 'alice-Secret-42'
+            name: 'Alice'
+            mode: 'initial'
+          - username: 'bob@example.com'
+            password: 'bob-Secret-42'
+            name: 'Bob'
+            mode: 'initial'
+        # Dovecot with ManageSieve, without Postfix
+        dovecot_enabled: true
+        dovecot_db_type: 'postgresql'
+        dovecot_db_host: '127.0.0.1'
+        dovecot_db_password: 'dovecot-Reader-42'
+        dovecot_tls_cert_file: '/etc/molecule-tls/server.crt'
+        dovecot_tls_key_file: '/etc/ssl/private/molecule-dovecot.key'
+        dovecot_managesieve_enabled: true
+        dovecot_postfix_local: false
+        # Valkey for the sessions: TLS only towards the network, the ACL
+        # user of Roundcube limited to its key prefix
+        valkey_enabled: true
+        valkey_bind: '0.0.0.0'
+        valkey_port: 0
+        valkey_tls_enabled: true
+        valkey_tls_port: 6380
+        valkey_tls_cert_file: '/etc/molecule-tls/server.crt'
+        valkey_tls_key_file: '/etc/molecule-tls/valkey.key'
+        valkey_users:
+          - name: 'roundcube'
+            password: '{{ __molecule_redis_password }}'
+            keys:
+              - 'roundcube:*'
+      web:
+        roundcube_enabled: true
+        roundcube_des_key: 'molecule-des-key-0123456789abcdef'
+        roundcube_db_host: '{{ __molecule_mail_host }}'
+        roundcube_db_password: '{{ __molecule_db_password }}'
+        roundcube_db_tls: true
+        roundcube_db_tls_ca_file: '{{ __molecule_ca_file }}'
+        roundcube_imap_host: '{{ __molecule_mail_host }}'
+        roundcube_smtp_host: '{{ __molecule_mail_host }}'
+        roundcube_tls_ca_file: '{{ __molecule_ca_file }}'
+        roundcube_password_db_host: '{{ __molecule_mail_host }}'
+        roundcube_password_db_password: '{{ __molecule_password_db_password }}'
+        roundcube_password_db_tls: true
+        roundcube_password_db_tls_ca_file: '{{ __molecule_ca_file }}'
+        roundcube_plugins: ['managesieve', 'password', 'acl', 'markasjunk']
+        roundcube_session_storage: 'redis'
+        roundcube_redis_host: '{{ __molecule_mail_host }}:6380'
+        roundcube_redis_user: 'roundcube'
+        roundcube_redis_password: '{{ __molecule_redis_password }}'
+        roundcube_redis_tls: true
+        roundcube_redis_tls_ca_file: '{{ __molecule_ca_file }}'
+    host_vars:
+      roundcube-split-mail:
+        ansible_python_interpreter: /usr/bin/python3
+      roundcube-split-web:
+        ansible_python_interpreter: /usr/bin/python3
+  config_options:
+    defaults:
+      allow_broken_conditionals: true
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - verify
+    - destroy

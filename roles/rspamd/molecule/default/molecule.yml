@@ -1,0 +1,150 @@
+---
+# rspamd with Valkey (marcstraube.server.valkey), clamd
+# (marcstraube.common.clamav) and a Postfix that uses the milter, all on one
+# instance (prepare.yml). A check run precedes converge, another one follows
+# idempotence; side_effect runs the targeted package update; verify sends
+# GTUBE, a clean message, EICAR and a message from the signing network
+# through Postfix, trains Bayes through the controller, checks the password
+# handling, the rejected configuration and the DNS report. Each platform
+# publishes the test resolver of the instance (dnsmasq on port 53) on its
+# own controller port for the DNS check.
+driver:
+  name: podman
+platforms:
+  - name: rspamd-archlinux
+    image: docker.io/marcstraube/archlinux-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+    published_ports:
+      - '127.0.0.1:15511:53/udp'
+  - name: rspamd-debian-trixie
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+    published_ports:
+      - '127.0.0.1:15512:53/udp'
+  - name: rspamd-rocky-9
+    image: docker.io/geerlingguy/docker-rockylinux9-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+    published_ports:
+      - '127.0.0.1:15513:53/udp'
+  - name: rspamd-rocky-10
+    image: docker.io/geerlingguy/docker-rockylinux10-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+    published_ports:
+      - '127.0.0.1:15514:53/udp'
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: prepare.yml
+    converge: converge.yml
+    side_effect: side_effect.yml
+    verify: verify.yml
+  inventory:
+    group_vars:
+      all:
+        rspamd_enabled: true
+        rspamd_controller_password: 'molecule-Read-42'
+        rspamd_controller_enable_password: 'molecule-Enable-42'
+        rspamd_redis_password: 'molecule-Valkey-42'
+        # The test resolver of the instance (dnsmasq)
+        rspamd_dns_nameservers:
+          - '127.0.0.1'
+        rspamd_antivirus_enabled: true
+        rspamd_dkim_domains:
+          - domain: 'example.com'
+            selector: 'molecule'
+          - domain: 'example.org'
+            selector: '2026'
+            key_size: 1024
+          # No records on the test resolver
+          - domain: 'example.net'
+            selector: 'missing'
+            key_size: 1024
+        rspamd_milter_headers:
+          - 'x-spam-status'
+          - 'authentication-results'
+        rspamd_ratelimits:
+          to:
+            bucket:
+              burst: 100
+              rate: '1 / 1m'
+        rspamd_dmarc_reporting_enabled: true
+        rspamd_dmarc_reporting_email: 'dmarc-reports@example.com'
+        rspamd_dmarc_reporting_domain: 'example.com'
+        rspamd_dmarc_reporting_org_name: 'Molecule'
+        rspamd_local_config:
+          'phishing.conf': |
+            openphish_enabled = false;
+        rspamd_dns_resolver: '127.0.0.1'
+        rspamd_dns_resolver_port: '{{ molecule_dns_port }}'
+        # rspamd joins the group of the clamd socket (clamav service user)
+        rspamd_socket_groups:
+          - "{{ 'clamscan' if ansible_facts['os_family'] == 'RedHat' else 'clamav' }}"
+        # clamd on the test signature database (prepare.yml)
+        clamav_enabled: true
+        clamav_daemon_enabled: true
+        clamav_freshclam_enabled: false
+        clamav_firewalld_enabled: false
+        clamav_apparmor_enabled: false
+        # Valkey with the ACL user of rspamd (prepare.yml)
+        valkey_enabled: true
+        valkey_users:
+          - name: 'rspamd'
+            password: 'molecule-Valkey-42'
+    host_vars:
+      rspamd-archlinux:
+        ansible_python_interpreter: /usr/bin/python
+        molecule_dns_port: 15511
+      rspamd-debian-trixie:
+        ansible_python_interpreter: /usr/bin/python3
+        molecule_dns_port: 15512
+      rspamd-rocky-9:
+        ansible_python_interpreter: /usr/bin/python3
+        molecule_dns_port: 15513
+      rspamd-rocky-10:
+        ansible_python_interpreter: /usr/bin/python3
+        molecule_dns_port: 15514
+  config_options:
+    defaults:
+      allow_broken_conditionals: true
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - check
+    - converge
+    - idempotence
+    - check
+    - side_effect
+    - verify
+    - destroy

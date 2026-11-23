@@ -1,4 +1,5 @@
 {{ ansible_managed | comment }}
+{% set __nginx_http2_listen = ' http2' if not (__nginx_http2_directive | bool) and nginx_http2_enabled | bool else '' %}
 
 server {
     listen 80 default_server;
@@ -9,8 +10,11 @@ server {
 }
 
 server {
-    listen 443 ssl http2 default_server;
-    listen [::]:443 ssl http2 default_server;
+    listen 443 ssl{{ __nginx_http2_listen }} default_server;
+    listen [::]:443 ssl{{ __nginx_http2_listen }} default_server;
+{% if __nginx_http2_directive | bool and nginx_http2_enabled | bool %}
+    http2 on;
+{% endif %}
     server_name _;
 
 {% if nginx_default_site_ssl_certificate | length > 0 %}

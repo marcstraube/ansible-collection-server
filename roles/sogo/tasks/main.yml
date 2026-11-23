@@ -1,0 +1,408 @@
+---
+- name: Main | Load OS-specific variables
+  ansible.builtin.include_vars: '{{ item }}'
+  with_first_found:
+    - files:
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}.yml'
+      paths:
+        - 'vars'
+  tags:
+    - always
+
+# Every validation collects one message per failed check, so a run names
+# exactly what is wrong. The checks run before any change.
+- name: Main | Validate package update settings
+  ansible.builtin.assert:
+    that:
+      - __sogo_errors | length == 0
+    fail_msg: '{{ __sogo_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __sogo_errors: >-
+      {{ [
+           ("sogo_packages_state must be 'present' or 'latest' (got '" ~ sogo_packages_state ~ "').")
+             if sogo_packages_state not in ['present', 'latest'] else '',
+           ("sogo_packages_minimum must be a version string, e.g. '5.12.1', or a mapping per platform (got '"
+            ~ sogo_packages_minimum ~ "').")
+             if not (sogo_packages_minimum is string or sogo_packages_minimum is mapping) else ''
+         ] | select | list }}
+  when: sogo_enabled | bool
+  tags:
+    - always
+
+# A mapping selects the minimum by '<os_family>-<major>', then
+# '<os_family>'. A host without a matching key fails here, before any
+# change, so a platform left out of the mapping cannot pass unchecked.
+- name: Main | Select the minimum version for this platform
+  ansible.builtin.set_fact:
+    __sogo_minimum: >-
+      {{ (sogo_packages_minimum[__sogo_minimum_key] if __sogo_minimum_key | length > 0 else '')
+         if sogo_packages_minimum is mapping
+         else sogo_packages_minimum }}
+    __sogo_minimum_key_found: '{{ sogo_packages_minimum is not mapping or __sogo_minimum_key | length > 0 }}'
+  vars:
+    __sogo_minimum_key: >-
+      {{ ([ansible_facts['os_family'] ~ '-' ~ ansible_facts['distribution_major_version'],
+           ansible_facts['os_family']]
+          | select('in', sogo_packages_minimum) | list + [''])
+         | first
+         if sogo_packages_minimum is mapping
+         else '' }}
+  when: sogo_enabled | bool
+  tags:
+    - always
+
+# The value reaches dpkg and vercmp as an argument; only characters of a
+# package version are accepted.
+- name: Main | Validate the minimum version for this platform
+  ansible.builtin.assert:
+    that:
+      - __sogo_minimum_key_found | bool
+      - __sogo_minimum | string is match('^[0-9A-Za-z.+~:_-]*\Z')
+    fail_msg: >-
+      {{ ('sogo_packages_minimum has no key for this host (expected '
+          ~ ansible_facts['os_family'] ~ '-' ~ ansible_facts['distribution_major_version']
+          ~ ' or ' ~ ansible_facts['os_family'] ~ ')')
+         if not (__sogo_minimum_key_found | bool)
+         else ('sogo_packages_minimum ' ~ __sogo_minimum ~ ' is not a package version') }}
+    quiet: true
+  when: sogo_enabled | bool
+  tags:
+    - always
+
+# The messages name no password: they only say which variable is wrong.
+- name: Main | Validate the database settings
+  ansible.builtin.assert:
+    that:
+      - __sogo_errors | length == 0
+    fail_msg: '{{ __sogo_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __sogo_errors: >-
+      {{ [
+           ("sogo_db_type must be 'postgresql' or 'mariadb' (got '" ~ sogo_db_type ~ "').")
+             if sogo_db_type not in __sogo_db_url_schemes else '',
+           ("sogo_db_password and sogo_postfixadmin_db_password are required and may contain letters, digits and"
+            ~ " - . _ ~ ! $ & ' ( ) * + , ; = only (SOGo puts them into database URLs; store them in the vault).")
+             if sogo_db_password is not match(__sogo_db_password_regex)
+                or (sogo_user_sources | length == 0
+                    and sogo_postfixadmin_db_password is not match(__sogo_db_password_regex)) else '',
+           ("sogo_db_host and sogo_postfixadmin_db_host must be host names or IP addresses (TCP), not socket paths"
+            ~ " (got '" ~ sogo_db_host ~ "', '" ~ sogo_postfixadmin_db_host ~ "').")
+             if [sogo_db_host, sogo_postfixadmin_db_host] | map('string')
+                | reject('match', '^[A-Za-z0-9.:\[\]_-]+\Z') | list | length > 0 else '',
+           ("sogo_db_name, sogo_db_user, sogo_postfixadmin_db_name, sogo_postfixadmin_db_user and"
+            ~ " sogo_postfixadmin_view must consist of letters, digits and '_'.")
+             if [sogo_db_name, sogo_db_user, sogo_postfixadmin_db_name, sogo_postfixadmin_db_user,
+                 sogo_postfixadmin_view] | map('string') | reject('match', '^[A-Za-z0-9_]+\Z') | list | length > 0
+             else '',
+           ("sogo_db_port and sogo_postfixadmin_db_port must be 1-65535 (got '" ~ sogo_db_port ~ "', '"
+            ~ sogo_postfixadmin_db_port ~ "').")
+             if [sogo_db_port, sogo_postfixadmin_db_port] | map('string') | reject('match', '^[0-9]{1,5}\Z') | list
+                | length > 0
+                or [sogo_db_port, sogo_postfixadmin_db_port] | map('int') | select('gt', 65535) | list | length > 0
+                or [sogo_db_port, sogo_postfixadmin_db_port] | map('int') | select('lt', 1) | list | length > 0
+             else '',
+           'sogo_db_tls needs sogo_db_tls_ca_file, an absolute path.'
+             if sogo_db_tls | bool and sogo_db_tls_ca_file is not match('^/\S+\Z') else '',
+           ("The container of Rocky Linux cannot reach the MariaDB socket: set sogo_db_host and"
+            ~ " sogo_postfixadmin_db_host to 127.0.0.1 instead of 'localhost'.")
+             if __sogo_install_method == 'container' and sogo_db_type == 'mariadb'
+                and 'localhost' in [sogo_db_host, sogo_postfixadmin_db_host] else '',
+           ("sogo_db_user and sogo_postfixadmin_db_user must differ on one database server: they would be the"
+            ~ " same account with two passwords (got '" ~ sogo_db_user ~ "' for both).")
+             if sogo_user_sources | length == 0 and sogo_db_user == sogo_postfixadmin_db_user
+                and ('loopback' if sogo_db_host in __sogo_loopback_hosts else sogo_db_host)
+                    == ('loopback' if sogo_postfixadmin_db_host in __sogo_loopback_hosts else sogo_postfixadmin_db_host)
+                and sogo_db_port | string == sogo_postfixadmin_db_port | string else '',
+           ("sogo_db_create needs a database server on this host (sogo_db_host a loopback address, got '"
+            ~ sogo_db_host ~ "').")
+             if sogo_db_create | bool and not (__sogo_db_local | bool) else ''
+         ] | select | list }}
+  when: sogo_enabled | bool
+  tags:
+    - always
+
+- name: Main | Warn about a database connection without TLS over the network
+  ansible.builtin.debug:
+    msg: >-
+      sogo_db_tls is false: the connections to the database servers
+      '{{ [sogo_db_host, sogo_postfixadmin_db_host] | unique | join("', '") }}'
+      are not encrypted, the passwords and the password hashes of the users
+      cross the network in cleartext. Reach them only over a private
+      network or WireGuard, or enable sogo_db_tls.
+  when:
+    - sogo_enabled | bool
+    - not sogo_db_tls | bool
+    - >-
+      [sogo_db_host, sogo_postfixadmin_db_host] | reject('in', __sogo_loopback_hosts)
+      | reject('match', '^127\.') | list | length > 0
+  tags:
+    - always
+
+- name: Main | Validate the user, mail and setting variables
+  ansible.builtin.assert:
+    that:
+      - __sogo_errors | length == 0
+    fail_msg: '{{ __sogo_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __sogo_line_regex: '^[^\r\n"\\]*$'
+    __sogo_errors: >-
+      {{ [
+           ("sogo_password_scheme must be one of " ~ __sogo_password_schemes | join(', ') ~ " (got '"
+            ~ sogo_password_scheme ~ "').")
+             if sogo_password_scheme not in __sogo_password_schemes else '',
+           "sogo_user_sources must be a list of mappings (SOGo sources with an id and a type)."
+             if sogo_user_sources is string or sogo_user_sources is mapping
+                or sogo_user_sources | reject('mapping') | list | length > 0
+                or sogo_user_sources | rejectattr('id', 'defined') | list | length > 0
+                or sogo_user_sources | rejectattr('type', 'defined') | list | length > 0 else '',
+           ("sogo_mail_domain must be a domain name, e.g. 'example.com' (got '" ~ sogo_mail_domain ~ "').")
+             if sogo_mail_domain is not match('^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+\Z') else '',
+           ("sogo_imap_server must be an imaps:// or imap:// URL (got '" ~ sogo_imap_server ~ "').")
+             if sogo_imap_server is not match('^imaps?://[^\s"\\]+\Z') else '',
+           ("sogo_smtp_server must be an smtp:// or smtps:// URL (got '" ~ sogo_smtp_server ~ "').")
+             if sogo_smtp_server is not match('^smtps?://[^\s"\\]+\Z') else '',
+           ("sogo_sieve_server must be empty or a sieve:// URL (got '" ~ sogo_sieve_server ~ "').")
+             if sogo_sieve_server is not match('^(sieve://[^\s"\\]+)?\Z') else '',
+           ("sogo_bind must be '<address>:<port>' or '[<IPv6 address>]:<port>' (got '" ~ sogo_bind ~ "').")
+             if sogo_bind is not match('^([0-9.]+|\[[0-9A-Fa-f:]+\]):[0-9]{1,5}\Z') else '',
+           ("sogo_memcached_host must be a host name or IP address with an optional port, or a socket path"
+            ~ " (got '" ~ sogo_memcached_host ~ "').")
+             if sogo_memcached_host is not match('^(/[^\s\'"\\\\,]+|[A-Za-z0-9.:\[\]-]+)\Z') else '',
+           ("The container of Rocky Linux reaches memcached over TCP only: sogo_memcached_host must be"
+            ~ " 'host' or 'host:port', not a socket path (got '" ~ sogo_memcached_host ~ "').")
+             if __sogo_install_method == 'container' and sogo_memcached_host is match('/') else '',
+           ("sogo_failed_login_count, sogo_failed_login_interval and sogo_failed_login_block_interval must be"
+            ~ " numbers (count 0 disables the protection, the intervals at least 1).")
+             if sogo_failed_login_count | string is not match('^[0-9]+\Z')
+                or [sogo_failed_login_interval, sogo_failed_login_block_interval] | map('string')
+                   | reject('match', '^[1-9][0-9]*\Z') | list | length > 0 else '',
+           ("sogo_container_debian_mirror and sogo_container_debian_security_mirror must be empty or http(s)"
+            ~ " URLs without whitespace, quotes, '#', '&' or backslash (they end up in a sed expression).")
+             if [sogo_container_debian_mirror, sogo_container_debian_security_mirror] | map('string')
+                | reject('match', '^(https?://[^\s\'"#&\\\\]+)?\Z') | list | length > 0 else '',
+           "sogo_timezone and sogo_language must be set, on one line."
+             if [sogo_timezone, sogo_language] | map('string') | reject('match', '^[A-Za-z0-9_/+-]+\Z') | list
+                | length > 0 else '',
+           ("sogo_workers, sogo_session_timeout and sogo_service_start_timeout must be positive numbers.")
+             if [sogo_workers, sogo_session_timeout, sogo_service_start_timeout] | map('string')
+                | reject('match', '^[1-9][0-9]*\Z') | list | length > 0 else '',
+           ("sogo_subid_start and sogo_subid_count must be positive numbers.")
+             if [sogo_subid_start, sogo_subid_count] | map('string')
+                | reject('match', '^[1-9][0-9]*\Z') | list | length > 0 else '',
+           ("sogo_sieve_admin_username and sogo_sieve_admin_password are set together, on one line,"
+            ~ " without ':' in the name.")
+             if (sogo_sieve_admin_username | length > 0) != (sogo_sieve_admin_password | length > 0)
+                or sogo_sieve_admin_username is not match('^[^\s:]*\Z')
+                or sogo_sieve_admin_password is not match('^[^\r\n]*\Z') else '',
+           ("sogo_web_resources_dir must be an absolute path of letters, digits, '.', '_', '-' and '/'"
+            ~ " without '.' or '..' segments and at least two levels deep, like /srv/sogo (the role"
+            ~ " owns it; got '" ~ sogo_web_resources_dir ~ "').")
+             if sogo_web_resources_dir is not match('^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]\Z')
+                or sogo_web_resources_dir is search('(^|/)\.\.?(/|\Z)')
+                or sogo_web_resources_dir is not match('^/[^/]+/[^/]') else '',
+           ("sogo_container_base_image must be an image reference (got '" ~ sogo_container_base_image ~ "').")
+             if sogo_container_base_image is not match('^[A-Za-z0-9./:@_-]+\Z') else ''
+         ] | select | list }}
+  when: sogo_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate the backup settings
+  ansible.builtin.assert:
+    that:
+      - sogo_backup_dir is match('^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]\Z')
+      # The role owns the directory: '/.' or '/var/lib/..' would hand / or
+      # /var to the sogo user
+      - sogo_backup_dir is not search('(^|/)\.\.?(/|\Z)')
+      # At least two levels: '/var' or '/etc' would be taken over as well
+      - sogo_backup_dir is match('^/[^/]+/[^/]')
+      - >-
+        sogo_restore | length == 0
+        or (sogo_restore is match('^sogo-[0-9]{8}-[0-9]{6}\Z') and sogo_backup_enabled | bool)
+      - sogo_backup_keep | string is match('^[1-9][0-9]*\Z')
+      - sogo_backup_on_calendar | string is match('^[^\r\n]+\Z')
+    fail_msg: >-
+      sogo_backup_dir must be an absolute path of letters, digits, '.', '_',
+      '-' and '/' (it reaches shell commands) without '.' or '..' segments
+      and at least two levels deep, like /srv/sogo-backups (the role owns
+      it), sogo_backup_keep a number
+      of at least 1 and sogo_backup_on_calendar a systemd calendar
+      expression; sogo_restore names a set (sogo-YYYYmmdd-HHMMSS) and needs
+      sogo_backup_enabled (got '{{ sogo_restore }}', '{{ sogo_backup_dir }}', '{{ sogo_backup_keep }}',
+      '{{ sogo_backup_on_calendar }}').
+    quiet: true
+  when: sogo_enabled | bool
+  tags:
+    - always
+
+# The role makes sogo_backup_dir sogo:sogo 0700: a directory that exists and
+# belongs to another user (/var/lib, /var/backups, a home directory) is not
+# taken over, nor a symlink (the role would follow it). A directory of an
+# earlier run belongs to the sogo user (on Rocky Linux the user of the
+# container) and passes.
+- name: Main | Read the backup directory
+  ansible.builtin.stat:
+    path: '{{ sogo_backup_dir }}'
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  register: __sogo_backup_dir_stat
+  when:
+    - sogo_enabled | bool
+    - sogo_backup_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate the owner of the backup directory
+  ansible.builtin.assert:
+    that:
+      - >-
+        not __sogo_backup_dir_stat.stat.exists
+        or (not __sogo_backup_dir_stat.stat.islnk
+            and __sogo_backup_dir_stat.stat.isdir
+            and __sogo_backup_dir_stat.stat.pw_name | default('') == __sogo_user)
+    fail_msg: >-
+      {{ __sogo_backup_dir_problem }} It must be a directory for the SOGo
+      backups only: the role makes it {{ __sogo_user }}:{{ __sogo_group }}
+      0700 and does not take over an existing directory of another user. Use
+      a new subdirectory such as {{ sogo_backup_dir }}/sogo, which the role
+      creates (also on a fresh host where the {{ __sogo_user }} user does not
+      exist yet), or hand this one to {{ __sogo_user }} yourself.
+    quiet: true
+  vars:
+    __sogo_backup_dir_problem: >-
+      {{ ('sogo_backup_dir ' ~ sogo_backup_dir ~ ' is a symlink; point sogo_backup_dir at the real directory.')
+         if __sogo_backup_dir_stat.stat.islnk | default(false)
+         else ('sogo_backup_dir ' ~ sogo_backup_dir ~ ' exists and is not a directory of the '
+               ~ __sogo_user ~ ' user (owner '
+               ~ (__sogo_backup_dir_stat.stat.pw_name | default(__sogo_backup_dir_stat.stat.uid | default('none')))
+               ~ ').') }}
+  when:
+    - sogo_enabled | bool
+    - sogo_backup_enabled | bool
+  tags:
+    - always
+
+# sogo.conf writes sogo_extra_config after the settings of the role
+# variables, so a managed key there would override a setting the role
+# validates.
+- name: Main | Validate sogo_extra_config against the managed settings
+  ansible.builtin.assert:
+    that:
+      - sogo_extra_config is mapping
+      - sogo_extra_config.keys() | map('string') | reject('match', '^[A-Za-z0-9_]+\Z') | list | length == 0
+      - __sogo_extra_rejected | length == 0
+    fail_msg: >-
+      sogo_extra_config must be a mapping of sogo.conf keys (letters, digits,
+      '_'). Keys the role manages: {% for key in __sogo_extra_rejected %}{{ key }}
+      (set {{ __sogo_managed_config[key] }}){{ ', ' if not loop.last else '' }}{% endfor %}.
+    quiet: true
+  vars:
+    __sogo_extra_rejected: >-
+      {{ (sogo_extra_config.keys() | map('string') | select('in', __sogo_managed_config) | list)
+         if sogo_extra_config is mapping else [] }}
+  when: sogo_enabled | bool
+  tags:
+    - always
+
+# SOGo verifies the certificate of the database server and of Dovecot and
+# Postfix; a missing CA file is named here, before any change. Check mode
+# skips the assertion, as the role that deploys the file writes nothing
+# then.
+- name: Main | Check the database CA file
+  ansible.builtin.stat:
+    path: '{{ sogo_db_tls_ca_file }}'
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  register: __sogo_db_ca_stat
+  when:
+    - sogo_enabled | bool
+    - sogo_db_tls | bool
+  tags:
+    - always
+
+- name: Main | Assert the database CA file exists
+  ansible.builtin.assert:
+    that:
+      - __sogo_db_ca_stat.stat.exists
+    fail_msg: >-
+      sogo_db_tls_ca_file {{ sogo_db_tls_ca_file }} not found. Deploy the CA
+      of the database server (e.g. with marcstraube.common.pki) before the
+      sogo role.
+    quiet: true
+  when:
+    - sogo_enabled | bool
+    - sogo_db_tls | bool
+    - not ansible_check_mode
+  tags:
+    - always
+
+- name: Main | Import install tasks
+  ansible.builtin.import_tasks: install.yml
+  when: sogo_enabled | bool
+  tags:
+    - sogo
+    - sogo:install
+
+- name: Main | Import container tasks
+  ansible.builtin.import_tasks: container.yml
+  when:
+    - sogo_enabled | bool
+    - __sogo_install_method == 'container'
+  tags:
+    - sogo
+    - sogo:install
+
+- name: Main | Import database tasks
+  ansible.builtin.import_tasks: database.yml
+  when:
+    - sogo_enabled | bool
+    - sogo_db_create | bool
+  tags:
+    - sogo
+    - sogo:database
+
+- name: Main | Import configure tasks
+  ansible.builtin.import_tasks: configure.yml
+  when: sogo_enabled | bool
+  tags:
+    - sogo
+    - sogo:configure
+
+# Before the service: the container of Rocky Linux mounts the backup
+# directory
+- name: Main | Import backup tasks
+  ansible.builtin.import_tasks: backup.yml
+  when: sogo_enabled | bool
+  tags:
+    - sogo
+    - sogo:backup
+
+- name: Main | Import service tasks
+  ansible.builtin.import_tasks: service.yml
+  when: sogo_enabled | bool
+  tags:
+    - sogo
+    - sogo:service
+
+- name: Main | Include restore tasks
+  ansible.builtin.include_tasks:
+    file: restore.yml
+    apply:
+      tags:
+        - sogo
+        - sogo:restore
+  when:
+    - sogo_enabled | bool
+    - sogo_restore | length > 0
+  tags:
+    - sogo
+    - sogo:restore

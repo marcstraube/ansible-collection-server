@@ -1,0 +1,51 @@
+---
+# Dovecot CE 2.4 repository of upstream on EL; AppStream ships Dovecot 2.3.
+# Debian 13 and Arch Linux ship 2.4 themselves. dnf imports the signing key
+# from gpgkey on first use.
+
+# The upstream packages need libunwind from EPEL. A missing EPEL repository
+# otherwise fails the package task with a dependency error that does not
+# name it. Checked before the repository is added, so nothing changes then.
+- name: Repos | Query libunwind (RedHat)
+  ansible.builtin.command:
+    argv:
+      - dnf
+      - --quiet
+      - repoquery
+      - --latest-limit=1
+      - libunwind
+  register: __dovecot_libunwind
+  changed_when: false
+  check_mode: false
+  retries: 5
+  delay: 10
+
+- name: Repos | Assert EPEL provides libunwind (RedHat)
+  ansible.builtin.assert:
+    that:
+      - __dovecot_libunwind.stdout | trim | length > 0
+    fail_msg: >-
+      The Dovecot CE packages need libunwind from EPEL, which no enabled
+      repository provides. Enable EPEL first (marcstraube.common.package_management).
+    quiet: true
+
+- name: Repos | Add Dovecot CE 2.4 repository (RedHat)
+  ansible.builtin.yum_repository:
+    name: '{{ __dovecot_repo_name }}'
+    file: '{{ __dovecot_repo_name }}'
+    description: '{{ __dovecot_repo_description }}'
+    baseurl: '{{ dovecot_repo_baseurl }}'
+    gpgkey: '{{ dovecot_repo_gpgkey }}'
+    gpgcheck: true
+    repo_gpgcheck: false
+    enabled: true
+  retries: 5
+  delay: 10
+
+# In check mode the repository task writes nothing; without the file the
+# package task would fail with "No package dovecot-imapd available".
+- name: Repos | Check Dovecot repository file presence (RedHat)
+  ansible.builtin.stat:
+    path: '{{ __dovecot_repo_file }}'
+  register: __dovecot_repo_stat
+  check_mode: false

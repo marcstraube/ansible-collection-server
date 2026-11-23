@@ -1,0 +1,24 @@
+---
+# A first run interrupted during the package install leaves the role's
+# policy-rc.d behind. The next run, with Dovecot installed by now, must
+# remove it; verify.yml checks that the file is not the role's and that
+# Dovecot still started only once.
+- name: Side Effect — Leftover policy-rc.d
+  hosts: mail
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Leave the role's policy-rc.d behind
+      ansible.builtin.copy:
+        content: |
+          #!/bin/sh
+          # Managed by Ansible (marcstraube.server.dovecot): keeps the first
+          # install of Dovecot from starting it, removed right after
+          exit 101
+        dest: /usr/sbin/policy-rc.d
+        owner: root
+        group: root
+        mode: '0755'
+
+- name: Side Effect — Run the role again
+  ansible.builtin.import_playbook: converge.yml

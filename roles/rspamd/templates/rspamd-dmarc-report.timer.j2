@@ -1,0 +1,11 @@
+{{ ansible_managed | comment }}
+[Unit]
+Description=Send the DMARC aggregate reports of rspamd ({{ rspamd_dmarc_report_on_calendar }})
+
+[Timer]
+OnCalendar={{ rspamd_dmarc_report_on_calendar }}
+Persistent=true
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target

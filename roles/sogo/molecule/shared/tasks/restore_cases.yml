@@ -1,0 +1,266 @@
+---
+# Further restore cases of the mariadb scenario (side_effect): memcached on
+# another host (flush that works, one memcached refuses, one that hangs, one
+# that closes the connection), an unknown user whose name holds an error
+# word, an empty set, and sogo-tool failures through a stub (backup with
+# status 137, 1, 255 with an error message; a restore answering "not found"
+# next to an error; one user failing for real next to an unknown one, also
+# with a failed flush), and a set of unknown users with a failed flush. The
+# proxies and the stub are removed again also after a failure.
+
+- name: Side Effect | Install the memcached proxy and the sogo-tool stub
+  ansible.builtin.copy:
+    src: '{{ item.src }}'
+    dest: '{{ item.dest }}'
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - {src: '{{ playbook_dir }}/../shared/files/memcached_proxy.py', dest: /usr/local/bin/molecule-memcached-proxy}
+    - {src: '{{ playbook_dir }}/../shared/files/sogo_tool_stub.sh', dest: /usr/local/bin/molecule-sogo-tool-stub}
+  loop_control:
+    label: '{{ item.dest }}'
+
+- name: Side Effect | Stop memcached proxies of an earlier run
+  ansible.builtin.command:
+    argv: [systemctl, stop, molecule-mc-forward, molecule-mc-error, molecule-mc-hang, molecule-mc-close]
+  changed_when: false
+  failed_when: false
+
+- name: Side Effect | Run the restore cases
+  block:
+    # memcached "on another host": the address of the instance, forwarded to the
+    # local memcached, so the role does not count it as local
+    - name: Side Effect | Start the memcached proxies
+      ansible.builtin.command:
+        argv:
+          - systemd-run
+          - '--unit=molecule-mc-{{ item.mode }}'
+          - --collect
+          - /usr/bin/python3
+          - /usr/local/bin/molecule-memcached-proxy
+          - "{{ ansible_facts['default_ipv4']['address'] }}"
+          - '{{ item.port }}'
+          - '{{ item.mode }}'
+      loop:
+        - {mode: 'forward', port: 11311}
+        - {mode: 'error', port: 11312}
+        - {mode: 'hang', port: 11313}
+        - {mode: 'close', port: 11314}
+      changed_when: true
+
+    - name: Side Effect | Wait for the memcached proxies
+      ansible.builtin.wait_for:
+        host: "{{ ansible_facts['default_ipv4']['address'] }}"
+        port: '{{ item }}'
+        timeout: 30
+      loop: [11311, 11312, 11313, 11314]
+
+    #
+    # memcached on another host
+    #
+
+    # A set that surely holds the contact
+    - name: Side Effect | Store the contact of alice
+      ansible.builtin.command:
+        argv: "{{ __side_effect_client | split + ['dav', '--kind', 'contact', '--user', 'alice@example.com'] }}"
+        stdin: '{{ __side_effect_credentials }}'
+      changed_when: true
+      no_log: true
+
+    - name: Side Effect | Back up the stored contact
+      ansible.builtin.systemd_service:
+        name: sogo-backup.service
+        state: started
+
+    - name: Side Effect | Find the newest set
+      ansible.builtin.include_tasks: tasks/newest_set.yml
+
+    # Every later restore loads this set (it holds the contact; each restore
+    # protects it from the rotation)
+    - name: Side Effect | Record the set with the contact
+      ansible.builtin.set_fact:
+        __side_effect_contact_set: '{{ __side_effect_newest_set }}'
+
+    - name: Side Effect | Delete the contact of alice before the restore
+      ansible.builtin.command:
+        argv: "{{ __side_effect_client | split + ['delete', '--kind', 'contact', '--user', 'alice@example.com'] }}"
+        stdin: '{{ __side_effect_credentials }}'
+      changed_when: true
+      no_log: true
+
+    - name: Side Effect | Include sogo role with the restore and memcached on another host  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        sogo_restore: '{{ __side_effect_contact_set }}'
+        sogo_memcached_host: "{{ ansible_facts['default_ipv4']['address'] }}:11311"
+
+    - name: Side Effect | Fetch the restored contact of alice
+      ansible.builtin.command:
+        argv: "{{ __side_effect_client | split + ['fetch', '--kind', 'contact', '--user', 'alice@example.com'] }}"
+        stdin: '{{ __side_effect_credentials }}'
+      register: __side_effect_remote_contact
+      changed_when: false
+      no_log: true
+
+    - name: Side Effect | Assert the flush and the restored contact
+      ansible.builtin.assert:
+        that:
+          - __sogo_restore_flush is not skipped
+          - __sogo_restore_flush.rc == 0
+          - __sogo_restore_flush is changed
+          - (__side_effect_remote_contact.stdout | from_json).fetched == 200
+        fail_msg: '{{ __sogo_restore_flush | to_json }} {{ __side_effect_remote_contact.stdout }}'
+
+    - name: Side Effect | Restore while memcached refuses the flush
+      ansible.builtin.include_tasks: tasks/restore_failure.yml
+      vars:
+        __side_effect_case_set: '{{ __side_effect_contact_set }}'
+        __side_effect_case_memcached: "{{ ansible_facts['default_ipv4']['address'] }}:11312"
+        __side_effect_expected: 'SERVER_ERROR molecule.*Flush it by hand'
+
+    - name: Side Effect | Restore while the flush hangs
+      ansible.builtin.include_tasks: tasks/restore_failure.yml
+      vars:
+        __side_effect_case_set: '{{ __side_effect_contact_set }}'
+        __side_effect_case_memcached: "{{ ansible_facts['default_ipv4']['address'] }}:11313"
+        __side_effect_expected: 'timed out after 20 seconds.*Flush it by hand'
+
+    - name: Side Effect | Restore while memcached closes the connection
+      ansible.builtin.include_tasks: tasks/restore_failure.yml
+      vars:
+        __side_effect_case_set: '{{ __side_effect_contact_set }}'
+        __side_effect_case_memcached: "{{ ansible_facts['default_ipv4']['address'] }}:11314"
+        __side_effect_expected: 'closed the connection without an answer.*do NOT run it again.*Flush it by hand'
+
+    #
+    # Unknown user with an error word in the name, empty set
+    #
+
+    - name: Side Effect | Copy the set with the contact and an unknown user errors@example.com
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          dst='{{ sogo_backup_dir }}/{{ __side_effect_errors_set }}'
+          rm -rf "$dst"
+          cp -a '{{ sogo_backup_dir }}/{{ __side_effect_contact_set }}' "$dst"
+          cp -a "$dst/alice@example.com" "$dst/errors@example.com"
+      changed_when: true
+
+    - name: Side Effect | Include sogo role with the set of errors@example.com  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        sogo_restore: '{{ __side_effect_errors_set }}'
+
+    - name: Side Effect | Assert errors@example.com was skipped, not a failure
+      ansible.builtin.assert:
+        that:
+          - __sogo_restore_skipped == ['errors@example.com']
+          - __sogo_restored_users == ['alice@example.com']
+        fail_msg: 'skipped: {{ __sogo_restore_skipped }} restored: {{ __sogo_restored_users }}'
+
+    # Restored and skipped users, none failed for real, the flush fails: the
+    # restore is complete and must not run again
+    - name: Side Effect | Restore the set of errors@example.com while the flush fails
+      ansible.builtin.include_tasks: tasks/restore_failure.yml
+      vars:
+        __side_effect_case_set: '{{ __side_effect_errors_set }}'
+        __side_effect_case_memcached: "{{ ansible_facts['default_ipv4']['address'] }}:11312"
+        __side_effect_expected: 'SERVER_ERROR molecule\). The restore itself is complete: do NOT run it again'
+        __side_effect_not_expected: 'No user of|it failed for'
+
+    - name: Side Effect | Create an empty set
+      ansible.builtin.file:
+        path: '{{ sogo_backup_dir }}/{{ __side_effect_empty_set }}'
+        state: directory
+        owner: sogo
+        group: sogo
+        mode: '0700'
+
+    - name: Side Effect | Restore the empty set
+      ansible.builtin.include_tasks: tasks/restore_failure.yml
+      vars:
+        __side_effect_case_set: '{{ __side_effect_empty_set }}'
+        __side_effect_case_memcached: '127.0.0.1'
+        __side_effect_expected: 'holds no user file'
+
+    - name: Side Effect | Remove the empty set
+      ansible.builtin.file:
+        path: '{{ sogo_backup_dir }}/{{ __side_effect_empty_set }}'
+        state: absent
+
+    #
+    # sogo-tool failures (stub on the host instead of the real program)
+    #
+
+    - name: Side Effect | Find the newest set
+      ansible.builtin.include_tasks: tasks/newest_set.yml
+
+    # The stub replaces sogo-tool through the role parameters __sogo_tool and
+    # __sogo_command_prefix of these runs only
+    - name: Side Effect | Run the failure modes of sogo-tool
+      ansible.builtin.include_tasks: tasks/stub_case.yml
+      loop:
+        - {mode: backup-137, set: '{{ __side_effect_newest_set }}'}
+        - {mode: backup-1, set: '{{ __side_effect_newest_set }}'}
+        - {mode: backup-255-error, set: '{{ __side_effect_newest_set }}'}
+        - {mode: restore-notfound-error, set: '{{ __side_effect_newest_set }}'}
+        - {mode: restore-mixed, set: '{{ __side_effect_errors_set }}'}
+        # A user failing for real and a failed flush to another host
+        - mode: restore-mixed
+          set: '{{ __side_effect_errors_set }}'
+          memcached: "{{ ansible_facts['default_ipv4']['address'] }}:11312"
+      loop_control:
+        loop_var: __side_effect_mode
+
+    # Every user of the set unknown and the flush failing: the message must
+    # say that nothing was restored, not that the restore is complete. Last
+    # case: its backup rotates the other sets away, this set stays
+    - name: Side Effect | Create a set with errors@example.com only
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          dst='{{ sogo_backup_dir }}/{{ __side_effect_unknown_set }}'
+          rm -rf "$dst"
+          mkdir "$dst"
+          cp -a '{{ sogo_backup_dir }}/{{ __side_effect_errors_set }}/errors@example.com' "$dst/"
+          chown sogo:sogo "$dst"
+          chmod 0700 "$dst"
+      changed_when: true
+
+    - name: Side Effect | Restore a set of unknown users while the flush fails
+      ansible.builtin.include_tasks: tasks/restore_failure.yml
+      vars:
+        __side_effect_case_set: '{{ __side_effect_unknown_set }}'
+        __side_effect_case_memcached: "{{ ansible_facts['default_ipv4']['address'] }}:11312"
+        __side_effect_expected: >-
+          SERVER_ERROR molecule.*No user of {{ __side_effect_unknown_set }} was restored; the user
+          source knows none of errors@example\.com\. .*run the restore again
+        __side_effect_not_expected: 'do NOT run it again|it failed for'
+
+  always:
+    # The cleanup below runs also when this role run fails
+    - name: Side Effect | Restore the real program and clean up
+      block:
+        # Writes the backup script and the job units with the real program
+        # again, also when a case failed while they pointed to the stub
+        - name: Side Effect | Include sogo role without the stub  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+      always:
+        - name: Side Effect | Stop the memcached proxies
+          ansible.builtin.command:
+            argv: [systemctl, stop, molecule-mc-forward, molecule-mc-error, molecule-mc-hang, molecule-mc-close]
+          changed_when: true
+          failed_when: false
+
+        - name: Side Effect | Remove the memcached proxy and the sogo-tool stub
+          ansible.builtin.file:
+            path: '{{ item }}'
+            state: absent
+          loop:
+            - /usr/local/bin/molecule-memcached-proxy
+            - /usr/local/bin/molecule-sogo-tool-stub
+            - /etc/molecule-sogo-tool-mode

@@ -1,0 +1,32 @@
+---
+# failed_when: false — container-safety for Molecule
+- name: Reload rspamd systemd units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  failed_when: false
+  when: rspamd_enabled | bool
+
+# rspamd rereads its configuration on SIGHUP (ExecReload) and replaces its
+# workers. A changed listener address and a new supplementary group of the
+# service user (systemd sets the groups at the start) need a restart, one
+# for both (__rspamd_restart_needed); while one is pending
+# for the same run, the restart below covers the reload. A host where the
+# service was not started yet (check mode on a new host) has nothing to
+# reload or restart.
+- name: Reload rspamd
+  ansible.builtin.systemd_service:
+    name: '{{ __rspamd_service_name }}'
+    state: reloaded
+  when:
+    - rspamd_service_enabled | bool
+    - not __rspamd_check_mode_install | default(false) | bool
+    - not __rspamd_restart_needed | default(false) | bool
+
+- name: Restart rspamd
+  ansible.builtin.systemd_service:
+    name: '{{ __rspamd_service_name }}'
+    state: restarted
+  when:
+    - rspamd_service_enabled | bool
+    - not __rspamd_check_mode_install | default(false) | bool
+    - __rspamd_restart_needed | default(false) | bool

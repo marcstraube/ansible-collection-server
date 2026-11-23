@@ -1,0 +1,8 @@
+{{ ansible_managed | comment }}
+# valkey-server changes the group of the unix socket to
+# {{ valkey_unix_socket_group }} (unixsocketgroup): the group has to be
+# mapped into the service (PrivateUsers=false) and chown has to pass the
+# system call filter.
+[Service]
+PrivateUsers=false
+SystemCallFilter=@chown

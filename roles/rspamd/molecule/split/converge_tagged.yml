@@ -1,0 +1,18 @@
+---
+# converge.yml with the role included under the tag 'always', so a run with
+# --tags selects the tags of the role itself (side_effect.yml runs it with
+# single sub-tags such as rspamd:configure)
+- name: Converge — Facts
+  hosts: all
+  gather_facts: true
+
+- name: Converge — Tagged
+  hosts: filter
+  gather_facts: false
+
+  tasks:
+    - name: Converge | Include rspamd role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      tags:
+        - always

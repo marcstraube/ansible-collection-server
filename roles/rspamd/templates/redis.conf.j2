@@ -1,0 +1,15 @@
+{{ ansible_managed | comment }}
+servers = {{ rspamd_redis_servers | map('string') | join(',') | to_json }};
+db = {{ rspamd_redis_db | string | to_json }};
+{% if rspamd_redis_password | length > 0 %}
+{% if rspamd_redis_username | length > 0 %}
+username = {{ rspamd_redis_username | to_json }};
+{% endif %}
+password = {{ rspamd_redis_password | to_json }};
+{% endif %}
+{% if rspamd_redis_tls | bool %}
+ssl = true;
+{% if rspamd_redis_tls_ca_file | length > 0 %}
+ssl_ca = {{ rspamd_redis_tls_ca_file | to_json }};
+{% endif %}
+{% endif %}
