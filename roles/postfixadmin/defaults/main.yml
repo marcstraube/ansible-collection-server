@@ -18,11 +18,11 @@ postfixadmin_enabled: false
 # latest GitHub release and is bumped by the update-postfixadmin-version
 # workflow together with postfixadmin_checksum. 'latest' installs the
 # newest release and takes its checksum from the GitHub API.
-postfixadmin_version: '4.0.6'
+postfixadmin_version: '4.0.7'
 
 # SHA-256 checksum of the release archive of postfixadmin_version
 # ('sha256:<hash>'); ignored with 'latest'
-postfixadmin_checksum: 'sha256:135aa69bd60d4268baa842d2b608e116b2156e8020290d60a1c511ca105a3d38'
+postfixadmin_checksum: 'sha256:39302590bcda082aea2591b34c13df451621442b98594e730daec6bb419ac5eb'
 
 # Directory of the installed release; the web server root is its public/
 # subdirectory. The role owns the directory and replaces it on a version
