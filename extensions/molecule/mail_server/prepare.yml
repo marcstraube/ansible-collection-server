@@ -1,0 +1,340 @@
+---
+# Test environment: the packages of the containers, the test CA with a
+# certificate for every server, the test resolver of the mail host, the
+# clamd overrides and the test signature database on the clamd host and the
+# test clients. The stack itself comes from converge.
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __prepare_packages:
+      - systemd
+      - dbus
+      - procps
+      - iproute2
+      - locales
+      - openssl
+      - ca-certificates
+      - python3-cryptography
+
+  tasks:
+    - name: Prepare | Update package cache (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name: '{{ __prepare_packages }}'
+        state: present
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Create the test certificate directory
+      ansible.builtin.file:
+        path: /etc/molecule-tls
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+# The test CA and the server certificates, signed on the database host and
+# handed to the other hosts through the controller. ssl-cert: the group of
+# the PostgreSQL key (the postgresql package adds the postgres user to it).
+- name: Prepare — Database host
+  hosts: db_servers
+  gather_facts: false
+
+  vars:
+    __prepare_tls_dir: '/etc/molecule-tls'
+    __prepare_certificates:
+      - {name: 'db', host: '{{ __molecule_db_host }}', group: 'ssl-cert', mode: '0640'}
+      - {name: 'mail', host: '{{ __molecule_mail_host }}', group: 'root', mode: '0600'}
+      - {name: 'web', host: '{{ __molecule_web_host }}', group: 'root', mode: '0600'}
+
+  tasks:
+    - name: Prepare | Install the group of the PostgreSQL key
+      ansible.builtin.apt:
+        name: ssl-cert
+        state: present
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Generate en_US.UTF-8 locale
+      community.general.locale_gen:
+        name: en_US.UTF-8
+        state: present
+
+    - name: Prepare | Create the CA key
+      community.crypto.openssl_privatekey:
+        path: '{{ __prepare_tls_dir }}/ca.key'
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Prepare | Create the CA certificate request
+      community.crypto.openssl_csr_pipe:
+        privatekey_path: '{{ __prepare_tls_dir }}/ca.key'
+        common_name: 'Mail server test CA'
+        basic_constraints:
+          - 'CA:TRUE'
+        basic_constraints_critical: true
+        key_usage:
+          - keyCertSign
+          - cRLSign
+        key_usage_critical: true
+      register: __prepare_ca_csr
+      changed_when: false
+
+    - name: Prepare | Create the CA certificate
+      community.crypto.x509_certificate:
+        path: '{{ __prepare_tls_dir }}/ca.pem'
+        csr_content: '{{ __prepare_ca_csr.csr }}'
+        privatekey_path: '{{ __prepare_tls_dir }}/ca.key'
+        provider: selfsigned
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Create the server keys
+      community.crypto.openssl_privatekey:
+        path: '{{ __prepare_tls_dir }}/{{ item.name }}.key'
+        owner: root
+        group: '{{ item.group }}'
+        mode: '{{ item.mode }}'
+      loop: '{{ __prepare_certificates }}'
+      loop_control:
+        label: '{{ item.name }}'
+
+    # The mail host also answers as mail.example.com, the name of Postfix
+    - name: Prepare | Create the server certificate requests
+      community.crypto.openssl_csr_pipe:
+        privatekey_path: '{{ __prepare_tls_dir }}/{{ item.name }}.key'
+        common_name: '{{ item.host }}'
+        subject_alt_name: >-
+          {{ ['DNS:' ~ item.host] + (['DNS:mail.example.com'] if item.name == 'mail' else []) }}
+        extended_key_usage:
+          - serverAuth
+      loop: '{{ __prepare_certificates }}'
+      loop_control:
+        label: '{{ item.name }}'
+      register: __prepare_csrs
+      changed_when: false
+
+    - name: Prepare | Sign the server certificates
+      community.crypto.x509_certificate:
+        path: '{{ __prepare_tls_dir }}/{{ item.item.name }}.pem'
+        csr_content: '{{ item.csr }}'
+        provider: ownca
+        ownca_path: '{{ __prepare_tls_dir }}/ca.pem'
+        ownca_privatekey_path: '{{ __prepare_tls_dir }}/ca.key'
+        owner: root
+        group: root
+        mode: '0644'
+      loop: '{{ __prepare_csrs.results }}'
+      loop_control:
+        label: '{{ item.item.name }}'
+
+    - name: Prepare | Fetch the CA and the certificates of the mail and web hosts
+      ansible.builtin.fetch:
+        src: '{{ __prepare_tls_dir }}/{{ item }}'
+        dest: '{{ lookup("env", "MOLECULE_EPHEMERAL_DIRECTORY") }}/mail-server-{{ item }}'
+        flat: true
+      loop:
+        - 'ca.pem'
+        - 'mail.pem'
+        - 'mail.key'
+        - 'web.pem'
+        - 'web.key'
+
+- name: Prepare — Certificates of the mail and web hosts
+  hosts: mail_servers
+  gather_facts: false
+
+  vars:
+    __prepare_name: "{{ 'web' if inventory_hostname in groups['web_servers'] else 'mail' }}"
+
+  tasks:
+    - name: Prepare | Install the certificate and the key
+      ansible.builtin.copy:
+        src: '{{ lookup("env", "MOLECULE_EPHEMERAL_DIRECTORY") }}/mail-server-{{ __prepare_name }}.{{ item.ext }}'
+        dest: '/etc/molecule-tls/{{ __prepare_name }}.{{ item.ext }}'
+        owner: root
+        group: root
+        mode: '{{ item.mode }}'
+      loop:
+        - {ext: 'pem', mode: '0644'}
+        - {ext: 'key', mode: '0600'}
+      loop_control:
+        label: '{{ __prepare_name }}.{{ item.ext }}'
+
+# Postfix checks the sender domain of mail from outside in DNS: dnsmasq
+# answers the test zones and forwards everything else to the resolver of
+# the podman network
+- name: Prepare — Mail host resolver
+  hosts: mail-server-mail
+  gather_facts: false
+
+  tasks:
+    - name: Prepare | Install dnsmasq
+      ansible.builtin.apt:
+        name: dnsmasq-base
+        state: present
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Read the resolver configuration of the container
+      ansible.builtin.slurp:
+        src: /etc/resolv.conf
+      register: __prepare_resolv_conf
+
+    - name: Prepare | Record the upstream resolvers
+      ansible.builtin.set_fact:
+        __prepare_upstream_resolvers: >-
+          {{ __prepare_resolv_lines | select('match', '^nameserver\s') | map('split') | map('last')
+             | reject('in', ['127.0.0.1', '::1']) | list }}
+        __prepare_resolv_search: >-
+          {{ __prepare_resolv_lines | select('match', '^(search|domain)\s') | list }}
+      vars:
+        __prepare_resolv_lines: '{{ (__prepare_resolv_conf.content | b64decode).splitlines() | map("trim") | list }}'
+
+    # Below /etc/dnsmasq.d: an AppArmor profile for dnsmasq on the container
+    # host attaches by path and only allows the standard configuration paths
+    - name: Prepare | Create the test resolver configuration directory
+      ansible.builtin.file:
+        path: /etc/dnsmasq.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Deploy the test resolver configuration
+      ansible.builtin.template:
+        src: templates/molecule-dns.conf.j2
+        dest: /etc/dnsmasq.d/molecule-dns.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Deploy the test resolver unit
+      ansible.builtin.copy:
+        content: |
+          [Unit]
+          Description=Test resolver of the mail_server scenario
+
+          [Service]
+          ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/etc/dnsmasq.d/molecule-dns.conf
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/molecule-dns.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Start the test resolver
+      ansible.builtin.systemd_service:
+        name: molecule-dns.service
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    # podman bind-mounts resolv.conf: it is rewritten in place
+    - name: Prepare | Use the test resolver on the mail host
+      ansible.builtin.copy:
+        content: |
+          {% for line in __prepare_resolv_search %}
+          {{ line }}
+          {% endfor %}
+          nameserver 127.0.0.1
+        dest: /etc/resolv.conf
+        owner: root
+        group: root
+        mode: '0644'
+        unsafe_writes: true
+
+# clamd of marcstraube.common.clamav (base system in converge) on the test
+# signature database: the tests never download the official databases. One
+# hand-written signature (the EICAR test file) is enough for clamd to load
+# and detect EICAR. The unit of Debian requires the official daily database
+# (ConditionPathExistsGlob), which the override resets; the override also
+# runs clamd in the foreground as the containers expect.
+- name: Prepare — clamd host
+  hosts: mail-server-clamd
+  gather_facts: false
+
+  tasks:
+    - name: Prepare | Create the systemd override directory for clamd
+      ansible.builtin.file:
+        path: /etc/systemd/system/clamav-daemon.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Deploy the systemd override for clamd
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/clamav-daemon.service.d/override.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          ConditionPathExistsGlob=
+          [Service]
+          Type=simple
+          ExecStart=
+          ExecStart=/usr/sbin/clamd --foreground
+
+    - name: Prepare | Reload systemd for clamd
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+    - name: Prepare | Create the ClamAV database directory
+      ansible.builtin.file:
+        path: /var/lib/clamav
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Deploy the test signature database
+      ansible.builtin.copy:
+        dest: /var/lib/clamav/test.hdb
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          44d88612fea8a8f36de82e1278abb02f:68:Eicar-Test-Signature
+
+    # The outside client of verify: rspamd's SMTP test client (XCLIENT)
+    - name: Prepare | Install the SMTP test client
+      ansible.builtin.copy:
+        src: '{{ playbook_dir }}/../../../roles/rspamd/molecule/shared/files/smtp_send.py'
+        dest: /usr/local/bin/molecule-smtp-send
+        owner: root
+        group: root
+        mode: '0755'
+
+# The clients of verify on the web host: Roundcube and IMAP (roundcube),
+# SOGo (sogo) and SMTP submission (postfix)
+- name: Prepare — Web host clients
+  hosts: web_servers
+  gather_facts: false
+
+  tasks:
+    - name: Prepare | Install the test clients
+      ansible.builtin.copy:
+        src: '{{ playbook_dir }}/../../../roles/{{ item.src }}'
+        dest: '/usr/local/bin/{{ item.dest }}'
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - {src: 'roundcube/molecule/shared/files/webmail.py', dest: 'molecule-webmail'}
+        - {src: 'sogo/molecule/shared/files/sogo_client.py', dest: 'molecule-sogo-client'}
+        - {src: 'postfix/molecule/shared/files/smtp_session.py', dest: 'molecule-smtp-session'}
+      loop_control:
+        label: '{{ item.dest }}'
