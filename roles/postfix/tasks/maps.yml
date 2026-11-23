@@ -34,6 +34,17 @@
   no_log: true
   when: not __postfix_check_mode_install | default(false) | bool
 
+# The Rocky Linux 10 package leaves the data directory to the first start
+# of Postfix; the password file below needs it before that
+- name: Maps | Create the data directory
+  ansible.builtin.file:
+    path: '{{ __postfix_data_directory }}'
+    state: directory
+    owner: '{{ __postfix_mail_owner }}'
+    group: '{{ __postfix_data_directory_group }}'
+    mode: '{{ __postfix_data_directory_mode }}'
+  when: not __postfix_check_mode_install | default(false) | bool
+
 # libpq reads the PostgreSQL password from this file as the postfix user
 # (proxymap) and ignores it when group or others have any access
 - name: Maps | Deploy the PostgreSQL password file
