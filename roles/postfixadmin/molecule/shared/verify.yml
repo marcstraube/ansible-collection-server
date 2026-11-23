@@ -20,7 +20,7 @@
       Debian: '/run/mysqld/mysqld.sock'
       RedHat: '/var/lib/mysql/mysql.sock'
     # Readers of the scenario inventory: postfix_ro with the default tables,
-    # sogo_ro with the view only
+    # sogo_ro with the view only and UPDATE on its c_password column
     __verify_reader_checks:
       - {user: 'postfix_ro', query: 'SELECT count(*) AS n FROM mailbox', allowed: true}
       - {user: 'postfix_ro', query: 'SELECT count(*) AS n FROM alias_domain', allowed: true}
@@ -28,6 +28,8 @@
       - {user: 'postfix_ro', query: 'SELECT count(*) AS n FROM admin', allowed: false}
       - {user: 'sogo_ro', query: 'SELECT count(*) AS n FROM mailbox', allowed: false}
       - {user: 'sogo_ro', query: "DELETE FROM sogo_users WHERE c_uid = 'x'", allowed: false}
+      - {user: 'sogo_ro', query: "UPDATE sogo_users SET c_password = c_password WHERE c_uid = 'x'", allowed: true}
+      - {user: 'sogo_ro', query: "UPDATE sogo_users SET c_cn = c_cn WHERE c_uid = 'x'", allowed: false}
     __verify_reader_passwords:
       postfix_ro: 'postfix-Reader-42'
       sogo_ro: 'sogo-Reader-42'
@@ -482,6 +484,46 @@
         __verify_sogo: >-
           {{ __verify_sogo_pg.query_result if postfixadmin_db_type == 'postgresql'
              else __verify_sogo_mariadb.query_result | first }}
+
+    # Exactly one column privilege: UPDATE on sogo_users.c_password
+    - name: Verify | Read the UPDATE privileges of sogo_ro (PostgreSQL)
+      community.postgresql.postgresql_query:
+        login_db: 'postfixadmin'
+        query: >-
+          SELECT c.relname || '.' || a.attname AS col FROM pg_attribute a
+          JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+          CROSS JOIN LATERAL aclexplode(a.attacl) x
+          WHERE n.nspname = 'public' AND x.privilege_type = 'UPDATE' AND x.grantee = 'sogo_ro'::regrole
+          ORDER BY 1
+      become: true
+      become_user: postgres
+      register: __verify_column_privs_pg
+      when: postfixadmin_db_type == 'postgresql'
+
+    - name: Verify | Read the grants of sogo_ro (MariaDB)
+      ansible.mariadb.mariadb_query:
+        login_unix_socket: '{{ __verify_mariadb_sockets[ansible_facts["os_family"]] }}'
+        query: "SHOW GRANTS FOR 'sogo_ro'@'localhost'"
+      register: __verify_grants_mariadb
+      when: postfixadmin_db_type == 'mariadb'
+
+    - name: Verify | Assert UPDATE on c_password only
+      ansible.builtin.assert:
+        that:
+          - >-
+            postfixadmin_db_type != 'postgresql'
+            or __verify_column_privs_pg.query_result | map(attribute='col') | list == ['sogo_users.c_password']
+          - >-
+            postfixadmin_db_type != 'mariadb'
+            or (__verify_grants | select('search', 'UPDATE') | list | length == 1
+                and __verify_grants | select('search', 'UPDATE \\(`c_password`\\) ON `postfixadmin`\\.`sogo_users`')
+                    | list | length == 1)
+        fail_msg: >-
+          {{ __verify_column_privs_pg.query_result | default([]) | to_json }} {{ __verify_grants | to_json }}
+      vars:
+        __verify_grants: >-
+          {{ (__verify_grants_mariadb.query_result | default([[]]) | first | map('dict2items') | map('first')
+              | map(attribute='value') | list) if postfixadmin_db_type == 'mariadb' else [] }}
 
     - name: Verify | Try reads and writes as the read-only users (PostgreSQL)
       community.postgresql.postgresql_query:

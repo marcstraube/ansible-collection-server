@@ -393,8 +393,28 @@ function pfa_ansible_columns(string $name): array
 }
 
 /**
+ * Whether a view can take an UPDATE (information_schema.views.is_updatable).
+ */
+function pfa_ansible_view_updatable(string $name): bool
+{
+    if (db_pgsql()) {
+        $sql = "SELECT is_updatable FROM information_schema.views
+                WHERE table_schema = current_schema() AND table_name = :name";
+    } else {
+        $sql = "SELECT is_updatable FROM information_schema.views
+                WHERE table_schema = DATABASE() AND table_name = :name";
+    }
+    $rows = db_query_all($sql, ['name' => $name]);
+    return !empty($rows) && strtoupper((string) reset($rows[0])) === 'YES';
+}
+
+/**
  * The view of the SOGo user source: one row per active mailbox of an
- * active domain with the columns SOGo's SQL source expects.
+ * active domain with the columns SOGo's SQL source expects. SOGo changes a
+ * password with an UPDATE of c_password on the view, so the view selects
+ * from the mailbox table alone (the active domains in a subquery): a view
+ * with a join takes no UPDATE on PostgreSQL. An existing view of the role
+ * that cannot take one (the join of earlier versions) is replaced.
  */
 function pfa_ansible_sogo_view(array $request): array
 {
@@ -419,21 +439,28 @@ function pfa_ansible_sogo_view(array $request): array
         return ['changed' => true];
     }
 
-    if ($existing === $columns) {
+    if ($existing === $columns && pfa_ansible_view_updatable($name)) {
         return ['changed' => false];
     }
     if (!$check) {
-        if (!empty($existing)) {
+        // The same columns: CREATE OR REPLACE keeps the grants on the view
+        // (PostgreSQL and MariaDB accept a new definition with the same
+        // columns, also a join view turned into a single-table view).
+        // Other columns: the view is dropped and created, readers.yml grants
+        // again in the same run.
+        $replace = $existing === $columns;
+        if (!empty($existing) && !$replace) {
             db_execute("DROP VIEW $quoted", [], true);
         }
         $mailbox = table_by_key('mailbox');
         $domain = table_by_key('domain');
+        $create = $replace ? 'CREATE OR REPLACE VIEW' : 'CREATE VIEW';
         db_execute(
-            "CREATE VIEW $quoted AS
+            "$create $quoted AS
              SELECT m.username AS c_uid, m.username AS c_name, m.password AS c_password,
                     m.name AS c_cn, m.username AS mail, m.domain AS domain
-             FROM $mailbox m JOIN $domain d ON d.domain = m.domain
-             WHERE m.active AND d.active",
+             FROM $mailbox m
+             WHERE m.active AND m.domain IN (SELECT d.domain FROM $domain d WHERE d.active)",
             [],
             true
         );

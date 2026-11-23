@@ -104,15 +104,22 @@
       - item.state in ['present', 'absent']
       - item.state == 'absent' or item.password_set
       - item.tables | select('match', '^[a-z_][a-z0-9_]*$') | list | length == item.tables | length
+      - item.update_columns is not string and item.update_columns is not mapping
+      - >-
+        item.update_columns | select('match', '^[a-z_][a-z0-9_]*[.][a-z_][a-z0-9_]*$')
+        | map('regex_replace', '[.].*$', '') | select('in', item.tables) | list | length
+        == item.update_columns | length
     fail_msg: >-
       Every entry of postfixadmin_db_readers needs a name, a password (unless
-      state: absent) and tables of lowercase names.
+      state: absent) and tables of lowercase names; 'update_columns' lists
+      '<table>.<column>' of its tables.
   loop: >-
     {%- set ns = namespace(entries=[]) -%}
     {%- for reader in postfixadmin_db_readers -%}
     {%- set ns.entries = ns.entries + [{
           'name': reader.name | default(''), 'state': reader.state | default('present'),
           'tables': reader.tables | default(__postfixadmin_reader_tables),
+          'update_columns': reader.update_columns | default([]),
           'password_set': reader.password | default('') | length > 0}] -%}
     {%- endfor -%}
     {{ ns.entries }}

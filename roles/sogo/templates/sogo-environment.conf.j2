@@ -1,0 +1,8 @@
+{{ ansible_managed | comment }}
+# Environment of the database client of SOGo: libpq reads the TLS settings
+# of the PostgreSQL connections from it (marcstraube.server.sogo)
+
+[Service]
+{% for name, value in __sogo_db_environment.items() %}
+Environment="{{ name }}={{ value }}"
+{% endfor %}
