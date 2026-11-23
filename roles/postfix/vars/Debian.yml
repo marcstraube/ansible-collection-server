@@ -14,6 +14,10 @@ __postfix_sample_directory: '/etc/postfix'
 __postfix_readme_directory: '/usr/share/doc/postfix'
 __postfix_html_directory: '/usr/share/doc/postfix/html'
 
+# Owner group and mode of the data directory as the package creates it
+__postfix_data_directory_group: 'postfix'
+__postfix_data_directory_mode: '0755'
+
 # Alias file of the package
 __postfix_alias_file: '/etc/aliases'
 

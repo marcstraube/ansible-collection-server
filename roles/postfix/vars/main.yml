@@ -25,6 +25,10 @@ __postfix_service_name: 'postfix'
 __postfix_config_dir: '/etc/postfix'
 __postfix_queue_directory: '/var/spool/postfix'
 __postfix_data_directory: '/var/lib/postfix'
+# Owner group and mode of the data directory as the packages of Arch Linux
+# and Rocky Linux create it (Debian: Debian.yml)
+__postfix_data_directory_group: 'root'
+__postfix_data_directory_mode: '0700'
 __postfix_manpage_directory: '/usr/share/man'
 __postfix_mail_owner: 'postfix'
 __postfix_setgid_group: 'postdrop'
