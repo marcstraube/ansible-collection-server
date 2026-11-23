@@ -1,0 +1,305 @@
+---
+# The stack end to end across the four hosts:
+#   - mail from outside (the clamd host as an outside client) through
+#     Postfix, rspamd and clamd: GTUBE rejected, EICAR detected by clamd and
+#     rejected, a clean message delivered into the Maildir of the mailbox
+#   - a PostfixAdmin mailbox logs in to Roundcube and to SOGo on the web host
+#   - the shared mailbox of support is listed for alice and alice may send
+#     as support through submission, bob may not
+- name: Verify — Facts
+  hosts: all
+  gather_facts: true
+
+- name: Verify — Mail from outside
+  hosts: mail-server-clamd
+  gather_facts: false
+
+  vars:
+    # RFC 5322 date, independent of the locale of the controller
+    __verify_date: >-
+      {{ __verify_weekdays[now(utc=true).weekday()] }},
+      {{ now(utc=true).strftime('%d') }}
+      {{ __verify_months[now(utc=true).month - 1] }}
+      {{ now(utc=true).strftime('%Y %H:%M:%S') }} +0000
+    __verify_weekdays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+    __verify_months: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    __verify_session:
+      host: '{{ __molecule_mail_host }}'
+      port: 25
+      xclient:
+        ADDR: '192.0.2.25'
+        NAME: 'mx.example.net'
+        HELO: 'mx.example.net'
+      mail_from: 'bob@example.net'
+      rcpt: ['alice@example.com']
+    __verify_body: |
+      Hello Alice,
+
+      here are the notes from the project review of yesterday. The team agreed
+      on the schedule for the next release, the documentation will be updated
+      by the end of the week and the open questions go to the next meeting.
+
+      Best regards,
+      Bob
+    # The EICAR test file
+    __verify_eicar_base64: >-
+      WDVPIVAlQEFQWzRcUFpYNTQoUF4pN0NDKTd9JEVJQ0FSLVNUQU5EQVJELUFOVElWSVJVUy1URVNULUZJTEUhJEgrSCo=
+    __verify_messages:
+      gtube: |
+        From: Bob <bob@example.net>
+        To: Alice <alice@example.com>
+        Subject: mail-server-gtube-{{ __verify_run }}
+        Date: {{ __verify_date }}
+        Message-ID: <gtube.{{ __verify_run }}@example.net>
+
+        XJS*C4JDBQADN1.NSBN3*2IDNEN*GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X
+      eicar: |
+        From: Bob <bob@example.net>
+        To: Alice <alice@example.com>
+        Subject: mail-server-eicar-{{ __verify_run }}
+        Date: {{ __verify_date }}
+        Message-ID: <eicar.{{ __verify_run }}@example.net>
+        MIME-Version: 1.0
+        Content-Type: multipart/mixed; boundary="molecule-boundary"
+
+        --molecule-boundary
+        Content-Type: text/plain; charset=utf-8
+
+        {{ __verify_body }}
+        --molecule-boundary
+        Content-Type: application/octet-stream; name="eicar.com"
+        Content-Disposition: attachment; filename="eicar.com"
+        Content-Transfer-Encoding: base64
+
+        {{ __verify_eicar_base64 }}
+        --molecule-boundary--
+      clean: |
+        From: Bob <bob@example.net>
+        To: Alice <alice@example.com>
+        Subject: mail-server-clean-{{ __verify_run }}
+        Date: {{ __verify_date }}
+        Message-ID: <clean.{{ __verify_run }}@example.net>
+        MIME-Version: 1.0
+        Content-Type: text/plain; charset=utf-8
+
+        {{ __verify_body }}
+
+  tasks:
+    # One suffix for the subjects of this run: verify may run again
+    - name: Verify | Name the run
+      ansible.builtin.set_fact:
+        __verify_run: "{{ now(utc=true).strftime('%Y%m%d%H%M%S') }}"
+
+    - name: Verify | Send GTUBE, EICAR and a clean message to the mail host
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/molecule-smtp-send
+        stdin: '{{ __verify_session | combine({"data": item.value}) | to_json }}'
+      loop: '{{ __verify_messages | dict2items }}'
+      loop_control:
+        label: '{{ item.key }}'
+      register: __verify_sent
+      changed_when: false
+
+    - name: Verify | Assert GTUBE and EICAR were rejected and the clean message accepted
+      ansible.builtin.assert:
+        that:
+          - __s.gtube.error_code | default(0) >= 500
+          - __s.gtube.error_code | default(0) < 600
+          - __s.eicar.error_code | default(0) >= 500
+          - __s.eicar.error_code | default(0) < 600
+          - __s.clean.data[0] | default(0) == 250
+        fail_msg: '{{ __s | to_json }}'
+      vars:
+        __s: >-
+          {{ dict(__verify_sent.results | map(attribute='item.key')
+                  | zip(__verify_sent.results | map(attribute='stdout') | map('from_json'))) }}
+
+    - name: Verify | Record the subject of the clean message
+      ansible.builtin.set_fact:
+        __verify_clean_subject: 'mail-server-clean-{{ __verify_run }}'
+
+- name: Verify — Mail host
+  hosts: mail-server-mail
+  gather_facts: false
+
+  vars:
+    __verify_clean_subject: "{{ hostvars['mail-server-clamd']['__verify_clean_subject'] }}"
+
+  tasks:
+    - name: Verify | Read the rspamd log
+      ansible.builtin.slurp:
+        src: /var/log/rspamd/rspamd.log
+      register: __verify_rspamd_log
+
+    - name: Verify | Assert clamd of the clamd host found EICAR and rspamd GTUBE
+      ansible.builtin.assert:
+        that:
+          - __verify_log_text is search('CLAM_VIRUS\(')
+          - __verify_log_text is search('Eicar-Test-Signature')
+          - __verify_log_text is search('GTUBE')
+        fail_msg: "{{ __verify_log_text.splitlines() | select('search', 'CLAM|clam|GTUBE') | list | to_json }}"
+      vars:
+        __verify_log_text: '{{ __verify_rspamd_log.content | b64decode }}'
+
+    - name: Verify | Look up the home of alice
+      ansible.builtin.command:
+        argv: ['doveadm', 'user', '-f', 'home', 'alice@example.com']
+      register: __verify_alice_home
+      changed_when: false
+
+    - name: Verify | Wait for the clean message in the Maildir of alice
+      ansible.builtin.find:
+        paths:
+          - '{{ __verify_alice_home.stdout | trim }}/Maildir/new'
+          - '{{ __verify_alice_home.stdout | trim }}/Maildir/cur'
+        file_type: file
+        contains: '^Subject: {{ __verify_clean_subject | regex_escape }}$'
+        read_whole_file: false
+      register: __verify_clean_found
+      until: __verify_clean_found.files | length == 1
+      retries: 20
+      delay: 3
+
+    - name: Verify | Read the delivered message
+      ansible.builtin.slurp:
+        src: '{{ (__verify_clean_found.files | first).path }}'
+      register: __verify_clean_message
+
+    # The milter header of rspamd and the delivery through Dovecot LMTP
+    - name: Verify | Assert the message passed rspamd and Dovecot
+      ansible.builtin.assert:
+        that:
+          - __verify_clean_text is search('(?m)^X-Spam-Status: No')
+          - __verify_clean_text is search('(?m)^Delivered-To: alice@example\.com$')
+        fail_msg: '{{ __verify_clean_text }}'
+      vars:
+        __verify_clean_text: '{{ __verify_clean_message.content | b64decode }}'
+
+- name: Verify — Web host
+  hosts: web_servers
+  gather_facts: false
+
+  vars:
+    __verify_python: "{{ ansible_facts['python']['executable'] }}"
+    __verify_webmail: >-
+      {{ [__verify_python, '-I', '/usr/local/bin/molecule-webmail',
+          '--base', 'http://127.0.0.1', '--host', 'localhost'] }}
+    __verify_sogo: >-
+      {{ [__verify_python, '-I', '/usr/local/bin/molecule-sogo-client',
+          '--base', 'https://' ~ __molecule_web_host, '--ca', __molecule_ca_file] }}
+    __verify_alice: {password: "{{ __molecule_passwords['alice@example.com'] }}"}
+    __verify_submission:
+      host: '{{ __molecule_mail_host }}'
+      port: 587
+      mode: 'starttls'
+      mail_from: 'support@example.com'
+      rcpt: ['bob@example.com']
+
+  tasks:
+    - name: Verify | Name the run
+      ansible.builtin.set_fact:
+        __verify_run: "{{ now(utc=true).strftime('%Y%m%d%H%M%S') }}"
+
+    - name: Verify | Log in to Roundcube with a PostfixAdmin mailbox
+      ansible.builtin.command:
+        argv: "{{ __verify_webmail + ['login', '--user', 'alice@example.com'] }}"
+        stdin: '{{ __verify_alice | to_json }}'
+      register: __verify_roundcube
+      changed_when: false
+
+    - name: Verify | Assert the Roundcube login and its folders from Dovecot
+      ansible.builtin.assert:
+        that:
+          - (__verify_roundcube.stdout | from_json).login_ok
+          - (__verify_roundcube.stdout | from_json).mail_status == 200
+          - "'INBOX' in (__verify_roundcube.stdout | from_json).folders"
+        fail_msg: '{{ __verify_roundcube.stdout }}'
+
+    - name: Verify | Log in to SOGo and list the mailboxes
+      ansible.builtin.command:
+        argv: "{{ __verify_sogo + ['mailboxes', '--user', 'alice@example.com'] }}"
+        stdin: '{{ __verify_alice | to_json }}'
+      register: __verify_sogo_login
+      changed_when: false
+
+    - name: Verify | Assert the SOGo login and its mailboxes from Dovecot
+      ansible.builtin.assert:
+        that:
+          - (__verify_sogo_login.stdout | from_json).login == 200
+          - (__verify_sogo_login.stdout | from_json).status == 200
+          - (__verify_sogo_login.stdout | from_json).paths | length > 0
+        fail_msg: '{{ __verify_sogo_login.stdout }}'
+
+    - name: Verify | List the shared mailboxes of alice over IMAP
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_webmail + ['imap', '--user', 'alice@example.com', '--ca', __molecule_ca_file,
+             '--imap-host', __molecule_mail_host, '--pattern', 'shared/*'] }}
+        stdin: '{{ __verify_alice | to_json }}'
+      register: __verify_shared
+      changed_when: false
+
+    - name: Verify | Assert the mailbox of support is shared with alice
+      ansible.builtin.assert:
+        that:
+          - (__verify_shared.stdout | from_json).login
+          - "'shared/support@example.com' in (__verify_shared.stdout | from_json).folders"
+        fail_msg: '{{ __verify_shared.stdout }}'
+
+    - name: Verify | Send as support through submission
+      ansible.builtin.command:
+        argv:
+          - '{{ __verify_python }}'
+          - '-I'
+          - /usr/local/bin/molecule-smtp-session
+        stdin: '{{ __verify_submission | combine(item.session) | to_json }}'
+      loop:
+        - name: 'permitted'
+          session:
+            auth: ['alice@example.com', "{{ __molecule_passwords['alice@example.com'] }}"]
+            data: |
+              From: Support <support@example.com>
+              To: Bob <bob@example.com>
+              Subject: mail-server-shared-{{ __verify_run }}
+
+              Sent by alice as support.
+        - name: 'denied'
+          session:
+            auth: ['bob@example.com', "{{ __molecule_passwords['bob@example.com'] }}"]
+            rcpt: ['alice@example.com']
+      loop_control:
+        label: '{{ item.name }}'
+      register: __verify_send_as
+      changed_when: false
+      no_log: true
+
+    - name: Verify | Assert only the permitted login may send as support
+      ansible.builtin.assert:
+        that:
+          - __permitted.auth[0] == 235
+          - __permitted.rcpt[0][0] == 250
+          - __permitted.data[0] == 250
+          - __denied.auth[0] == 235
+          - __denied.rcpt[0][0] == 553
+        fail_msg: '{{ {"permitted": __permitted, "denied": __denied} | to_json }}'
+      vars:
+        __permitted: '{{ __verify_send_as.results[0].stdout | from_json }}'
+        __denied: '{{ __verify_send_as.results[1].stdout | from_json }}'
+
+    - name: Verify | Wait for the message of support in the mailbox of bob
+      ansible.builtin.command:
+        argv:
+          - doveadm
+          - search
+          - '-u'
+          - 'bob@example.com'
+          - 'header'
+          - 'subject'
+          - 'mail-server-shared-{{ __verify_run }}'
+      register: __verify_bob_found
+      until: __verify_bob_found.stdout | length > 0
+      retries: 20
+      delay: 3
+      changed_when: false
+      delegate_to: '{{ __molecule_mail_host }}'

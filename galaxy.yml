@@ -48,6 +48,7 @@ build_ignore:
   - .yamllint
   - '*.pyc'
   - __pycache__
+  - extensions/molecule
   - roles/*/molecule
 dependencies:
   marcstraube.common: '>=3.2.0'
