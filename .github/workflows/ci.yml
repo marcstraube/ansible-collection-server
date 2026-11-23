@@ -143,6 +143,10 @@ jobs:
   # meta/runtime.yml and this workflow) test all roles.
   # On schedule / workflow_dispatch: full matrix (all roles × all platforms)
   # to catch upstream package drift.
+  # Stack scenarios (extensions/molecule/<name>) follow the same rules, keyed
+  # on their scenario files, playbooks and the roles of
+  # playbooks/tasks/<name>.yml; they also run on the release PR, where the
+  # role matrix stays empty.
   # =============================================================================
   detect-changes:
     name: Detect Changed Roles
@@ -159,9 +163,15 @@ jobs:
       - name: Install PyYAML
         run: pip install --quiet pyyaml
 
-      - name: Determine roles and platforms to test
+      - name: Determine roles, stack scenarios and platforms to test
         id: set-matrix
         run: |
+          # Stack scenarios (extensions/molecule/<name>) run all of them,
+          # none, or those whose files or roles changed (see below)
+          STACKS_MODE=none
+          CHANGED=""
+          CHANGED_ROLES=""
+
           # Auto-detect podman roles from molecule driver config. Every
           # scenario counts: a role does not need a 'default' scenario.
           ALL_PODMAN_ROLES=""
@@ -178,14 +188,17 @@ jobs:
           # On schedule or manual dispatch: test everything
           EVENT="${{ github.event_name }}"
           if [ "$EVENT" = "schedule" ] || [ "$EVENT" = "workflow_dispatch" ]; then
-            echo "Event '$EVENT' — full matrix (all roles × all platforms)"
+            echo "Event '$EVENT' — full matrix (all roles × all platforms, all stack scenarios)"
             ROLES="$ALL_PODMAN_ROLES"
+            STACKS_MODE=all
           elif [ "${{ github.head_ref }}" = "release-please--branches--main" ]; then
             # The release PR carries the tree of main plus the version bump
-            # and the changelog; every commit on main passed the matrix when
-            # its PR merged, so there is nothing new to test here.
-            echo "Release PR — skipping the molecule matrix"
+            # and the changelog; every commit on main passed the role matrix
+            # when its PR merged. The stack scenarios run once more: they
+            # test the released roles together, which no role scenario does.
+            echo "Release PR — skipping the role matrix, testing all stack scenarios"
             ROLES=""
+            STACKS_MODE=all
           elif [ "${{ github.head_ref }}" = "develop" ] || [ "${{ github.head_ref }}" = "main" ]; then
             # Merges between the long-lived branches (the release merge of
             # develop into main, the back-merge of main into develop) only
@@ -203,9 +216,10 @@ jobs:
               BASE=""
             fi
 
-            # If no valid base, test all podman roles
+            # If no valid base, test all podman roles and stack scenarios
             if [ -z "$BASE" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
               ROLES="$ALL_PODMAN_ROLES"
+              STACKS_MODE=all
             else
               CHANGED=$(git diff --name-only "$BASE" "${{ github.sha }}")
 
@@ -230,8 +244,9 @@ jobs:
               # Shared files that require testing all roles
               if [ "$GALAXY_DEPS" = "changed" ] \
                 || echo "$CHANGED" | grep -qE '^(requirements\.yml|plugins/|meta/runtime\.yml|\.github/workflows/ci\.yml)'; then
-                echo "Shared files changed — testing all roles"
+                echo "Shared files changed — testing all roles and stack scenarios"
                 ROLES="$ALL_PODMAN_ROLES"
+                STACKS_MODE=all
               else
                 # Find roles with substantive changes (skip README-only)
                 ROLES=$(echo "$CHANGED" \
@@ -240,6 +255,8 @@ jobs:
                   | sed 's|^roles/\([^/]*\)/.*|\1|' \
                   | sort -u \
                   | tr '\n' ' ')
+                CHANGED_ROLES="$ROLES"
+                STACKS_MODE=changed
 
                 # Filter to podman roles only
                 FILTERED=""
@@ -253,13 +270,22 @@ jobs:
             fi
           fi
 
-          # Build JSON matrix: one entry per (role, scenario, platform).
-          # All molecule scenarios (default plus extras like 'pgdg') are
-          # discovered; platforms come from each scenario's molecule.yml
-          # (certbot's platform names differ from the <role>-<distro>
-          # convention). Only podman scenarios run here.
+          # Build JSON matrix: one entry per (role, scenario, platform),
+          # with the directory molecule runs in. All molecule scenarios
+          # (default plus extras like 'pgdg') are discovered; platforms
+          # come from each scenario's molecule.yml (certbot's platform
+          # names differ from the <role>-<distro> convention). Only podman
+          # scenarios run here.
           MATRIX="["
           FIRST=true
+          add_entry() {
+            if [ "$FIRST" = "true" ]; then
+              FIRST=false
+            else
+              MATRIX="${MATRIX},"
+            fi
+            MATRIX="${MATRIX}{\"role\":\"$1\",\"scenario\":\"$2\",\"platform\":\"$3\",\"workdir\":\"$4\"}"
+          }
           for role in $ROLES; do
             [ -z "$role" ] && continue
             for scenario_dir in roles/$role/molecule/*/; do
@@ -282,23 +308,66 @@ jobs:
                   print(p['name'])
           " "$mol")
               for platform in $platforms; do
-                if [ "$FIRST" = "true" ]; then
-                  FIRST=false
-                else
-                  MATRIX="${MATRIX},"
-                fi
-                MATRIX="${MATRIX}{\"role\":\"${role}\",\"scenario\":\"${scenario}\",\"platform\":\"${platform}\"}"
+                add_entry "$role" "$scenario" "$platform" "roles/$role"
               done
             done
+          done
+
+          # Stack scenarios on collection level (extensions/molecule/<name>)
+          # test the playbook of the same name with all its roles on one
+          # podman network, so each runs as one job from the collection
+          # root. On a per-change run a stack scenario runs when anything
+          # under extensions/molecule, a playbook file with its name in it,
+          # or a role its task file playbooks/tasks/<name>.yml imports
+          # changed (README-only changes of a role do not count).
+          STACKS=""
+          for mol in extensions/molecule/*/molecule.yml; do
+            [ -f "$mol" ] || continue
+            stack=$(basename "$(dirname "$mol")")
+            # The name goes into a regular expression, the matrix JSON and
+            # the molecule command line
+            case "$stack" in
+              *[!a-z0-9_-]*)
+                echo "::error::Invalid stack scenario name '$stack' (allowed: a-z 0-9 _ -)"
+                exit 1
+                ;;
+            esac
+            # The driver must be set in the scenario's own molecule.yml
+            if ! grep -q 'name: podman' "$mol"; then
+              echo "Skipping stack scenario $stack: no podman driver in $mol"
+              continue
+            fi
+            case "$STACKS_MODE" in
+              all) ;;
+              changed)
+                hit=false
+                if echo "$CHANGED" | grep -qE "^(extensions/molecule/|playbooks/(.*/)?[^/]*${stack}[^/]*$)"; then
+                  hit=true
+                else
+                  while read -r role; do
+                    if echo " $CHANGED_ROLES " | grep -q " $role "; then
+                      hit=true
+                      break
+                    fi
+                  done < <(grep -oE 'marcstraube\.server\.[a-z0-9_]+' "playbooks/tasks/${stack}.yml" 2>/dev/null \
+                    | sed 's/^marcstraube\.server\.//' | sort -u)
+                fi
+                [ "$hit" = "true" ] || continue
+                ;;
+              *) continue ;;
+            esac
+            STACKS="$STACKS $stack"
+            add_entry stack "$stack" all .
           done
           MATRIX="${MATRIX}]"
 
           if [ "$MATRIX" = "[]" ]; then
             echo "has_roles=false" >> "$GITHUB_OUTPUT"
-            echo "No roles to test"
+            echo "No roles or stack scenarios to test"
           else
             echo "has_roles=true" >> "$GITHUB_OUTPUT"
             echo "Roles to test: $ROLES"
+            echo "Stack scenarios to test: $STACKS"
             echo "Matrix entries: $(echo "$MATRIX" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
           fi
 
@@ -306,7 +375,8 @@ jobs:
 
   # =============================================================================
   # MOLECULE ROLE × SCENARIO × PLATFORM (one platform per job via
-  # MOLECULE_PLATFORM_NAME, so a role's containers do not all start at once)
+  # MOLECULE_PLATFORM_NAME, so a role's containers do not all start at once),
+  # plus one job per stack scenario of extensions/molecule ('stack')
   # =============================================================================
   molecule-roles:
     name: Molecule ${{ matrix.role }} / ${{ matrix.scenario }} (${{ matrix.platform }})
@@ -354,7 +424,7 @@ jobs:
           fi
 
       - name: Run Molecule test
-        working-directory: roles/${{ matrix.role }}
+        working-directory: ${{ matrix.workdir }}
         run: molecule test -s ${{ matrix.scenario }}
         env:
           # Empty for a multi-host scenario: molecule then creates all
