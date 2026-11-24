@@ -20,11 +20,11 @@ roundcube_enabled: false
 # bumped by the update-roundcube-version workflow together with
 # roundcube_checksum after it verified the release signature. 'latest'
 # installs the newest release and takes its checksum from the GitHub API.
-roundcube_version: '1.7.6'
+roundcube_version: '1.7.7'
 
 # SHA-256 checksum of roundcubemail-<version>-complete.tar.gz
 # ('sha256:<hash>'); ignored with 'latest'
-roundcube_checksum: 'sha256:0168085bf0bfeeb5d4eca3b9730effbe610dbdb380a68567d292fec51f09db36'
+roundcube_checksum: 'sha256:cc9358a27cda7b3e62c4b6758897bc0f132fe58420d02b2e842be7e10a1dd3fb'
 
 # Directory of the releases and of the 'current' link. The role owns
 # releases/ and current; an update keeps the previously active release next
