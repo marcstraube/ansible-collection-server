@@ -100,13 +100,16 @@ __postfixadmin_password_schemes:
   - 'BLF-CRYPT'
   - 'SHA512-CRYPT'
 
+# The setup password hash in an existing config.local.php
+__postfixadmin_setup_password_pattern: "^\\$CONF\\['setup_password'\\] = '([^']*)';$"
+
 # $CONF keys config.local.php writes from role variables (key => the
 # variable to set instead); postfixadmin_extra_config must not override
 # them. Every key with a prefix of __postfixadmin_managed_config_prefixes
 # is rejected as well (the connection settings of the database).
 __postfixadmin_managed_config:
   configured: '(always true, set by the role)'
-  setup_password: 'postfixadmin_setup_password_hash'
+  setup_password: 'postfixadmin_setup_password'
   encrypt: 'postfixadmin_password_scheme'
   password_validation: 'postfixadmin_password_validation'
   totp: 'postfixadmin_totp'

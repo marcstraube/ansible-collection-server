@@ -142,11 +142,10 @@ postfixadmin_password_scheme: 'ARGON2ID'
 #
 # Settings written to config.local.php.
 
-# Hash of the password of setup.php ($CONF['setup_password']). Empty
-# disables the setup.php login; the role creates the schema and the
-# accounts without it.
-# Generate with: php -r 'echo password_hash("<password>", PASSWORD_DEFAULT), "\n";'
-postfixadmin_setup_password_hash: ''
+# Password of setup.php in plain text (from the vault). The role writes its
+# hash ($CONF['setup_password']). Empty disables the setup.php login; the
+# role creates the schema and the accounts without it.
+postfixadmin_setup_password: ''
 
 # Password rules of PostfixAdmin ($CONF['password_validation']): PCRE
 # pattern => message key of the language files, optionally followed by a

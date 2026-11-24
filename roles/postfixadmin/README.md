@@ -293,7 +293,7 @@ rehashes the password of a listed account whose hash has another scheme
 
 | Variable                              | Default           | `$CONF` key                        |
 | ------------------------------------- | ----------------- | ---------------------------------- |
-| `postfixadmin_setup_password_hash`    | `''`              | `setup_password` (empty: no login) |
+| `postfixadmin_setup_password`         | `''`              | `setup_password` (empty: no login) |
 | `postfixadmin_password_validation`    | 12 characters, …  | `password_validation`              |
 | `postfixadmin_totp`                   | `false`           | `totp`                             |
 | `postfixadmin_admin_email`            | `''`              | `admin_email`                      |
@@ -329,8 +329,12 @@ rejected before any change, with the variable to set instead: `configured`,
 `setup_password`, `encrypt`, `password_validation`, `totp`, every
 `database_*` key and the keys of the table above.
 
-The setup password hash comes from
-`php -r 'echo password_hash("<password>", PASSWORD_DEFAULT), "\n";'`.
+`postfixadmin_setup_password` is the password itself, not a hash; keep it
+in the vault. It has to meet `postfixadmin_password_validation`, as the
+setup login can create superadmins. The role writes its hash with PHP's
+`password_hash()` (bcrypt, which uses the first 72 bytes of the password)
+and keeps the hash of an existing configuration while the password matches
+it, also when a newer PHP would choose other hash parameters.
 `setup.php` is only needed to check the environment; the role creates the
 schema and the accounts without it.
 
@@ -536,6 +540,7 @@ whole role).
         postfixadmin_php_fpm_group: 'postfixadmin'
         postfixadmin_db_password: '{{ vault_postfixadmin_db_password }}'
         postfixadmin_db_create: true
+        postfixadmin_setup_password: '{{ vault_postfixadmin_setup_password }}'
         postfixadmin_admins:
           - username: 'admin@example.com'
             password: '{{ vault_postfixadmin_admin_password }}'
