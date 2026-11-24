@@ -16,7 +16,9 @@
 
   vars:
     __verify_dir: '/usr/local/lib/molecule-roundcube'
-    __verify_release: '1.7.6'
+    # The release of the role default (loaded in the first task), so a
+    # version bump needs no change here
+    __verify_release: '{{ __verify_defaults.roundcube_version }}'
     __verify_install_dir: '/var/www/roundcube'
     __verify_release_dir: '{{ __verify_install_dir }}/releases/{{ __verify_release }}'
     __verify_web: >-
