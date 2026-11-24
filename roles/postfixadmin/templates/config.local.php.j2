@@ -21,7 +21,7 @@ array({% for element in value %}{{ php(element) }}{{ ', ' if not loop.last }}{% 
 
 
 $CONF['configured'] = true;
-$CONF['setup_password'] = {{ php(postfixadmin_setup_password_hash) }};
+$CONF['setup_password'] = {{ php(__postfixadmin_setup_password_hash) }};
 
 // Database
 $CONF['database_type'] = {{ php(__postfixadmin_db_drivers[postfixadmin_db_type]) }};

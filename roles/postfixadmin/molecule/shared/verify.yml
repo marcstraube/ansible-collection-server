@@ -226,6 +226,47 @@
       vars:
         __verify_lines: '{{ (__verify_config_content.content | b64decode).splitlines() }}'
 
+    # The setup password: its hash (bcrypt of PHP's password_hash) in the
+    # mariadb scenario, never the password itself; empty in postgresql
+    - name: Verify | Read the setup password hash
+      ansible.builtin.set_fact:
+        __verify_setup_hash: >-
+          {{ __verify_config_content.content | b64decode
+             | regex_findall("^[$]CONF[[]'setup_password'[]] = '([^']*)';$", multiline=True)
+             | first | default('(missing)') }}
+
+    - name: Verify | Check the setup password hash with PHP
+      ansible.builtin.command:
+        argv:
+          - php
+          - '-r'
+          - >-
+            $i = json_decode(stream_get_contents(STDIN), true);
+            echo password_verify($i['password'], $i['hash']) ? 'match' : 'no match';
+        stdin: '{{ {"password": postfixadmin_setup_password, "hash": __verify_setup_hash} | to_json }}'
+        stdin_add_newline: false
+      register: __verify_setup_check
+      changed_when: false
+      when: postfixadmin_setup_password | default('') | length > 0
+
+    - name: Verify | Assert the setup password hash
+      ansible.builtin.assert:
+        that:
+          - __verify_setup_hash is match('^[$]2y[$]')
+          - postfixadmin_setup_password not in __verify_config_text
+          - __verify_setup_check.stdout == 'match'
+        fail_msg: 'setup_password: {{ __verify_setup_hash[:7] }}… ({{ __verify_setup_check.stdout | default("-") }})'
+      vars:
+        __verify_config_text: '{{ __verify_config_content.content | b64decode }}'
+      when: postfixadmin_setup_password | default('') | length > 0
+
+    - name: Verify | Assert the setup login is off without a setup password
+      ansible.builtin.assert:
+        that:
+          - __verify_setup_hash == ''
+        fail_msg: 'setup_password: {{ __verify_setup_hash[:7] }}…'
+      when: postfixadmin_setup_password | default('') | length == 0
+
     - name: Verify | Deploy the query helper
       ansible.builtin.copy:
         src: query.php

@@ -75,6 +75,8 @@ provisioner:
         postfixadmin_php_fpm_group: 'postfixadmin'
         # TOTP on here, the default (off) in the postgresql scenario
         postfixadmin_totp: true
+        # The role hashes it; empty (no setup login) in the postgresql scenario
+        postfixadmin_setup_password: 'setup-Password-42'
         # The test domains under .example have no DNS records, which
         # PostfixAdmin checks for every domain and address by default
         postfixadmin_extra_config:

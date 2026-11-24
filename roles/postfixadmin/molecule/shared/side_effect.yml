@@ -15,6 +15,7 @@
 
   vars:
     __side_effect_dir: '/var/www/postfixadmin'
+    __side_effect_config: '/etc/postfixadmin/config.local.php'
     __side_effect_query: '/root/molecule-query.php'
     __side_effect_mariadb_sockets:
       Archlinux: '/run/mysqld/mysqld.sock'
@@ -72,6 +73,22 @@
         - "UPDATE alias SET goto = 'x@example.net' WHERE address IN ('info@example.com', 'sales@example.com')"
         - "UPDATE admin SET active = false WHERE username = 'helpdesk@example.com'"
       changed_when: true
+
+    # A hash of another password in place of the setup password hash: the
+    # role writes a new hash, which verify checks against the password
+    - name: Side Effect | Hash another setup password
+      ansible.builtin.command:
+        argv: [php, '-r', 'echo password_hash("other-Setup-42", PASSWORD_DEFAULT);']
+      register: __side_effect_setup_hash
+      changed_when: false
+      when: postfixadmin_setup_password | default('') | length > 0
+
+    - name: Side Effect | Put the hash of another setup password into config.local.php
+      ansible.builtin.lineinfile:
+        path: '{{ __side_effect_config }}'
+        regexp: "^[$]CONF[[]'setup_password'[]] = "
+        line: "$CONF['setup_password'] = '{{ __side_effect_setup_hash.stdout }}';"
+      when: postfixadmin_setup_password | default('') | length > 0
 
     - name: Side Effect | Include postfixadmin role with the changed accounts  # noqa: role-name[path]
       ansible.builtin.include_role:
