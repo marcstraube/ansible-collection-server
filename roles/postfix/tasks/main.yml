@@ -366,7 +366,8 @@
 # open them. A missing file is named here, before any change: the run would
 # otherwise succeed and every TLS service fail at its start. Check mode
 # skips the assertion, as the role that deploys the files writes nothing
-# then.
+# then. Both tasks carry the tags that change the host instead of always: a
+# run without them, also postfix:dns (a report), passes without the files.
 - name: Main | Check the TLS files
   ansible.builtin.stat:
     path: '{{ item }}'
@@ -380,7 +381,11 @@
   register: __postfix_tls_stat
   when: postfix_enabled | bool
   tags:
-    - always
+    - postfix
+    - postfix:install
+    - postfix:maps
+    - postfix:configure
+    - postfix:service
 
 - name: Main | Assert the TLS files exist
   ansible.builtin.assert:
@@ -398,7 +403,11 @@
     - postfix_enabled | bool
     - not ansible_check_mode
   tags:
-    - always
+    - postfix
+    - postfix:install
+    - postfix:maps
+    - postfix:configure
+    - postfix:service
 
 # An installed Postfix is compared with the compatibility level here, before
 # any change. postconf is missing before the first install; configure.yml

@@ -455,6 +455,7 @@
 # dovecot_config_version / dovecot_storage_version above the installed
 # release are fatal for Dovecot. An older release (AppStream 2.3 installed
 # before the upstream repository) is never upgraded by the role.
+# Tags of the role instead of always: other runs pass before the install.
 #
 
 - name: Install | Read the installed Dovecot version
@@ -467,7 +468,11 @@
   check_mode: false
   when: not __dovecot_check_mode_install | default(false) | bool
   tags:
-    - always
+    - dovecot
+    - dovecot:install
+    - dovecot:configure
+    - dovecot:service
+    - dovecot:shared
 
 - name: Install | Record the installed Dovecot release
   ansible.builtin.set_fact:
@@ -475,7 +480,11 @@
       {{ (__dovecot_version_output.stdout | default('') | regex_search('^[0-9]+\.[0-9]+\.[0-9]+')) or '' }}
   when: not __dovecot_check_mode_install | default(false) | bool
   tags:
-    - always
+    - dovecot
+    - dovecot:install
+    - dovecot:configure
+    - dovecot:service
+    - dovecot:shared
 
 - name: Install | Assert the Dovecot release
   ansible.builtin.assert:
@@ -500,4 +509,8 @@
          ] | select | list }}
   when: not __dovecot_check_mode_install | default(false) | bool
   tags:
-    - always
+    - dovecot
+    - dovecot:install
+    - dovecot:configure
+    - dovecot:service
+    - dovecot:shared

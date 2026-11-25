@@ -419,6 +419,8 @@
 # The unix listeners live in the Postfix queue directory, which the Postfix
 # package creates together with the postfix user. Without it Dovecot would
 # fail to start; the role fails here, before any change.
+# This check and the TLS file check below carry the tags of the role instead
+# of always: a run without one of them passes without Postfix and the files.
 - name: Main | Check the Postfix queue directory
   ansible.builtin.stat:
     path: '{{ __dovecot_postfix_private_dir }}'
@@ -427,7 +429,11 @@
     - dovecot_enabled | bool
     - dovecot_postfix_local | bool
   tags:
-    - always
+    - dovecot
+    - dovecot:install
+    - dovecot:configure
+    - dovecot:service
+    - dovecot:shared
 
 - name: Main | Assert Postfix is installed for the local listeners
   ansible.builtin.assert:
@@ -443,7 +449,11 @@
     - dovecot_enabled | bool
     - dovecot_postfix_local | bool
   tags:
-    - always
+    - dovecot
+    - dovecot:install
+    - dovecot:configure
+    - dovecot:service
+    - dovecot:shared
 
 # The TLS files are read when the configuration is validated. A missing file
 # is named here, before any change: on Debian the package would otherwise be
@@ -460,7 +470,11 @@
   register: __dovecot_tls_stat
   when: dovecot_enabled | bool
   tags:
-    - always
+    - dovecot
+    - dovecot:install
+    - dovecot:configure
+    - dovecot:service
+    - dovecot:shared
 
 - name: Main | Assert the TLS files exist
   ansible.builtin.assert:
@@ -478,7 +492,11 @@
     - dovecot_enabled | bool
     - not ansible_check_mode
   tags:
-    - always
+    - dovecot
+    - dovecot:install
+    - dovecot:configure
+    - dovecot:service
+    - dovecot:shared
 
 # EL: an installed AppStream Dovecot 2.3 is never upgraded by the role. The
 # check runs before the CE 2.4 repository is added, from which dnf would

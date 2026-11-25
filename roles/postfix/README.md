@@ -377,7 +377,10 @@ root when a service starts, so root-only files work. Certificate, key, the
 CA file (when set) and `postfix_db_tls_ca_file` (with `postfix_db_tls`) must
 exist when the role runs: a missing file fails the run before any change
 (`postfix check` does not open them; Postfix would only fail when a TLS
-service starts). Check mode skips this check. The role reloads Postfix on the
+service starts). Check mode skips this check. A run limited with `--tags` to
+other roles or to `postfix:dns` skips it, and so does `--skip-tags` with one of
+`postfix:install`, `postfix:maps`, `postfix:configure` and `postfix:service`,
+also when the run still selects the others. The role reloads Postfix on the
 `Reload cert services` handler topic of `marcstraube.common.pki`; for
 renewals of the certbot timer set `certbot_postfix_enabled: true` in
 `marcstraube.server.certbot`.
@@ -541,7 +544,9 @@ the original while `SYNC_CHROOT` is off (`postfix check` warns, the role
 passes), then leaves the role's own `policy-rc.d` behind, as an interrupted
 first run does, runs the role with only `postfix:maps`, `postfix:configure`
 and `postfix:service`, and runs it again in full, which removes the
-leftover.
+leftover. With a missing TLS key, runs with the role tag and with the
+sub-tags that check it fail, and runs with an unrelated tag and
+`postfix:dns` pass.
 
 ## Notes
 
