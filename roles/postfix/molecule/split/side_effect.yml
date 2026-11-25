@@ -9,8 +9,10 @@
 # Then the role's own policy-rc.d is left behind, as an interrupted first
 # run does; runs with a single sub-tag (postfix:maps, postfix:configure,
 # postfix:service) must pass without the install tasks, and the next full
-# run removes the leftover. verify.yml checks that and that Postfix still
-# started only once.
+# run removes the leftover. With a missing TLS key, a run with the role tag
+# or a sub-tag that changes the host fails with the name of the file, a run
+# with an unrelated tag or postfix:dns passes. verify.yml checks the leftover
+# and that Postfix still started only once.
 - name: Side Effect — Facts
   hosts: all
   gather_facts: true
@@ -127,6 +129,52 @@
       failed_when: >-
         __side_effect_tagged.rc != 0
         or __side_effect_tagged.stdout is not search('postfix-split-mail +: ok=[1-9][0-9]* .*failed=0')
+
+# The TLS files are checked only in runs that select the role
+- name: Side Effect — Missing TLS key
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    __side_effect_missing_key: '/etc/molecule-tls/missing.key'
+
+  tasks:
+    - name: Side Effect | Run the role with a missing TLS key
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python | dirname }}/ansible-playbook"
+          - '--inventory'
+          - '{{ ansible_inventory_sources | first }}'
+          - '--tags'
+          - '{{ item.tag }}'
+          - '--extra-vars'
+          - "{{ {'postfix_tls_key_file': __side_effect_missing_key} | to_json }}"
+          - '{{ playbook_dir }}/converge_tagged.yml'
+      environment:
+        ANSIBLE_CALLBACK_RESULT_FORMAT: 'json'
+        ANSIBLE_DISPLAY_FAILED_STDERR: 'false'
+        ANSIBLE_FORCE_COLOR: 'false'
+        ANSIBLE_NOCOLOR: 'true'
+      loop:
+        - {tag: 'base-system', checked: false}
+        - {tag: 'postfix:dns', checked: false}
+        - {tag: 'postfix', checked: true}
+        - {tag: 'postfix:install', checked: true}
+        - {tag: 'postfix:maps', checked: true}
+        - {tag: 'postfix:configure', checked: true}
+        - {tag: 'postfix:service', checked: true}
+      loop_control:
+        label: '{{ item.tag }}'
+      register: __side_effect_missing
+      changed_when: false
+      failed_when: >-
+        (item.checked
+         and (__side_effect_missing.rc != 2
+              or 'Main | Assert the TLS files exist' not in __side_effect_missing.stdout
+              or ('File(s) not found: ' ~ __side_effect_missing_key ~ '.') not in __side_effect_missing.stdout))
+        or (not item.checked
+            and (__side_effect_missing.rc != 0
+                 or __side_effect_missing.stdout is not search('postfix-split-mail +: ok=[1-9][0-9]* .*failed=0')))
 
 - name: Side Effect — Run the role again
   ansible.builtin.import_playbook: converge.yml

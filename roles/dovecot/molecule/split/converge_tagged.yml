@@ -1,0 +1,15 @@
+---
+# converge.yml with the role included under the tag 'always', so a run with
+# --tags selects the tags of the role itself (side_effect.yml runs it with
+# the role tag, single sub-tags such as dovecot:configure and an unrelated
+# tag, the latter also on the database host)
+- name: Converge — Tagged
+  hosts: "{{ __converge_hosts | default('mail') }}"
+  gather_facts: true
+
+  tasks:
+    - name: Converge | Include dovecot role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      tags:
+        - always

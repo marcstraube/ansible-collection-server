@@ -362,7 +362,10 @@ a test it did not send the chain). The files are read by the Dovecot master
 process as root.
 
 The role checks that the certificate, the key and the CA files it is given
-exist and fails before any change when one is missing.
+exist and fails before any change when one is missing. Check mode skips this
+check. A run limited with `--tags` to other roles skips it and the check of
+the Postfix queue directory, and so does `--skip-tags` with a sub-tag of the
+role, also when the run still selects the other sub-tags.
 
 The role reloads Dovecot on the handler topic `Reload cert services` of
 `marcstraube.common.pki` and `marcstraube.server.certbot`. Renewals by the
@@ -643,7 +646,11 @@ the image, like a Debian host: verify checks that the first install did not
 start Dovecot with the packaged configuration (one start, by the role) and
 that the role removed its temporary `policy-rc.d`. Side effect leaves the
 role's `policy-rc.d` behind on the installed host, as an interrupted first
-run does, and runs the role again, which removes it.
+run does, and runs the role again, which removes it. Runs with a missing TLS
+key and without the Postfix queue directory fail with the role tag and with
+every sub-tag and pass with an unrelated tag, also on the database container,
+which has no Dovecot. A config version above the installed release fails the
+runs with `dovecot:configure`, `dovecot:service` and `dovecot:shared`.
 
 **AppArmor on the Molecule host:** containers of rootless podman run
 unconfined, so AppArmor profiles of the host attach to the Dovecot binaries
