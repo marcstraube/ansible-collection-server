@@ -34,3 +34,10 @@ __nginx_writable_path_types:
   - 'httpd_sys_ra_content_t'
   - 'httpd_log_t'
   - 'httpd_cache_t'
+
+# Own ACME challenge location of a site or of nginx_global_locations: the
+# prefix itself, with or without the modifier ^~, or a regex that names it
+# outside a negative lookaround. An exact match (=) covers a single file only
+# and does not count.
+__nginx_acme_own_regex: >-
+  (?m)^[^#\n]*\blocation\s+(?:(?:\^~\s*)?["']?/\.well-known/acme-challenge/?["']?\s*(?:\{|$)|~(?:(?!\(\?<?!)[^{\n])*acme-challenge)

@@ -1,5 +1,564 @@
 ---
-# Targeted update: the first play rolls the nginx packages back to an older
+# The second pass of the site tasks (tasks_from: sites.yml), as the web play
+# runs it once certbot obtained a certificate. First play of the file: no run
+# of main.yml has set anything yet, so the tasks have to work on their own.
+- name: Side Effect | First certificate
+  hosts: all
+  gather_facts: true
+
+  vars:
+    nginx_enabled: true
+    nginx_acme_challenge_enabled: true
+    __side_effect_acme_sites:
+      - name: 'test-acme-redirect'
+        server_names:
+          - 'acme-redirect.example.com'
+        root: '/var/www/html'
+        http_redirect: true
+        www_redirect: 'non-www'
+        ssl:
+          enabled: true
+          certificate: '/etc/nginx/ssl/acme-redirect.crt'
+          certificate_key: '/etc/nginx/ssl/acme-redirect.key'
+      - name: 'test-acme-pending'
+        server_names:
+          - 'acme-pending.example.com'
+        root: '/var/www/html'
+        ssl:
+          enabled: true
+          certificate: '/etc/nginx/ssl/acme-pending.crt'
+          certificate_key: '/etc/nginx/ssl/acme-pending.key'
+    # A path only known per connection, a certificate in the configuration
+    # itself and a quoted path must not count as missing files
+    __side_effect_acme_path_sites:
+      - name: 'test-acme-variable'
+        server_names:
+          - 'acme-variable.example.com'
+        root: '/var/www/html'
+        ssl:
+          enabled: true
+          certificate: '/etc/nginx/ssl/$ssl_server_name.crt'
+          certificate_key: '/etc/nginx/ssl/$ssl_server_name.key'
+      - name: 'test-acme-data'
+        server_names:
+          - 'acme-data.example.com'
+        root: '/var/www/html'
+        ssl:
+          enabled: true
+          certificate: '"data:{{ __side_effect_acme_pem.content | b64decode }}"'
+          certificate_key: '"/etc/nginx/ssl/acme-pending.key"'
+
+  tasks:
+    # converge.yml left both sites waiting. The disabled site is not checked.
+    - name: Side Effect | Include the site tasks while the certificates are missing  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: sites.yml
+      vars:
+        nginx_sites: >-
+          {{ __side_effect_acme_sites
+             + [__side_effect_acme_sites[0] | combine({'name': 'test-acme-disabled', 'enabled': false})] }}
+
+    - name: Side Effect | Assert the role lists the waiting sites
+      ansible.builtin.assert:
+        that:
+          - __nginx_sites_pending | sort == ['test-acme-pending', 'test-acme-redirect']
+          - __nginx_sites_active | map(attribute='name') == ['test-acme-redirect']
+        fail_msg: 'Waiting {{ __nginx_sites_pending }}, active {{ __nginx_sites_active }}'
+        success_msg: 'The role lists the sites waiting for their certificate'
+
+    - name: Side Effect | Create the missing certificates
+      ansible.builtin.command:
+        cmd: >-
+          openssl req -x509 -nodes -days 365 -newkey rsa:2048
+          -keyout /etc/nginx/ssl/{{ item }}.key
+          -out /etc/nginx/ssl/{{ item }}.crt
+          -subj "/CN={{ item }}.example.com"
+        creates: '/etc/nginx/ssl/{{ item }}.crt'
+      loop:
+        - 'acme-redirect'
+        - 'acme-pending'
+
+    - name: Side Effect | Read a certificate for the data value
+      ansible.builtin.slurp:
+        src: /etc/nginx/ssl/acme-pending.crt
+      register: __side_effect_acme_pem
+
+    - name: Side Effect | Include the site tasks with the certificates  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: sites.yml
+      vars:
+        nginx_sites: '{{ __side_effect_acme_sites + __side_effect_acme_path_sites }}'
+
+    - name: Side Effect | Reload nginx with the certificates
+      ansible.builtin.meta: flush_handlers
+
+    # The reload is asynchronous, hence the retries. The www name of
+    # test-acme-redirect has a server of its own.
+    - name: Side Effect | Check the certificates nginx serves
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          openssl s_client -connect 127.0.0.1:443 -servername {{ item.host }}.example.com \
+            < /dev/null 2> /dev/null | openssl x509 -noout -subject
+        executable: /bin/bash
+      register: __side_effect_acme_subject
+      changed_when: false
+      until: __side_effect_acme_subject.stdout is search('CN ?= ?' ~ item.subject ~ '\.example\.com')
+      retries: 5
+      delay: 1
+      loop:
+        - {host: 'acme-redirect', subject: 'acme-redirect'}
+        - {host: 'www.acme-redirect', subject: 'acme-redirect'}
+        - {host: 'acme-pending', subject: 'acme-pending'}
+        - {host: 'acme-data', subject: 'acme-pending'}
+
+    - name: Side Effect | Check the site with a variable path is enabled
+      ansible.builtin.stat:
+        path: /etc/nginx/sites-enabled/test-acme-variable.conf
+      register: __side_effect_acme_variable
+      failed_when: not __side_effect_acme_variable.stat.exists
+
+    - name: Side Effect | Remove the sites with special paths
+      ansible.builtin.file:
+        path: '/etc/nginx/{{ item.0 }}/{{ item.1 }}.conf'
+        state: absent
+      loop: >-
+        {{ ['sites-enabled', 'sites-available']
+           | product(['test-acme-data', 'test-acme-variable']) | list }}
+
+    # A deployed HTTPS site that lost a file: the run fails and leaves the
+    # deployed configuration alone.
+    - name: Side Effect | Remove the key of one site
+      ansible.builtin.file:
+        path: /etc/nginx/ssl/acme-redirect.key
+        state: absent
+
+    - name: Side Effect | Run the site tasks without the key
+      block:
+        - name: Side Effect | Include the site tasks without the key  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+            tasks_from: sites.yml
+          vars:
+            nginx_sites: >-
+              {{ __side_effect_acme_sites | map('combine', {'root': '/var/www/changed'}) | list }}
+      rescue:
+        - name: Side Effect | Record the missing key failure
+          ansible.builtin.set_fact:
+            __side_effect_acme_error: >-
+              {{ ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed')
+                 | map(attribute='msg') | first | default('') }}
+
+    - name: Side Effect | Read the enabled sites after the failure
+      ansible.builtin.slurp:
+        src: '/etc/nginx/sites-enabled/{{ item.name }}.conf'
+      loop: '{{ __side_effect_acme_sites }}'
+      loop_control:
+        label: '{{ item.name }}'
+      register: __side_effect_acme_deployed
+
+    - name: Side Effect | Assert the missing key failed the run before any change
+      ansible.builtin.assert:
+        that:
+          - __side_effect_acme_error | default('') is search("Site 'test-acme-redirect' serves HTTPS")
+          - __side_effect_acme_error | default('') is search('/etc/nginx/ssl/acme-redirect\.key')
+          - __side_effect_acme_error | default('') is not search('acme-redirect\.crt')
+          - __deployed | select('search', 'listen 443 ssl') | list | length == 2
+          - __deployed | select('search', '/var/www/changed') | list | length == 0
+        fail_msg: >-
+          A deployed HTTPS site without its key did not fail the run as expected
+          (error: {{ __side_effect_acme_error | default('none') }})
+        success_msg: 'A deployed HTTPS site without its key fails the run before any change'
+      vars:
+        __deployed: "{{ __side_effect_acme_deployed.results | map(attribute='content') | map('b64decode') | list }}"
+
+    # Back to the state of converge.yml, as the message says: without the
+    # link the sites wait for their certificates again.
+    - name: Side Effect | Remove the certificates and the links of the sites
+      ansible.builtin.file:
+        path: '/etc/nginx/{{ item }}'
+        state: absent
+      loop:
+        - 'ssl/acme-redirect.crt'
+        - 'ssl/acme-pending.crt'
+        - 'ssl/acme-pending.key'
+        - 'sites-enabled/test-acme-redirect.conf'
+        - 'sites-enabled/test-acme-pending.conf'
+
+    - name: Side Effect | Include the site tasks without the certificates  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: sites.yml
+      vars:
+        nginx_sites: '{{ __side_effect_acme_sites }}'
+
+    - name: Side Effect | Reload nginx without the certificates
+      ansible.builtin.meta: flush_handlers
+
+    # Own challenge locations in every form: nginx refuses a duplicate. The
+    # certificate of the default site does not exist.
+    - name: Side Effect | Include the site tasks with own challenge locations  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: sites.yml
+      vars:
+        nginx_default_site_ssl_certificate: '/etc/nginx/ssl/acme-default.crt'
+        nginx_default_site_ssl_certificate_key: '/etc/nginx/ssl/acme-default.key'
+        nginx_sites:
+          - name: 'test-own-prefix'
+            server_names:
+              - 'own-prefix.example.com'
+            root: '/var/www/html'
+            locations:
+              - path: '^~ "/.well-known/acme-challenge"'
+                config: 'root /var/www/acme-own;'
+          - name: 'test-own-regex'
+            server_names:
+              - 'own-regex.example.com'
+            root: '/var/www/html'
+            locations:
+              - path: '~ ^/\.well-known/acme-challenge/'
+                config: 'root /var/www/acme-own;'
+          - name: 'test-own-raw'
+            server_names:
+              - 'own-raw.example.com'
+            root: '/var/www/html'
+            extra_config: |
+              location ^~ /.well-known/acme-challenge/ {
+                  root /var/www/acme-own;
+              }
+          - name: 'test-own-nested'
+            server_names:
+              - 'own-nested.example.com'
+            root: '/var/www/html'
+            locations:
+              - path: '^~ /.well-known/'
+                config: |
+                  location /.well-known/acme-challenge/ {
+                      root /var/www/acme-own;
+                  }
+          # Its own location belongs to the HTTPS server, which waits
+          - name: 'test-own-waiting'
+            server_names:
+              - 'own-waiting.example.com'
+            root: '/var/www/html'
+            http_redirect: true
+            ssl:
+              enabled: true
+              certificate: '/etc/nginx/ssl/acme-waiting.crt'
+              certificate_key: '/etc/nginx/ssl/acme-waiting.key'
+            locations:
+              - path: '/.well-known/acme-challenge/'
+                config: 'root /var/www/acme-own;'
+          # Neither a comment nor a negative lookahead names the location; an
+          # exact match serves one file and leaves the rest to the role
+          - name: 'test-own-comment'
+            server_names:
+              - 'own-comment.example.com'
+            root: '/var/www/html'
+            extra_config: |
+              # location ^~ /.well-known/acme-challenge/ {
+              location  = /.well-known/acme-challenge/exact {
+                  return 204;
+              }
+              location ~ /\.(?!well-known/acme-challenge) {
+                  deny all;
+              }
+          - name: 'test-own-exact'
+            server_names:
+              - 'own-exact.example.com'
+            root: '/var/www/html'
+            locations:
+              - path: '= /.well-known/acme-challenge/exact'
+                config: 'return 204;'
+
+    - name: Side Effect | Reload nginx with own challenge locations
+      ansible.builtin.meta: flush_handlers
+
+    - name: Side Effect | Request the own challenge locations
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1/.well-known/acme-challenge/molecule'
+        headers:
+          Host: '{{ item.host }}.example.com'
+        return_content: true
+      register: __side_effect_acme_own
+      until: __side_effect_acme_own.content | default('') == item.content
+      retries: 5
+      delay: 1
+      loop:
+        - {host: 'own-prefix', content: 'own'}
+        - {host: 'own-regex', content: 'own'}
+        - {host: 'own-raw', content: 'own'}
+        - {host: 'own-nested', content: 'own'}
+        - {host: 'own-waiting', content: 'shared'}
+        - {host: 'own-comment', content: 'shared'}
+        - {host: 'own-exact', content: 'shared'}
+        - {host: 'unknown', content: 'shared'}
+
+    - name: Side Effect | Read the default site without a certificate
+      ansible.builtin.slurp:
+        src: /etc/nginx/sites-available/default.conf
+      register: __side_effect_acme_default
+
+    - name: Side Effect | Assert the default site keeps its HTTPS server
+      ansible.builtin.assert:
+        that:
+          - (__side_effect_acme_default.content | b64decode) is search('listen 443 ssl.* default_server;')
+          - (__side_effect_acme_default.content | b64decode) is search('ssl_certificate /etc/nginx/ssl/default\.crt;')
+          - (__side_effect_acme_default.content | b64decode) is not search('acme-default')
+        fail_msg: 'The default site does not fall back to its self-signed certificate'
+        success_msg: 'The default site uses its self-signed certificate until its own exists'
+
+# A deployed HTTP site that gets ssl before its certificate exists keeps
+# serving over HTTP, with and without http_redirect.
+- name: Side Effect | HTTP site gets a certificate
+  hosts: all
+  gather_facts: true
+
+  vars:
+    nginx_enabled: true
+    nginx_acme_challenge_enabled: true
+    __side_effect_keep_sites:
+      - name: 'test-keep-plain'
+        server_names:
+          - 'keep-plain.example.com'
+        root: '/var/www/html'
+      - name: 'test-keep-redirect'
+        server_names:
+          - 'keep-redirect.example.com'
+        root: '/var/www/html'
+        http_redirect: true
+        www_redirect: 'non-www'
+    __side_effect_keep_ssl:
+      ssl:
+        enabled: true
+        certificate: '/etc/nginx/ssl/keep.crt'
+        certificate_key: '/etc/nginx/ssl/keep.key'
+
+  tasks:
+    - name: Side Effect | Include the site tasks with HTTP sites  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: sites.yml
+      vars:
+        nginx_sites: '{{ __side_effect_keep_sites }}'
+
+    - name: Side Effect | Read the HTTP sites
+      ansible.builtin.stat:
+        path: '/etc/nginx/sites-enabled/{{ item.name }}.conf'
+        follow: true
+      loop: '{{ __side_effect_keep_sites }}'
+      register: __side_effect_keep_before
+
+    # Same configuration as before and once more: the state survives a run
+    - name: Side Effect | Include the site tasks with ssl and no certificate  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: sites.yml
+      vars:
+        nginx_sites: "{{ __side_effect_keep_sites | map('combine', __side_effect_keep_ssl) | list }}"
+      loop: [1, 2]
+      loop_control:
+        loop_var: __side_effect_keep_run
+
+    - name: Side Effect | Reload nginx with the sites kept on HTTP
+      ansible.builtin.meta: flush_handlers
+
+    - name: Side Effect | Read the sites kept on HTTP
+      ansible.builtin.stat:
+        path: '/etc/nginx/sites-enabled/{{ item.name }}.conf'
+        follow: true
+      loop: '{{ __side_effect_keep_sites }}'
+      register: __side_effect_keep_after
+
+    # An unchanged modification time means that no run wrote the file
+    - name: Side Effect | Assert the sites are kept on HTTP
+      ansible.builtin.assert:
+        that:
+          - __side_effect_keep_before.results | map(attribute='stat.mtime') | list
+            == __side_effect_keep_after.results | map(attribute='stat.mtime', default='missing') | list
+          - __nginx_sites_http | sort == ['test-keep-plain', 'test-keep-redirect']
+          - __nginx_sites_pending | length == 0
+        fail_msg: 'Kept on HTTP: {{ __nginx_sites_http }}, waiting: {{ __nginx_sites_pending }}'
+        success_msg: 'A deployed HTTP site keeps serving until its certificate exists'
+
+    - name: Side Effect | Request the sites kept on HTTP
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1/{{ item.1.path }}'
+        headers:
+          Host: '{{ item.0 }}.example.com'
+        follow_redirects: none
+        return_content: true
+      register: __side_effect_keep_http
+      until: item.1.content in __side_effect_keep_http.content | default('')
+      retries: 5
+      delay: 1
+      loop: >-
+        {{ ['keep-plain', 'keep-redirect']
+           | product([{'path': 'allowed.txt', 'content': 'fixture'},
+                      {'path': '.well-known/acme-challenge/molecule', 'content': 'shared'}]) | list }}
+
+    - name: Side Effect | Create the certificate of the HTTP sites
+      ansible.builtin.command:
+        cmd: >-
+          openssl req -x509 -nodes -days 365 -newkey rsa:2048
+          -keyout /etc/nginx/ssl/keep.key
+          -out /etc/nginx/ssl/keep.crt
+          -subj "/CN=keep.example.com"
+        creates: /etc/nginx/ssl/keep.crt
+
+    - name: Side Effect | Include the site tasks with ssl and the certificate  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: sites.yml
+      vars:
+        nginx_sites: "{{ __side_effect_keep_sites | map('combine', __side_effect_keep_ssl) | list }}"
+
+    - name: Side Effect | Reload nginx with the sites on HTTPS
+      ansible.builtin.meta: flush_handlers
+
+    - name: Side Effect | Check the certificates of the sites
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          openssl s_client -connect 127.0.0.1:443 -servername {{ item }}.example.com \
+            < /dev/null 2> /dev/null | openssl x509 -noout -subject
+        executable: /bin/bash
+      register: __side_effect_keep_subject
+      changed_when: false
+      until: __side_effect_keep_subject.stdout is search('CN ?= ?keep\.example\.com')
+      retries: 5
+      delay: 1
+      loop:
+        - 'keep-plain'
+        - 'keep-redirect'
+        - 'www.keep-redirect'
+
+    - name: Side Effect | Remove the sites and their certificate
+      ansible.builtin.file:
+        path: '/etc/nginx/{{ item }}'
+        state: absent
+      loop:
+        - 'sites-enabled/test-keep-plain.conf'
+        - 'sites-enabled/test-keep-redirect.conf'
+        - 'sites-available/test-keep-plain.conf'
+        - 'sites-available/test-keep-redirect.conf'
+        - 'ssl/keep.crt'
+        - 'ssl/keep.key'
+
+    - name: Side Effect | Reload nginx without the sites
+      ansible.builtin.systemd_service:
+        name: nginx
+        state: reloaded
+
+# Without nginx_acme_challenge_enabled and nginx_acme_webroot in the inventory
+# the role follows certbot_enabled and certbot_webroot_path. A challenge
+# location in nginx_global_locations stays the only one of a site.
+- name: Side Effect | ACME challenge default
+  hosts: all
+  gather_facts: true
+
+  vars:
+    nginx_enabled: true
+    nginx_global_locations:
+      - path: '/.well-known/acme-challenge/'
+        config: 'root /var/www/acme-own;'
+    nginx_sites:
+      - name: 'test-own-global'
+        server_names:
+          - 'own-global.example.com'
+        root: '/var/www/html'
+      - name: 'test-own-redirect'
+        server_names:
+          - 'own-redirect.example.com'
+        root: '/var/www/html'
+        http_redirect: true
+        ssl:
+          enabled: true
+          certificate: '/etc/nginx/ssl/test.crt'
+          certificate_key: '/etc/nginx/ssl/test.key'
+      # Waiting, and still no duplicate of the global location
+      - name: 'test-own-waiting'
+        server_names:
+          - 'own-waiting.example.com'
+        root: '/var/www/html'
+        http_redirect: true
+        ssl:
+          enabled: true
+          certificate: '/etc/nginx/ssl/acme-waiting.crt'
+          certificate_key: '/etc/nginx/ssl/acme-waiting.key'
+
+  tasks:
+    - name: Side Effect | Include the site tasks next to certbot  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: sites.yml
+      vars:
+        certbot_enabled: true
+        certbot_webroot_path: '/var/www/acme-certbot'
+
+    - name: Side Effect | Reload nginx with a global challenge location
+      ansible.builtin.meta: flush_handlers
+
+    - name: Side Effect | Request the global challenge location
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1/.well-known/acme-challenge/molecule'
+        headers:
+          Host: '{{ item.host }}.example.com'
+        return_content: true
+      register: __side_effect_acme_global
+      until: __side_effect_acme_global.content | default('') == item.content
+      retries: 5
+      delay: 1
+      loop:
+        - {host: 'own-global', content: 'own'}
+        - {host: 'own-redirect', content: 'own'}
+        - {host: 'own-waiting', content: 'own'}
+        - {host: 'unknown', content: 'certbot'}
+
+    - name: Side Effect | Include the site tasks without certbot  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: sites.yml
+      vars:
+        nginx_global_locations: []
+
+    - name: Side Effect | Read the configuration without certbot
+      ansible.builtin.slurp:
+        src: '/etc/nginx/sites-available/{{ item }}.conf'
+      loop:
+        - 'default'
+        - 'test-own-global'
+        - 'test-own-redirect'
+      register: __side_effect_acme_off
+
+    - name: Side Effect | Assert the challenge is off without certbot
+      ansible.builtin.assert:
+        that:
+          - >-
+            __side_effect_acme_off.results | map(attribute='content') | map('b64decode')
+            | select('search', 'acme-challenge') | list | length == 0
+        fail_msg: 'The challenge is served although certbot is not enabled'
+        success_msg: 'The challenge follows certbot_enabled'
+
+    - name: Side Effect | Remove the sites with own challenge locations
+      ansible.builtin.file:
+        path: '/etc/nginx/{{ item.0 }}/test-own-{{ item.1 }}.conf'
+        state: absent
+      loop: >-
+        {{ ['sites-enabled', 'sites-available']
+           | product(['prefix', 'regex', 'raw', 'nested', 'waiting', 'comment',
+                      'exact', 'global', 'redirect']) | list }}
+
+    - name: Side Effect | Reload nginx without the sites
+      ansible.builtin.systemd_service:
+        name: nginx
+        state: reloaded
+
+# Targeted update: the next play rolls the nginx packages back to an older
 # build. A minimum the repository does not offer must fail before any
 # change, a mapping without a key for the host must fail, and on Debian a
 # configuration the new binary rejects must fail the update without a

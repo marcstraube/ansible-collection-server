@@ -122,8 +122,9 @@ system-update,nginx`) to restart nginx after it.
 | `nginx_ssl_dhparam`               | `''`                     | DH parameters file path    |
 
 The reload handler of this role subscribes to the `Reload cert services` handler
-topic of `marcstraube.server.certbot` and `marcstraube.common.pki`, so a
-certificate issued or renewed inside the same play takes effect in that run.
+topic of [`marcstraube.server.certbot`](https://github.com/marcstraube/ansible-collection-server/blob/main/roles/certbot/README.md)
+and [`marcstraube.common.pki`](https://github.com/marcstraube/ansible-collection-common/blob/main/roles/pki/README.md),
+so a certificate issued or renewed inside the same play takes effect in that run.
 Renewal through the certbot timer runs outside of Ansible — set
 `certbot_nginx_enabled` for that path.
 
@@ -352,10 +353,131 @@ without it nginx cannot bind the port. A port of another type, such as 3306
 place when a port is removed from the configuration. Outbound connections
 are covered under [SELinux](#selinux).
 
+Until the certificate and key file of a site that does not serve HTTPS yet
+exist, the role leaves out every HTTPS server of the site, since nginx would
+not load the configuration. What is deployed instead depends on the deployed
+configuration of the site:
+
+- A site that serves plain HTTP is kept on HTTP, without the redirect to HTTPS.
+- Of any other site only the HTTP redirect is deployed; without `http_redirect`
+  the site is not enabled. Requests for it may get the answer of another site
+  or the default site.
+
+The role reports these sites and the missing files, and the next run that finds
+the files deploys the sites completely. When the deployed configuration of an
+enabled site already has an HTTPS server, a missing file fails the run before
+any site is changed; check mode only reports it. While the files of
+`nginx_default_site_ssl_certificate` are missing, the default site uses its
+self-signed certificate.
+
+Give the certificate and key as absolute paths. A value with a variable
+(`$ssl_server_name`) or a scheme (`data:`, `engine:`, `store:`) is not checked,
+nor is `ssl.trusted_certificate`: it is only part of the HTTPS server, and a
+missing file next to an existing certificate fails the configuration.
+
 The default site listens on 80 and on `443 ssl` (before nginx 1.25.1
 `443 ssl http2` while `nginx_http2_enabled` is on), the same options as the
 SSL sites, so the sites can share port 443 with it. Its HTTP/2 follows
 `nginx_http2_enabled` (see [HTTP/2](#http2)).
+
+### ACME / Let's Encrypt
+
+| Variable                       | Default                       | Description                                |
+| ------------------------------ | ----------------------------- | ------------------------------------------ |
+| `nginx_acme_challenge_enabled` | tracks `certbot_enabled`      | Serve the ACME HTTP-01 challenge           |
+| `nginx_acme_webroot`           | tracks `certbot_webroot_path` | Webroot for `/.well-known/acme-challenge/` |
+
+When enabled, `/.well-known/acme-challenge/` is served from
+`nginx_acme_webroot` (`/var/www/letsencrypt` when `certbot_webroot_path` is not
+set in the inventory):
+
+- by the default site over HTTP, for every name without a site of its own on
+  port 80
+- by the HTTP redirect servers of sites with SSL
+- by the sites themselves, with and without SSL, and the www redirects of sites
+  without SSL
+
+The location wins over regex locations (PHP, `nginx_deny_patterns`) and is
+exempt from basic authentication and IP lists of the site. A `return` or
+`rewrite` in `extra_config` still runs before it. Every other request is
+answered as before.
+
+A site that defines the location itself, in `locations` or `extra_config`,
+keeps its own, and one in `nginx_global_locations` is kept on all sites; the
+role then adds none there, the HTTP redirect server included. Only while a site
+waits for its certificate, the role serves the challenge in the redirect server
+of a site with its own location, which belongs to the HTTPS server.
+
+The webroot has to be the one certbot writes to: `certbot_webroot_path`, the
+`webroot` of an entry in `certbot_certificates` and `certbot_mail_webroot` have
+to match `nginx_acme_webroot`. On a host with `certbot_enabled` the location of
+the role changes who answers the challenge, and a renewal may fail, in these
+cases:
+
+- A certificate with a `webroot` of its own, such as the document root.
+- A proxy site whose backend answers the challenge.
+- A wider location, such as `/.well-known/` or `~ /\.well-known`, that serves
+  the challenge; the more specific location of the role wins.
+- A location in a file that `extra_config` includes, which the role does not
+  see; nginx refuses the duplicate of the same prefix.
+
+Set the webroot to `nginx_acme_webroot`, define the location in the site, or
+set `nginx_acme_challenge_enabled: false`.
+
+`marcstraube.server.certbot` creates `certbot_webroot_path`. Below `/var/www` it
+inherits a label nginx may read; on SELinux systems a webroot elsewhere needs a
+file context of your own (`httpd_sys_content_t`).
+
+#### First Certificate
+
+On a new host the certificate does not exist yet and its site is deployed
+without its HTTPS servers (see [Sites](#sites)). The `web_server` playbook of
+the collection handles the first certificate in one run: nginx serves the
+challenge, certbot obtains the certificate with the webroot authenticator, and
+the site tasks run again and enable the HTTPS servers. A run with
+`--tags certbot` alone issues the certificate, but the HTTPS servers need the
+next run of this role. The inventory only needs the sites and the certificates:
+
+```yaml
+nginx_enabled: true
+nginx_sites:
+  - name: 'www.example.com'
+    server_names:
+      - 'www.example.com'
+    root: '/var/www/example.com'
+    http_redirect: true
+    ssl:
+      enabled: true
+      certificate: '/etc/letsencrypt/live/www.example.com/fullchain.pem'
+      certificate_key: '/etc/letsencrypt/live/www.example.com/privkey.pem'
+certbot_enabled: true
+certbot_email: 'admin@example.com'
+certbot_certificates:
+  - name: 'www.example.com'
+    domains:
+      - 'www.example.com'
+```
+
+A play of your own flushes the handlers before certbot and includes the site
+tasks again after it:
+
+```yaml
+- name: Include nginx role
+  ansible.builtin.include_role:
+    name: marcstraube.server.nginx
+
+- name: Load the HTTP side before certbot
+  ansible.builtin.meta: flush_handlers
+
+- name: Include certbot role
+  ansible.builtin.include_role:
+    name: marcstraube.server.certbot
+
+- name: Enable the HTTPS servers
+  ansible.builtin.include_role:
+    name: marcstraube.server.nginx
+    tasks_from: sites.yml
+```
 
 ### Writable Paths
 
@@ -497,6 +619,15 @@ molecule test
 Driver: `podman` | Platforms: Arch Linux, Debian Trixie, Rocky 9, Rocky 10
 
 ## References
+
+Related roles:
+
+- [marcstraube.server.certbot](https://github.com/marcstraube/ansible-collection-server/blob/main/roles/certbot/README.md)
+  — Let's Encrypt certificates
+- [marcstraube.common.pki](https://github.com/marcstraube/ansible-collection-common/blob/main/roles/pki/README.md)
+  — certificates of an internal CA
+
+External:
 
 - [Nginx Documentation](https://nginx.org/en/docs/)
 - [Mozilla SSL Configuration Generator](https://ssl-config.mozilla.org/)

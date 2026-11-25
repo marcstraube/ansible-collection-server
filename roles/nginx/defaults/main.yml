@@ -359,10 +359,28 @@ nginx_default_site_ssl_certificate: ''
 nginx_default_site_ssl_certificate_key: ''
 
 #
+# ACME / Let's Encrypt (HTTP-01)
+#
+
+# Serve the ACME HTTP-01 challenge (/.well-known/acme-challenge/) from a shared
+# webroot in the default site, the HTTP redirect servers and the sites. A site
+# or nginx_global_locations that defines this location keeps its own. Defaults
+# to certbot_enabled: when certbot manages certificates on this host the
+# challenge is served automatically; otherwise it stays off. Override
+# explicitly to force either behavior.
+nginx_acme_challenge_enabled: '{{ certbot_enabled | default(false) | bool }}'
+
+# Webroot of the challenge, the one certbot writes to
+nginx_acme_webroot: "{{ certbot_webroot_path | default('/var/www/letsencrypt') }}"
+
+#
 # Sites (Virtual Hosts)
 #
 
-# Site definitions
+# Site definitions. Until the certificate and key file of a site that does not
+# serve HTTPS yet exist, a deployed HTTP site is kept on HTTP; of any other
+# site only the HTTP redirect is deployed, and without http_redirect the site
+# is not enabled.
 # Example:
 #
 # Static website:

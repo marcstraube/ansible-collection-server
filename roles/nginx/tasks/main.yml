@@ -151,6 +151,13 @@
     - nginx
     - nginx:configure
 
+- name: Main | Import sites tasks
+  ansible.builtin.import_tasks: sites.yml
+  when: nginx_enabled | bool
+  tags:
+    - nginx
+    - nginx:configure
+
 - name: Main | Import writable paths tasks
   ansible.builtin.import_tasks: writable_paths.yml
   when: nginx_enabled | bool

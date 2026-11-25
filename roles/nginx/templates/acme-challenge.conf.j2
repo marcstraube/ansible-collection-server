@@ -1,0 +1,9 @@
+    # ACME HTTP-01 challenge (Let's Encrypt)
+    location ^~ /.well-known/acme-challenge/ {
+        root {{ nginx_acme_webroot }};
+        default_type text/plain;
+        auth_basic off;
+        allow all;
+    }
+
+{# Keeps the blank line above: Jinja drops the last newline of an included file. #}

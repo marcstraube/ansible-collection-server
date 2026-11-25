@@ -1,18 +1,43 @@
 {{ ansible_managed | comment }}
 {% set __nginx_https_port = '' if item.listen_ssl | default(443) | int == 443 else ':' ~ item.listen_ssl %}
 {% set __nginx_http_port = '' if item.listen | default(80) | int == 80 else ':' ~ item.listen %}
-{% set __nginx_site_port = __nginx_https_port if item.ssl is defined and item.ssl.enabled | default(false) else __nginx_http_port %}
+{% set __nginx_site_ssl = item.ssl is defined and item.ssl.enabled | default(false) and item.name not in __nginx_sites_http %}
+{% set __nginx_site_port = __nginx_https_port if __nginx_site_ssl else __nginx_http_port %}
 {% set __nginx_site_http2 = item.http2 | default(nginx_http2_enabled) | bool %}
 {% set __nginx_http2_listen = ' http2' if not (__nginx_http2_directive | bool) and __nginx_site_http2 else '' %}
 {% set __nginx_http2_server = __nginx_http2_directive | bool and __nginx_site_http2 %}
+{% set __nginx_site_pending = item.name in __nginx_sites_pending %}
+{# A challenge location of the site or of nginx_global_locations stays the only
+   one: nginx refuses a duplicate prefix, and the prefix of the role would win
+   over a regex. #}
+{% set __nginx_acme_global %}
+{% for location in nginx_global_locations %}
+location {{ location.path }} {
+{{ location.config }}
+{% endfor %}
+{% endset %}
+{% set __nginx_acme_site %}
+{% for location in item.locations | default([]) %}
+location {{ location.path }} {
+{{ location.config }}
+{% endfor %}
+{{ item.extra_config | default('') }}
+{% endset %}
+{% set __nginx_acme_base = nginx_acme_challenge_enabled | bool and __nginx_acme_global is not search(__nginx_acme_own_regex) %}
+{% set __nginx_acme = __nginx_acme_base and __nginx_acme_site is not search(__nginx_acme_own_regex) %}
+{# While the site waits, its own location is not deployed #}
+{% set __nginx_acme_redirect = __nginx_acme or (__nginx_acme_base and __nginx_site_pending) %}
 
-{% if item.http_redirect | default(false) and item.ssl is defined and item.ssl.enabled | default(false) %}
+{% if item.http_redirect | default(false) and __nginx_site_ssl %}
 # HTTP to HTTPS redirect
 server {
     listen {{ item.listen | default(80) }};
     listen [::]:{{ item.listen | default(80) }};
     server_name {{ item.server_names | join(' ') }};
 
+{% if __nginx_acme_redirect %}
+{% include 'acme-challenge.conf.j2' %}
+{% endif %}
 {% for location in nginx_global_locations %}
     location {{ location.path }} {
 {{ location.config | indent(8, first=True) }}
@@ -25,10 +50,10 @@ server {
 }
 {% endif %}
 
-{% if item.www_redirect | default(false) %}
+{% if item.www_redirect | default(false) and not __nginx_site_pending %}
 # WWW redirect
 server {
-{% if item.ssl is defined and item.ssl.enabled | default(false) %}
+{% if __nginx_site_ssl %}
     listen {{ item.listen_ssl | default(443) }} ssl{{ __nginx_http2_listen }};
     listen [::]:{{ item.listen_ssl | default(443) }} ssl{{ __nginx_http2_listen }};
 {% if __nginx_http2_server %}
@@ -40,19 +65,26 @@ server {
     listen {{ item.listen | default(80) }};
     listen [::]:{{ item.listen | default(80) }};
 {% endif %}
-{% if item.www_redirect == 'non-www' %}
-    server_name www.{{ item.server_names[0] }};
-    return 301 $scheme://{{ item.server_names[0] }}{{ __nginx_site_port }}$request_uri;
+{% set __nginx_www_source = ('www.' if item.www_redirect == 'non-www' else '') ~ item.server_names[0] %}
+{% set __nginx_www_target = ('' if item.www_redirect == 'non-www' else 'www.') ~ item.server_names[0] %}
+    server_name {{ __nginx_www_source }};
+{% if __nginx_acme and not __nginx_site_ssl %}
+
+{% include 'acme-challenge.conf.j2' %}
+    location / {
+        return 301 $scheme://{{ __nginx_www_target }}{{ __nginx_site_port }}$request_uri;
+    }
 {% else %}
-    server_name {{ item.server_names[0] }};
-    return 301 $scheme://www.{{ item.server_names[0] }}{{ __nginx_site_port }}$request_uri;
+    return 301 $scheme://{{ __nginx_www_target }}{{ __nginx_site_port }}$request_uri;
 {% endif %}
 }
 {% endif %}
 
+{# tasks/sites.yml recognizes a deployed main server by this comment line #}
+{% if not __nginx_site_pending %}
 # Main server block
 server {
-{% if item.ssl is defined and item.ssl.enabled | default(false) %}
+{% if __nginx_site_ssl %}
     listen {{ item.listen_ssl | default(443) }} ssl{{ __nginx_http2_listen }};
     listen [::]:{{ item.listen_ssl | default(443) }} ssl{{ __nginx_http2_listen }};
 {% if __nginx_http2_server %}
@@ -130,6 +162,9 @@ server {
 {% endfor %}
 {% endif %}
 
+{% if __nginx_acme %}
+{% include 'acme-challenge.conf.j2' %}
+{% endif %}
 {% for location in nginx_global_locations %}
     location {{ location.path }} {
 {{ location.config | indent(8, first=True) }}
@@ -265,3 +300,4 @@ server {
 {{ item.extra_config | indent(4, first=True) }}
 {% endif %}
 }
+{% endif %}

@@ -408,6 +408,93 @@
         success_msg: 'The HTTP redirects point to the HTTPS port of each site'
 
     #
+    # ACME Challenge and Pending Certificates
+    #
+
+    # The unknown name and the site that is not enabled get their answer from
+    # the default site.
+    - name: Verify | Request the ACME challenge
+      ansible.builtin.uri:
+        url: '{{ item.scheme | default("http") }}://127.0.0.1/.well-known/acme-challenge/{{ __token }}'
+        validate_certs: false
+        headers:
+          Host: '{{ item.host }}'
+        follow_redirects: none
+        return_content: true
+      vars:
+        __token: '{{ item.token | default("molecule") }}'
+      register: __verify_acme
+      failed_when: __verify_acme.status != 200 or __verify_acme.content != item.content | default('shared')
+      loop:
+        - host: 'unknown.example.com'
+        - host: 'acme-pending.example.com'
+        - host: 'acme-redirect.example.com'
+        - host: 'acme-key.example.com'
+        - host: 'redirect-default.example.com'
+        - host: 'redirect-default.example.com'
+          scheme: 'https'
+        - host: 'acme-http.example.com'
+        - host: 'www.acme-http.example.com'
+        - host: 'proxy.example.com'
+        - host: 'static.example.com'
+        - host: 'static.example.com'
+          token: 'molecule.sql'
+        - host: 'acme-own.example.com'
+          content: 'own'
+      loop_control:
+        label: '{{ item.host }} {{ item.token | default("molecule") }}'
+
+    # 444 closes the connection, which uri reports as -1
+    - name: Verify | Request another path next to the challenge
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1/other'
+        headers:
+          Host: '{{ item.host }}'
+        follow_redirects: none
+      register: __verify_acme_other
+      failed_when: >-
+        __verify_acme_other.status != item.status
+        or __verify_acme_other.location | default('') != item.location | default('')
+      loop:
+        - host: 'unknown.example.com'
+          status: -1
+        - host: 'acme-redirect.example.com'
+          status: 301
+          location: 'https://acme-redirect.example.com/other'
+        - host: 'www.acme-http.example.com'
+          status: 301
+          location: 'http://acme-http.example.com/other'
+        - host: 'acme-http.example.com'
+          status: 403
+      loop_control:
+        label: '{{ item.host }}'
+
+    - name: Verify | Read the loaded configuration files
+      ansible.builtin.command:
+        argv:
+          - nginx
+          - -T
+      register: __verify_acme_config
+      changed_when: false
+
+    - name: Verify | Read the disabled site
+      ansible.builtin.slurp:
+        src: '{{ __nginx_sites_dir }}/test-acme-disabled.conf'
+      register: __verify_acme_disabled
+
+    - name: Verify | Assert the sites without a certificate have no HTTPS server
+      ansible.builtin.assert:
+        that:
+          - __verify_acme_config.stdout is search('sites-enabled/test-acme-redirect\.conf:')
+          - __verify_acme_config.stdout is search('sites-enabled/test-acme-key\.conf:')
+          - __verify_acme_config.stdout is not search('sites-enabled/test-acme-pending\.conf:')
+          - __verify_acme_config.stdout is not search('sites-enabled/test-acme-disabled\.conf:')
+          - __verify_acme_config.stdout is not search('/etc/nginx/ssl/acme-')
+          - (__verify_acme_disabled.content | b64decode) is search('listen 443 ssl')
+        fail_msg: 'A site without a certificate or key is not deployed as expected'
+        success_msg: 'The sites without a certificate or key keep only their HTTP redirect'
+
+    #
     # SELinux (RedHat with SELinux enabled)
     #
 
