@@ -15,6 +15,56 @@ heading or rename it to a concrete version — the workflow handles that.
 
 ## Unreleased
 
+### `nginx` — the role serves the ACME challenge on hosts with certbot
+
+With `certbot_enabled: true` the role now serves
+`/.well-known/acme-challenge/` from `certbot_webroot_path`
+(`/var/www/letsencrypt` when it is not set) in the default site, the HTTP
+redirect servers and the sites. A site or `nginx_global_locations` that defines
+this location keeps its own. The path is exempt from basic authentication and
+IP lists. A renewal may fail where something else answered the challenge:
+
+- a certificate with a `webroot` of its own in `certbot_certificates`, or
+  `certbot_mail_webroot`, for example the document root of the site
+- a proxy site whose backend answers the challenge
+- a wider location that serves the challenge, such as `/.well-known/` or
+  `~ /\.well-known`
+- a location in a file that `extra_config` includes: nginx refuses the
+  duplicate of the same prefix
+
+On every host the role also checks the certificate and key files configured in
+the inventory, not those the deployed configuration names. A site that does not
+serve HTTPS yet waits for them: a deployed HTTP site is kept on HTTP, of any
+other site only the HTTP redirect is deployed. A site whose deployed
+configuration has an HTTPS server fails the run before any site is changed. The
+default site falls back to its self-signed certificate while the files of
+`nginx_default_site_ssl_certificate` are missing.
+
+#### Required action
+
+On every host, make sure the certificate and key files of the sites in
+`nginx_sites` exist. Where nginx does not start because an enabled site names a
+certificate that was never issued, remove the link of the site in
+`/etc/nginx/sites-enabled` and run the role again.
+
+On hosts with `certbot_enabled`, unless every certificate uses
+`certbot_webroot_path` or a DNS authenticator, find the locations and the
+webroots in use before the upgrade:
+
+```bash
+grep -rnE 'acme-challenge|well-known' /etc/nginx
+grep -rnE 'webroot|authenticator' /etc/letsencrypt/renewal
+```
+
+Point the certificates to one webroot (`nginx_acme_webroot` overrides the
+default), define the location in the site, or keep the previous behavior:
+
+```yaml
+nginx_acme_challenge_enabled: false
+```
+
+Check the result with `certbot renew --dry-run`.
+
 ### `nginx` — HTTP/2 moves from the `listen` parameter to `http2 on;`
 
 On nginx 1.25.1 and later the role no longer renders the deprecated `http2`

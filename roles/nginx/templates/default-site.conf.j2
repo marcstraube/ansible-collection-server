@@ -6,7 +6,14 @@ server {
     listen [::]:80 default_server;
     server_name _;
 
+{% if nginx_acme_challenge_enabled | bool %}
+{% include 'acme-challenge.conf.j2' %}
+    location / {
+        return {{ nginx_default_site_return }};
+    }
+{% else %}
     return {{ nginx_default_site_return }};
+{% endif %}
 }
 
 server {
@@ -17,7 +24,7 @@ server {
 {% endif %}
     server_name _;
 
-{% if nginx_default_site_ssl_certificate | length > 0 %}
+{% if not (__nginx_default_site_self_signed | bool) %}
     ssl_certificate {{ nginx_default_site_ssl_certificate }};
     ssl_certificate_key {{ nginx_default_site_ssl_certificate_key }};
 {% else %}
