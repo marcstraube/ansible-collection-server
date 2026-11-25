@@ -172,7 +172,9 @@ restarts: after a failed check or reload the service keeps running on its old
 configuration. A service that is not active is skipped with a warning, it
 reads the new certificate when it starts. A unit that is not loaded (does not
 exist, or has an error in its unit file), or one without reload support, fails
-like a failed reload. The script sets its own
+like a failed reload; only at an issuance in a play (see
+[Certificate Change Notifications](#certificate-change-notifications)) a unit
+that does not exist is skipped with a warning. The script sets its own
 `PATH`, so it also works from cron. It tries every service, exits non-zero
 when a check or a reload failed, and logs each result to the journal under the
 tag `certbot-reload-services`; skips and failures at priority `warning` or
@@ -281,13 +283,17 @@ Only roles that actually run in the play react. Within this collection `apache`,
 topic, so a consumer covers both certificate sources with one `listen`.
 
 This role subscribes itself with the handler `Run certbot service reload
-script`, which runs `/usr/local/sbin/certbot-reload-services`, so the services
-from the Service Integration toggles also pick up a certificate issued inside a
-play. A failed configuration check or reload fails the handler and the play,
-and leaves the retry marker. The renewal tasks write the script; a run limited
-to `--tags certbot:certificates` on a host that does not have it yet skips the
-reload instead of failing. A host without any consumer and without toggles
-does not fail: Ansible aborts a
+script`, which runs `/usr/local/sbin/certbot-reload-services --issuance`, so the
+services from the Service Integration toggles also pick up a certificate issued
+inside a play. A service that is not installed yet (no unit) is skipped and
+named in the play output and, with priority `warning`, in the journal, because a
+later play may install it: it reads the certificate at its first start, so the
+toggles can be set before the first run on a new host. A misspelled name is
+skipped the same way and fails only at the next renewal. A failed configuration
+check or reload fails the handler and the play, and leaves the retry marker. The
+renewal tasks write the script; a run limited to `--tags certbot:certificates`
+on a host that does not have it yet skips the reload instead of failing. A host
+without any consumer and without toggles does not fail: Ansible aborts a
 run when a notification reaches no handler, and this listener is always defined.
 
 The notification keys on `Successfully received certificate` in certbot's

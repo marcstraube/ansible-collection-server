@@ -12,6 +12,9 @@
 # starts; a unit that does not exist is an error. Every service is tried; the
 # script exits non-zero when a check or a reload failed.
 #
+# With --issuance (the handler) a unit that does not exist is skipped like a
+# stopped service: a later play may install it. It does not clear a marker.
+#
 # A failure leaves the marker {{ __certbot_reload_marker }}. With --retry
 # (the retry timer or cron job) the script runs only while the marker exists,
 # and a run without failures removes it. Runs are serialized with a lock in
@@ -29,7 +32,9 @@ export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 readonly TAG='certbot-reload-services'
 readonly MARKER_DIR='{{ __certbot_reload_marker_dir }}'
 readonly MARKER='{{ __certbot_reload_marker }}'
+readonly MODE=${1:-}
 rc=0
+missing=0
 
 log() {
     local priority=$1
@@ -63,6 +68,11 @@ reload_service() {
     case "${load_state}" in
         loaded | masked) ;;
         not-found)
+            if [[ ${MODE} == '--issuance' ]]; then
+                log warning "${service}: unit not found, skipped"
+                missing=1
+                return 0
+            fi
             log err "${service}: unit not found, not reloaded"
             return 1
             ;;
@@ -96,7 +106,7 @@ if ! flock 9; then
     exit 1
 fi
 
-if [[ ${1:-} == '--retry' ]]; then
+if [[ ${MODE} == '--retry' ]]; then
     if [[ ! -e ${MARKER} ]]; then
         exit 0
     fi
@@ -108,7 +118,7 @@ reload_service {{ service | quote }} || rc=1
 {% endfor %}
 
 if (( rc == 0 )); then
-    if [[ -e ${MARKER} ]]; then
+    if [[ -e ${MARKER} ]] && (( missing == 0 )); then
         rm -f -- "${MARKER}"
         log notice 'all services reloaded, retry marker removed'
     fi
