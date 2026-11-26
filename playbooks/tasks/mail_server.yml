@@ -6,7 +6,7 @@
 # Import it from a play with `ansible.builtin.import_tasks`.
 #
 # Stack: pki, certbot, valkey, postfixadmin, postfix, dovecot, rspamd, sogo,
-# roundcube, mail_autoconfig. Every role is gated on its <role>_enabled
+# roundcube, mail_discovery. Every role is gated on its <role>_enabled
 # toggle, so the inventory decides which parts run on which host; the
 # components may be spread over several hosts of one play.
 #
@@ -27,7 +27,7 @@
 #                          rspamd is up.
 #   5. dovecot           — authentication and LMTP delivery.
 #   6. rspamd            — the milter.
-#   7. sogo, roundcube, mail_autoconfig
+#   7. sogo, roundcube, mail_discovery
 #
 # The databases of PostfixAdmin, SOGo and Roundcube and the web server with
 # PHP of PostfixAdmin and Roundcube come from earlier plays (database_server,
@@ -116,13 +116,13 @@
     - roundcube
   when: roundcube_enabled | bool
 
-- name: Mail | Import mail_autoconfig role
+- name: Mail | Import mail_discovery role
   ansible.builtin.import_role:
-    name: marcstraube.server.mail_autoconfig
+    name: marcstraube.server.mail_discovery
   tags:
     - mail
-    - mail_autoconfig
-  when: mail_autoconfig_enabled | bool
+    - mail_discovery
+  when: mail_discovery_enabled | bool
 
 - name: Mail | Forward certificate changes from an earlier play
   ansible.builtin.debug:

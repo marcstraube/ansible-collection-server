@@ -62,7 +62,7 @@ Available entry task files:
 | ----------- | ----- |
 | `web_server.yml` | Nginx/Apache + certbot |
 | `database_server.yml` | PostgreSQL with pki-issued certificates |
-| `mail_server.yml` | Mail stack: valkey, postfixadmin, postfix, dovecot, rspamd, sogo, roundcube, mail_autoconfig |
+| `mail_server.yml` | Mail stack: valkey, postfixadmin, postfix, dovecot, rspamd, sogo, roundcube, mail_discovery |
 | `n8n.yml` | N8N workflow automation (podman, postgresql, pki, nginx) |
 | `activepieces.yml` | Activepieces workflow automation (podman, postgresql, pki, nginx) |
 | `wazuh_server.yml` | Wazuh all-in-one server with pki-issued certificates |

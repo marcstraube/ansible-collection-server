@@ -55,7 +55,7 @@ for the base system (podman, pki, firewalld, fail2ban).
 | **rspamd**          | rspamd mail filter: milter, DKIM/ARC signing, clamd, Valkey     |
 | **roundcube**       | Roundcube webmail with Sieve filters, sharing, password change  |
 | **sogo**            | SOGo groupware: webmail, CalDAV, CardDAV, optional ActiveSync   |
-| **mail_autoconfig** | Mail client autoconfiguration (Autoconfig, Autodiscover, Apple) |
+| **mail_discovery**  | Client discovery data: Autoconfig, Autodiscover, Apple profile  |
 
 ### Applications
 
@@ -160,7 +160,7 @@ without a web server uses a DNS authenticator of certbot), Valkey,
 PostfixAdmin (creates and upgrades the schema the other roles read),
 Postfix (its queue directory holds the local LMTP and SASL sockets of
 Dovecot), Dovecot, rspamd, then SOGo, Roundcube and the mail
-autoconfiguration. Until Dovecot and rspamd are up in the same run,
+discovery data. Until Dovecot and rspamd are up in the same run,
 Postfix defers delivery and holds incoming mail back
 (`postfix_milter_default_action: 'tempfail'`), so no mail passes
 unfiltered.
@@ -208,7 +208,7 @@ sogo_enabled: true
 sogo_db_create: true
 roundcube_enabled: true
 roundcube_db_create: true
-mail_autoconfig_enabled: true
+mail_discovery_enabled: true
 ```
 
 Both examples show which role runs where, not a complete inventory. Each
@@ -218,7 +218,7 @@ key files of Postfix and Dovecot (`postfix_tls_cert_file`,
 (`certbot_certificates`), the database passwords and the read-only users
 of PostfixAdmin (`postfixadmin_db_readers`), the Valkey user of rspamd (and of
 Roundcube with `roundcube_session_storage: 'redis'`), the nginx sites of PostfixAdmin, Roundcube and SOGo
-(`nginx_sites`) and the domains of the mail autoconfiguration. The role
+(`nginx_sites`) and the domains of the mail discovery data. The role
 READMEs describe them; the inventory of the stack scenario
 (`extensions/molecule/mail_server/inventory`) is a complete, tested
 example of the split setup.
