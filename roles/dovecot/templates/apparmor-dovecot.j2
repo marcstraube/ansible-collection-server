@@ -68,11 +68,13 @@
 
 # Sieve redirects and vacation replies through the sendmail of Postfix,
 # which hands the message to postdrop (the child profile of
-# usr.lib.dovecot.dovecot-lda for Postfix only)
+# usr.lib.dovecot.dovecot-lda for Postfix only). Postfix reads its map
+# module definitions in dynamicmaps.cf.d at start; postdrop writes to the
+# pickup socket through a path AppArmor sees as disconnected.
 /usr/{bin,sbin}/sendmail Cx -> sendmail,
 signal (send) set=(term, kill) peer=dovecot-lmtp//sendmail,
 
-profile sendmail {
+profile sendmail flags=(attach_disconnected) {
   include <abstractions/base>
   include <abstractions/nameservice>
   include <abstractions/postfix-common>
@@ -82,6 +84,7 @@ profile sendmail {
 
   /usr/{bin,sbin}/sendmail mr,
   /usr/{bin,sbin}/postdrop mrix,
+  /etc/postfix/dynamicmaps.cf.d/* r,
   /var/spool/postfix/maildrop/* rwl,
   /var/spool/postfix/public/pickup w,
 }

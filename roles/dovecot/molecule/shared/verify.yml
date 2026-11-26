@@ -53,7 +53,7 @@
     __verify_apparmor_sendmail:
       - '/usr/{bin,sbin}/sendmail Cx -> sendmail,'
       - 'signal (send) set=(term, kill) peer=dovecot-lmtp//sendmail,'
-      - 'profile sendmail {'
+      - 'profile sendmail flags=(attach_disconnected) {'
       - '  include <abstractions/base>'
       - '  include <abstractions/nameservice>'
       - '  include <abstractions/postfix-common>'
@@ -61,6 +61,7 @@
       - '  signal (send, receive) peer=dovecot-lmtp//sendmail,'
       - '  /usr/{bin,sbin}/sendmail mr,'
       - '  /usr/{bin,sbin}/postdrop mrix,'
+      - '  /etc/postfix/dynamicmaps.cf.d/* r,'
       - '  /var/spool/postfix/maildrop/* rwl,'
       - '  /var/spool/postfix/public/pickup w,'
       - '}'
