@@ -64,6 +64,10 @@ provisioner:
         mariadb_repo: 'distro'
         mariadb_version: '11.8'
         mariadb_arch_package: 'mariadb'
+        # AppArmor on every platform: the Dovecot profiles of the apparmor
+        # package on Arch Linux, none on Debian, a stand-in on EL; the
+        # postgresql scenario has no AppArmor
+        __molecule_apparmor: true
     host_vars:
       dovecot-mariadb-archlinux:
         ansible_python_interpreter: /usr/bin/python

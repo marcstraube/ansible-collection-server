@@ -142,6 +142,65 @@ __dovecot_rspamd_controller_local: >-
      is match('^https?://(localhost|127\.[0-9.]+|\[::1\])(:[0-9]+)?(/.*)?$') }}
 
 #
+# AppArmor
+#
+# The Dovecot 2.3 profiles of the apparmor package (Arch Linux, enforced)
+# include /etc/apparmor.d/local/<profile> if it exists; the role owns these
+# files for the profiles below (templates/apparmor-dovecot.j2).
+#
+
+__dovecot_apparmor_profile_dir: '/etc/apparmor.d'
+__dovecot_apparmor_rules_dir: '{{ __dovecot_apparmor_profile_dir }}/local'
+
+# First line of every rule file the role writes; a file without it belongs
+# to the administrator and is never replaced or removed
+__dovecot_apparmor_marker: '# Managed by Ansible (marcstraube.server.dovecot)'
+
+# Marker of a reload that has not succeeded yet. The profiles include the
+# files of the directory by name only, and the parser skips dot files.
+__dovecot_apparmor_pending: '{{ __dovecot_apparmor_rules_dir }}/.dovecot.reload-pending'
+
+# Profiles the role has rules for (file names in /etc/apparmor.d)
+__dovecot_apparmor_profiles:
+  - 'usr.sbin.dovecot'
+  - 'usr.lib.dovecot.config'
+  - 'usr.lib.dovecot.auth'
+  - 'usr.lib.dovecot.lmtp'
+  - 'usr.lib.dovecot.imap'
+  - 'usr.lib.dovecot.pop3'
+  - 'usr.lib.dovecot.managesieve'
+
+# Role paths in the rules (apparmor.yml resolves their symlinks)
+__dovecot_apparmor_paths: >-
+  {{ [dovecot_mail_root, dovecot_tls_cert_file, dovecot_tls_key_file,
+      __dovecot_sieve_before_dir, __dovecot_sieve_after_dir, __dovecot_sieve_imap_dir,
+      __dovecot_sieve_pipe_dir, __dovecot_rspamd_header_file]
+     + ([dovecot_db_tls_ca_file] if dovecot_db_tls | bool else [])
+     + ([dovecot_db_host] if dovecot_db_host is match('/') else [])
+     + ([dovecot_rspamd_controller_ca_file]
+        if dovecot_rspamd_learn_enabled | bool and dovecot_rspamd_controller_ca_file | length > 0 else []) }}
+
+# Real path of every role path; set once apparmor.yml resolved them
+__dovecot_apparmor_real: >-
+  {{ dict(__dovecot_apparmor_paths | zip(__dovecot_apparmor_realpath.stdout_lines)) }}
+
+# TLS files doveconf (master) and the config process read: certificate,
+# key and the MariaDB CA (ssl_client_ca_file; libpq reads the PostgreSQL CA
+# in the auth process)
+__dovecot_apparmor_tls_files: >-
+  {{ ([dovecot_tls_cert_file, dovecot_tls_key_file]
+      + ([dovecot_db_tls_ca_file] if dovecot_db_tls | bool and dovecot_db_type == 'mariadb' else []))
+     | unique | list }}
+
+# Profiles that get rules with the current configuration
+__dovecot_apparmor_rules_profiles: >-
+  {{ ['usr.sbin.dovecot', 'usr.lib.dovecot.config']
+     + (['usr.lib.dovecot.auth'] if dovecot_db_tls | bool or dovecot_db_host is match('/') else [])
+     + ['usr.lib.dovecot.lmtp', 'usr.lib.dovecot.imap']
+     + (['usr.lib.dovecot.pop3'] if dovecot_pop3_enabled | bool else [])
+     + (['usr.lib.dovecot.managesieve'] if dovecot_managesieve_enabled | bool else []) }}
+
+#
 # SELinux
 #
 # Listener ports get lmtp_port_t (LMTP) or mail_port_t (auth, quota-status),

@@ -24,6 +24,79 @@
     __verify_failure: >-
       {{ ansible_failed_result.msg | default('') }}
       {{ ansible_failed_result.results | default([]) | map(attribute='msg', default='') | join(' ') }}
+    # A host with AppArmor (molecule/shared/tasks/apparmor_host.yml) and the
+    # Dovecot profiles: Arch Linux only, Debian ships none and EL has no
+    # AppArmor, whatever is in place there
+    __verify_apparmor: >-
+      {{ __molecule_apparmor | default(false) | bool and ansible_facts['os_family'] == 'Archlinux' }}
+    __verify_apparmor_dir: '/etc/apparmor.d/local'
+    __verify_apparmor_pending: '/etc/apparmor.d/local/.dovecot.reload-pending'
+    __verify_apparmor_broken: '/etc/apparmor.d/tunables/dovecot.d/molecule-broken'
+    __verify_apparmor_log: '/root/molecule-apparmor-parser.log'
+    __verify_apparmor_profiles:
+      - 'usr.sbin.dovecot'
+      - 'usr.lib.dovecot.config'
+      - 'usr.lib.dovecot.auth'
+      - 'usr.lib.dovecot.lmtp'
+      - 'usr.lib.dovecot.imap'
+      - 'usr.lib.dovecot.pop3'
+      - 'usr.lib.dovecot.managesieve'
+    # Rules of converge (comments and empty lines left out); the database
+    # behind the MariaDB socket of the abstraction and POP3 off, so auth and
+    # pop3 get none
+    __verify_apparmor_mail:
+      - '"/var/vmail/" rw,'
+      - '"/var/vmail/**" rwkl,'
+    __verify_apparmor_tls:
+      - '"/etc/ssl/certs/molecule-dovecot.pem" r,'
+      - '"/etc/ssl/private/molecule-dovecot.key" r,'
+    __verify_apparmor_sendmail:
+      - '/usr/{bin,sbin}/sendmail Cx -> sendmail,'
+      - 'signal (send) set=(term, kill) peer=dovecot-lmtp//sendmail,'
+      - 'profile sendmail {'
+      - '  include <abstractions/base>'
+      - '  include <abstractions/nameservice>'
+      - '  include <abstractions/postfix-common>'
+      - '  signal (receive) peer=dovecot-lmtp,'
+      - '  signal (send, receive) peer=dovecot-lmtp//sendmail,'
+      - '  /usr/{bin,sbin}/sendmail mr,'
+      - '  /usr/{bin,sbin}/postdrop mrix,'
+      - '  /var/spool/postfix/maildrop/* rwl,'
+      - '  /var/spool/postfix/public/pickup w,'
+      - '}'
+    # Spam training without and with dovecot_rspamd_controller_ca_file
+    # (the last two lines)
+    __verify_apparmor_learn:
+      - '"/etc/dovecot/sieve/imapsieve/*" r,'
+      - '"/usr/local/lib/dovecot/sieve-pipe/rspamd-learn-*.sh" rCx -> rspamd-learn,'
+      - 'signal (send) set=(term, kill) peer=dovecot-imap//rspamd-learn,'
+      - 'profile rspamd-learn {'
+      - '  include <abstractions/base>'
+      - '  include <abstractions/nameservice>'
+      - '  include <abstractions/ssl_certs>'
+      - '  signal (receive) peer=dovecot-imap,'
+      - '  /usr/bin/{,ba,da}sh ix,'
+      - '  "/usr/local/lib/dovecot/sieve-pipe/rspamd-learn-*.sh" r,'
+      - '  /usr/bin/curl ix,'
+      - '  "/etc/dovecot/rspamd-controller.header" r,'
+      - '}'
+    __verify_apparmor_expected:
+      usr.sbin.dovecot: '{{ __verify_apparmor_tls }}'
+      usr.lib.dovecot.config: '{{ __verify_apparmor_tls }}'
+      usr.lib.dovecot.lmtp: >-
+        {{ ['@{PROC}/@{pid}/stat r,',
+            '"/etc/dovecot/sieve/before.d/" r,', '"/etc/dovecot/sieve/before.d/*" r,',
+            '"/etc/dovecot/sieve/after.d/" r,', '"/etc/dovecot/sieve/after.d/*" r,']
+           + __verify_apparmor_mail + __verify_apparmor_sendmail }}
+      usr.lib.dovecot.imap: '{{ __verify_apparmor_mail + __verify_apparmor_learn }}'
+      usr.lib.dovecot.managesieve: "{{ ['@{PROC}/@{pid}/stat r,'] + __verify_apparmor_mail }}"
+    # Every profile with its rules of converge, none without a file
+    __verify_apparmor_converge: >-
+      {%- set ns = namespace(rules={}) -%}
+      {%- for profile in __verify_apparmor_profiles -%}
+      {%- set ns.rules = ns.rules | combine({profile: __verify_apparmor_expected.get(profile)}) -%}
+      {%- endfor -%}
+      {{ ns.rules }}
 
   tasks:
     - name: Verify | Create the test directory
@@ -941,3 +1014,32 @@
             that:
               - __verify_failure is search('must use https:// for a controller on another host')
             fail_msg: '{{ __verify_failure }}'
+
+    #
+    # AppArmor
+    #
+
+    # The whole role ran with AppArmor and a stand-in profile on EL, with
+    # AppArmor and without Dovecot profiles on Debian (the mariadb scenario)
+    # and everywhere without AppArmor (postgresql)
+    - name: Verify | Find AppArmor rules for Dovecot
+      ansible.builtin.find:
+        paths: '{{ __verify_apparmor_dir }}'
+        patterns:
+          - 'usr.sbin.dovecot'
+          - 'usr.lib.dovecot.*'
+          - '.dovecot.*'
+        hidden: true
+      register: __verify_apparmor_found
+      when: not __verify_apparmor | bool
+
+    - name: Verify | Assert the role wrote no AppArmor rules
+      ansible.builtin.assert:
+        that:
+          - __verify_apparmor_found.files | length == 0
+        fail_msg: '{{ __verify_apparmor_found.files | map(attribute="path") | list | to_json }}'
+      when: not __verify_apparmor | bool
+
+    - name: Verify | Check the AppArmor rules
+      ansible.builtin.include_tasks: tasks/apparmor_verify.yml
+      when: __verify_apparmor | bool

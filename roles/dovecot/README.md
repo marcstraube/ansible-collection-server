@@ -508,6 +508,16 @@ plugin, SOGo folder sharing). Sending as the shared address is configured in
 the postfix role (`postfix_sender_permissions`), separate from the read
 rights.
 
+### AppArmor
+
+| Variable                   | Default | Description                                |
+| -------------------------- | ------- | ------------------------------------------ |
+| `dovecot_apparmor_enabled` | `true`  | Rules for the Dovecot profiles of AppArmor |
+
+Arch Linux enforces the Dovecot 2.3 profiles of the `apparmor` package,
+which do not cover Dovecot 2.4 with this configuration; the role adds the
+missing rules (see [AppArmor](#apparmor-1)). `false` removes them.
+
 ### Extra Configuration
 
 `dovecot_extra_config` is appended verbatim to `dovecot.conf` (Dovecot 2.4
@@ -529,9 +539,14 @@ dovecot_extra_config: |
 | ------------------- | ---------------------------------------------------------------- |
 | `dovecot`           | All Dovecot tasks                                                |
 | `dovecot:install`   | Repository (EL), packages, targeted update, version assertion    |
+| `dovecot:apparmor`  | AppArmor rules of the Dovecot profiles                           |
 | `dovecot:configure` | Mail user, SELinux, Sieve scripts, spam training, `dovecot.conf` |
 | `dovecot:service`   | Service state                                                    |
 | `dovecot:shared`    | Shared mailbox ACLs                                              |
+
+The AppArmor rules follow the configuration and must be in place before
+Dovecot starts, so `dovecot:install`, `dovecot:configure` and
+`dovecot:service` run them as well.
 
 ## Example Playbook
 
@@ -652,13 +667,42 @@ every sub-tag and pass with an unrelated tag, also on the database container,
 which has no Dovecot. A config version above the installed release fails the
 runs with `dovecot:configure`, `dovecot:service` and `dovecot:shared`.
 
+In the `mariadb` scenario every platform has AppArmor as far as a container
+can (the `apparmor` package, a stand-in for the directory that marks
+AppArmor as active, and an `apparmor_parser` that compiles without
+loading). On Arch Linux verify checks the rules of converge (master,
+config, lmtp with sendmail, imap with the spam training, managesieve; no
+others), that the profiles compile with them (with the child profiles
+`dovecot-lmtp//sendmail` and `dovecot-imap//rspamd-learn`), one reload per
+file, profiles that do not load (new rules that loaded stay, the others go
+back to their state before the run, removed rules stay removed) and the
+reload of every profile the next run repeats, the toggle off (the whole
+role) with a file of the administrator that stays, a file of the
+administrator the role needs (the run fails before any change), a host
+without AppArmor or without a profile, a disabled profile (no reload), a
+profile in force-complain (`-C`), check mode, and the rules that depend on
+the variables (mail root, TLS files, database socket and CA files, spam
+training off, no global Sieve scripts) with spaces, special characters and
+a symlink in the paths. Every step that breaks the instance restores it
+also when an assertion fails. Debian (no Dovecot profiles), EL
+(a stand-in profile) and the `postgresql` scenario get no rules. AppArmor
+does not enforce anything in the containers: whether the rules are
+sufficient is not part of the scenarios.
+
+**Manual acceptance check (AppArmor):** on a real Arch Linux host with the
+Dovecot profiles in complain mode (`aa-complain`), deliver mail, send a
+Sieve redirect and a vacation reply, and move a message into Junk and back
+out. The audit log must show no `ALLOWED` or `DENIED` events for the
+Dovecot profiles, the child profiles `dovecot-lmtp//sendmail` and
+`dovecot-imap//rspamd-learn` included.
+
 **AppArmor on the Molecule host:** containers of rootless podman run
 unconfined, so AppArmor profiles of the host attach to the Dovecot binaries
-inside them by path. The `apparmor` package of Arch Linux ships profiles for
-Dovecot 2.3 (`/etc/apparmor.d/usr.sbin.dovecot`,
-`usr.lib.dovecot.*`) that block Dovecot 2.4 in the containers (certificates
-outside the allowed paths, `doveadm reload`, global Sieve scripts, the pipe
-to curl, PostgreSQL over TCP). Put them into complain mode on the host
+inside them by path. The rules the role writes inside a container do not
+reach the profiles of the host: with the Dovecot profiles of the `apparmor`
+package enforced on the host, Dovecot 2.4 in the containers is blocked as
+on an Arch Linux host without them (see [AppArmor](#apparmor-1)). Put the
+profiles into complain mode on the host
 before running Molecule, e.g.
 `sudo aa-complain /etc/apparmor.d/usr.sbin.dovecot /etc/apparmor.d/usr.lib.dovecot.*`.
 
@@ -765,11 +809,99 @@ Settings such as `auth_verbose = yes` or `log_debug` go into
 
 ### AppArmor
 
-The `apparmor` package of Arch Linux ships profiles for Dovecot 2.3 that
-attach to the Dovecot binaries on a host with AppArmor enabled. They do not
-cover the files and connections of this configuration (see
-[Testing](#testing)); set them to complain mode or disable them on such a
-host. Debian 13 and EL ship no Dovecot profile.
+The `apparmor` package of Arch Linux ships profiles for Dovecot 2.3 in
+enforce mode (`/etc/apparmor.d/usr.sbin.dovecot`,
+`/etc/apparmor.d/usr.lib.dovecot.*`). With Dovecot 2.4 and this
+configuration they deny files the processes need: without rules of its own
+LMTP cannot read the global Sieve scripts, and every delivery is deferred
+(`451 4.2.0 Temporarily unable to access necessary Sieve scripts`). Every
+profile includes `/etc/apparmor.d/local/<profile>` if it exists. Where
+AppArmor is active and a profile exists, the role writes its rules to these
+files and reloads the profiles (`apparmor_parser -r`) before Dovecot starts
+or reloads; running processes get the new rules at once. Debian 13 ships the
+profiles as extra profiles only (`/usr/share/apparmor/extra-profiles`, not
+loaded); EL uses SELinux. Neither gets rules.
+
+Rules per file in `/etc/apparmor.d/local`:
+
+- `usr.sbin.dovecot` and `usr.lib.dovecot.config`: read
+  `dovecot_tls_cert_file`, `dovecot_tls_key_file` and the MariaDB
+  `dovecot_db_tls_ca_file`; doveconf in the master process and the config
+  process read them.
+- `usr.lib.dovecot.auth`: read `dovecot_db_tls_ca_file` (with
+  `dovecot_db_tls`; libpq reads the PostgreSQL CA here), read and write the
+  database socket (`dovecot_db_host` as a path).
+- `usr.lib.dovecot.lmtp`: read `/proc/<pid>/stat`; read
+  `/etc/dovecot/sieve/before.d` (with `dovecot_sieve_before`) and
+  `/etc/dovecot/sieve/after.d` (with `dovecot_sieve_after`); run `sendmail`
+  for Sieve redirects and vacation replies (`dovecot_submission_host`
+  empty, see below).
+- `usr.lib.dovecot.imap`: with `dovecot_rspamd_learn_enabled`, read the
+  IMAPSieve scripts and run the spam training programs in a profile of
+  their own (see below).
+- `usr.lib.dovecot.managesieve` (with `dovecot_managesieve_enabled`): read
+  `/proc/<pid>/stat`.
+- `usr.lib.dovecot.lmtp`, `imap`, `managesieve` and `pop3` (the last two
+  when enabled): read, write and lock `dovecot_mail_root`.
+
+The Dovecot processes switch to the mail user, after which `/proc/<pid>`
+belongs to root; the lmtp profile only allows the owner to read `stat`, the
+managesieve profile has no rule for it. The rule matches every pid, as the
+rules of the packaged imap and pop3 profiles do. The spam training programs
+(`/usr/local/lib/dovecot/sieve-pipe/rspamd-learn-*.sh`) run in the child
+profile `dovecot-imap//rspamd-learn`: the shell, `curl`, the password
+header file, `dovecot_rspamd_controller_ca_file` and the system trust
+store, but no mail; imap may stop them with `SIGTERM` or `SIGKILL`. curl
+ignores proxy variables (`--noproxy '*'`). `sendmail` runs in the child
+profile `dovecot-lmtp//sendmail`, the Postfix part of the sendmail profile
+of `usr.lib.dovecot.dovecot-lda`: the Postfix configuration, `postdrop`
+(run in the same profile), the maildrop queue and the pickup trigger. The
+rules for the mail root and the TLS files are always written, also where
+the packaged tunables and abstractions already allow the path. A database
+over TCP, the TCP listeners and the `dovecot_submission_host` connection
+need no rules (the profiles allow TCP).
+
+- The role owns the files it writes; each starts with
+  `# Managed by Ansible (marcstraube.server.dovecot)`. It writes those with
+  rules in the current configuration and removes its other files. A file
+  without that line belongs to you: the role leaves it alone, and fails
+  before any change when it needs the file for its rules. Delete such a
+  file; the role writes the rules Dovecot needs itself. Only rules that
+  belong in every Dovecot profile go into a file in
+  `/etc/apparmor.d/abstractions/dovecot-common.d/`, which the
+  internet-facing login processes (`imap-login`, `pop3-login`) include as
+  well.
+- Rules that the configuration no longer needs are removed and reloaded
+  before Dovecot gets its new configuration later in the same run, so the
+  running service may meet denials until then (e.g. a mail root moved
+  away from the old path).
+- `apparmor_parser -r` also loads a profile that is not loaded at that
+  moment (e.g. one removed with `apparmor_parser -R` but not disabled).
+- `dovecot_apparmor_enabled: false` (default `true`) removes its files and
+  reloads the profiles; on Arch Linux Dovecot then needs rules of your own.
+- When a profile does not load (e.g. a broken file of your own in
+  `abstractions/dovecot-common.d`), the run fails and names the profile:
+  profiles that loaded keep their new rules, the file of a profile that did
+  not load goes back to its state before the run (new rules are removed,
+  removed rules stay removed), so the next boot still loads it. A marker
+  (`/etc/apparmor.d/local/.dovecot.reload-pending`, which the parser skips),
+  set before the first file changes and cleared at the end of the run,
+  makes the next run reload every Dovecot profile after a failed or
+  interrupted run, also when the rules did not change in between.
+- A disabled profile (`/etc/apparmor.d/disable/<profile>`) is not reloaded:
+  the role writes or removes its file and reports that the rules apply once
+  the profile is enabled. A profile in `/etc/apparmor.d/force-complain` is
+  reloaded in complain mode (`apparmor_parser -r -C`).
+- The rules name the real paths: the role resolves symlinks (mail root,
+  TLS and CA files, socket directory) when it runs. A TLS or CA file that
+  is a symlink gets a rule for the configured path and one for its target
+  at the time of the run. Certificates of certbot need nothing more: a
+  renewal points `/etc/letsencrypt/live` to new files in
+  `/etc/letsencrypt/archive`, which the TLS abstractions of the profiles
+  allow. A symlink whose target moves elsewhere outside Ansible (another
+  ACME client, a hand-made rotation) needs a role run before Dovecot
+  reloads the certificate.
+- Other paths (e.g. in `dovecot_extra_config`) need rules of your own.
 
 ### Removing State
 

@@ -333,3 +333,8 @@
         state: started
         enabled: true
       when: ansible_facts['os_family'] == 'Debian'
+
+    # After every other role: the host has AppArmor for the role under test
+    - name: Prepare | Set up AppArmor
+      ansible.builtin.include_tasks: tasks/apparmor_host.yml
+      when: __molecule_apparmor | default(false) | bool
