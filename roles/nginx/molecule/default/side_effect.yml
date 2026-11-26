@@ -776,6 +776,84 @@
         state: absent
       when: __side_effect_config_test | bool
 
+# nginx resolves a relative include against the directory of nginx.conf.
+# The check of a changed nginx.conf must see the same includes as the
+# running server: the role runs without the converge settings, so
+# nginx.conf changes and is checked while conf.d holds a relative include.
+- name: Side Effect | Relative include
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Add a configuration with a relative include
+      ansible.builtin.copy:
+        content: "include fastcgi_params;\n"
+        dest: /etc/nginx/conf.d/zz-relative-include.conf
+        mode: '0644'
+
+    - name: Side Effect | Include nginx role with a changed nginx.conf  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        nginx_enabled: true
+
+    - name: Side Effect | Remove the configuration with the relative include
+      ansible.builtin.file:
+        path: /etc/nginx/conf.d/zz-relative-include.conf
+        state: absent
+
+    - name: Side Effect | Read nginx.conf before a rejected change
+      ansible.builtin.stat:
+        path: /etc/nginx/nginx.conf
+        checksum_algorithm: sha256
+      register: __side_effect_conf_before
+
+    # A rejected nginx.conf must fail the task, keep the old file and leave
+    # no copy of the check behind
+    - name: Side Effect | Run with an nginx.conf the check rejects
+      block:
+        - name: Side Effect | Include nginx role with an invalid directive  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            nginx_enabled: true
+            nginx_http_extra_config: 'not_a_directive on;'
+      rescue:
+        - name: Side Effect | Record the rejected change
+          ansible.builtin.set_fact:
+            __side_effect_rejected_task: '{{ ansible_failed_task.name | default("") }}'
+
+    - name: Side Effect | Read nginx.conf after the rejected change
+      ansible.builtin.stat:
+        path: /etc/nginx/nginx.conf
+        checksum_algorithm: sha256
+      register: __side_effect_conf_after
+
+    - name: Side Effect | Assert the check rejected the change
+      ansible.builtin.assert:
+        that:
+          - __side_effect_rejected_task | default('') == 'Configure | Deploy main nginx.conf'
+          - __side_effect_conf_after.stat.checksum == __side_effect_conf_before.stat.checksum
+        fail_msg: >-
+          The invalid nginx.conf was not rejected by the check (failed task:
+          {{ __side_effect_rejected_task | default('none') }})
+        success_msg: 'The check rejects an invalid nginx.conf and keeps the old one'
+
+    - name: Side Effect | Find leftover copies of the configuration check
+      ansible.builtin.find:
+        paths: /etc/nginx
+        patterns: '.nginx.conf.*'
+        hidden: true
+      register: __side_effect_validate_copies
+
+    - name: Side Effect | Assert the configuration check removed its copies
+      ansible.builtin.assert:
+        that: __side_effect_validate_copies.matched == 0
+        fail_msg: >-
+          The configuration check left copies behind:
+          {{ __side_effect_validate_copies.files | map(attribute='path') | join(', ') }}
+        success_msg: 'The configuration check removed its copies'
+
 # On Debian the packages are already updated; the role restarts the master
 # that still runs the replaced binary.
 - name: Side Effect | Update
