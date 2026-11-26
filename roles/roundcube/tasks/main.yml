@@ -431,6 +431,19 @@
     - roundcube
     - roundcube:install
 
+# Before the configuration, which may name new paths. Also runs with the
+# toggle off: it then removes the rules.
+- name: Main | Import AppArmor tasks
+  ansible.builtin.import_tasks: apparmor.yml
+  when:
+    - roundcube_enabled | bool
+    - ansible_facts['os_family'] != 'RedHat'
+  tags:
+    - roundcube
+    - roundcube:apparmor
+    - roundcube:install
+    - roundcube:configure
+
 - name: Main | Import configure tasks
   ansible.builtin.import_tasks: configure.yml
   when: roundcube_enabled | bool

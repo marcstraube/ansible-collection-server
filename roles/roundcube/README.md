@@ -85,6 +85,7 @@ See [defaults/main.yml](defaults/main.yml) for all available variables.
 | `roundcube_plugins`              | `managesieve`, `acl`, … | Bundled plugins; `password` is off         |
 | `roundcube_password_db_password` | `''`                    | **REQUIRED** with the password plugin      |
 | `roundcube_session_storage`      | `'db'`                  | `db` or `redis` (Valkey)                   |
+| `roundcube_apparmor_enabled`     | `true`                  | Rules for the php-fpm AppArmor profile     |
 
 Set the mail hosts to the names in the certificates of Dovecot and
 Postfix: the role verifies certificate and host name, and a certificate of
@@ -522,6 +523,7 @@ timer.
 | ----------------------- | ---------------------------------------------------------------- |
 | `roundcube`             | All Roundcube tasks                                              |
 | `roundcube:install`     | PHP checks, release, SELinux, schema, pre-update dump, `current` |
+| `roundcube:apparmor`    | AppArmor rules of the php-fpm profile                            |
 | `roundcube:configure`   | `config.inc.php`, log directory, logrotate drop-in               |
 | `roundcube:database`    | Database and owner (`roundcube_db_create`), SQLite file          |
 | `roundcube:maintenance` | Maintenance units and timer                                      |
@@ -628,6 +630,20 @@ a system directory, in `/etc/roundcube`, below `roundcube_install_dir` or in
 a shared root directory with mode `0755`, and a plugin the release does not
 ship. A check run with the default plugins
 needs no settings of the PostfixAdmin database.
+
+Where the test host has AppArmor (the `mariadb` scenario on Arch Linux and
+Debian: the packaged profile, a stand-in for the directory that marks
+AppArmor as active, and an `apparmor_parser` that compiles without loading),
+verify checks the rules of converge, that the profile compiles with them, the
+single reload, a profile that does not load (the run fails, the rules before
+the run stay, a new rules file is removed) with new rules and with the toggle
+off (the whole role), the reload the next run repeats in both cases, a host
+without AppArmor or without the profile, a disabled profile (no reload), a
+profile in force-complain (`-C`), check mode, and paths with spaces, special
+characters and a symlink.
+The `postgresql` scenario and EL (with a stand-in profile in `mariadb`) get no
+rules. AppArmor does not enforce anything in the containers: whether the
+rules are sufficient is not part of the scenarios.
 
 The `update` scenario installs the previous release (1.6, the LTS series)
 and updates it: the pre-update dump (with the rotation), the schema version
@@ -833,6 +849,61 @@ for a database over TCP, and `httpd_can_network_connect` for ManageSieve
 (port 4190 has no boolean of its own) and Valkey over TCP. The booleans
 apply to the whole `httpd_t` domain, which the web server and every PHP-FPM
 pool share.
+
+### AppArmor
+
+The `apparmor` package of Arch Linux ships the profile `php-fpm`
+(`/etc/apparmor.d/php-fpm`) in enforce mode. It grants PHP-FPM no files of
+an application: without rules of its own Roundcube answers with HTTP 403
+(`Unable to open primary script`). Debian ships the same profile in complain
+mode with the optional package `apparmor-profiles`. Where AppArmor is active
+and the profile exists, the role writes the rules of Roundcube to
+`/etc/apparmor.d/php-fpm.d/roundcube`, which the profile includes, and reloads
+the profile (`apparmor_parser -r`); running workers get the new rules at
+once. EL uses SELinux and gets no rules.
+
+| Path                                                                 | Access            |
+| -------------------------------------------------------------------- | ----------------- |
+| `roundcube_install_dir/releases`                                     | read              |
+| `temp` and `logs` of every release                                   | read, write, lock |
+| `/etc/roundcube/config.inc.php`                                      | read              |
+| `mime.types` of the system (`/etc`, `/etc/nginx`, …)                 | read              |
+| CA files (`roundcube_tls_ca_file`, `roundcube_*_tls_ca_file` in use) | read              |
+| `/var/log/roundcube` (with `roundcube_log_driver: 'file'`)           | read, write, lock |
+| Directory of `roundcube_db_path` (with SQLite)                       | read, write, lock |
+| Unix sockets of the databases and of Valkey                          | read, write       |
+
+PHP connects to a database or Valkey on the same host through its unix
+socket, which AppArmor treats as a file: kernels that mediate unix sockets
+deny the connection without the rule. Roundcube reads the first
+`mime.types` of the system it finds for the file types of attachments and
+logs a warning on every request when it may not read it.
+
+- `roundcube_apparmor_enabled: false` (default `true`) removes the file and
+  reloads the profile; on Arch Linux Roundcube then needs rules of your own.
+- When the profile does not load (e.g. a broken file of another
+  application in `/etc/apparmor.d/php-fpm.d`), the run fails and the file
+  goes back to its state before the run: the rules that loaded before stay,
+  new ones are removed, so the next boot still loads the profile. A marker
+  (`/etc/apparmor.d/php-fpm.d/.roundcube.reload-pending`) makes the next run
+  repeat the reload, also when the rules did not change in between or were
+  removed.
+- A disabled profile (`/etc/apparmor.d/disable/php-fpm`) is not reloaded:
+  the role writes or removes the file and reports that the rules apply once
+  the profile is enabled. A profile in `/etc/apparmor.d/force-complain` is
+  reloaded in complain mode (`apparmor_parser -r -C`).
+- The rules name the real paths: the role resolves symlinks (a CA file, a
+  directory above the installation) when it runs.
+- All PHP-FPM pools of the host share the profile, so the rules apply to
+  every pool. The pool of its own separates the applications: its user
+  alone may write `temp` and `logs` and read `config.inc.php` (see [PHP-FPM Pool](#php-fpm-pool)).
+- Session files, uploads and the socket of the pool belong to PHP-FPM
+  itself (`marcstraube.common.php`).
+- Other paths (e.g. `temp_dir` in `roundcube_extra_config`, programs a plugin
+  starts) need a file of your own in `/etc/apparmor.d/php-fpm.d`.
+- The Roundcube rules are not tested under an enforcing kernel: the test
+  containers only compile the profile. Denials show in the kernel log
+  (`journalctl -k -g apparmor`).
 
 ### Backup
 

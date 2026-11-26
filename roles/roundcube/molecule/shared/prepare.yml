@@ -372,3 +372,8 @@
     - name: Prepare | Include dovecot role  # noqa: role-name[path]
       ansible.builtin.include_role:
         name: '{{ playbook_dir }}/../../../dovecot'
+
+    # After every other role: the host has AppArmor for the role under test
+    - name: Prepare | Set up AppArmor
+      ansible.builtin.include_tasks: tasks/apparmor_host.yml
+      when: __molecule_apparmor | default(false) | bool

@@ -43,6 +43,12 @@ roundcube_php_cli: 'php'
 roundcube_php_fpm_user: ''
 roundcube_php_fpm_group: ''
 
+# Grant PHP-FPM the files of Roundcube in the packaged php-fpm AppArmor
+# profile (/etc/apparmor.d/php-fpm.d/roundcube). Only where AppArmor is
+# active and the profile exists: Arch Linux enforces it, and Roundcube
+# does not work there without the rules. false removes them.
+roundcube_apparmor_enabled: true
+
 #
 # Database
 #

@@ -41,6 +41,12 @@ postfixadmin_php_cli: 'php'
 postfixadmin_php_fpm_user: ''
 postfixadmin_php_fpm_group: ''
 
+# Grant PHP-FPM the files of PostfixAdmin in the packaged php-fpm AppArmor
+# profile (/etc/apparmor.d/php-fpm.d/postfixadmin). Only where AppArmor is
+# active and the profile exists: Arch Linux enforces it, and PostfixAdmin
+# does not work there without the rules. false removes them.
+postfixadmin_apparmor_enabled: true
+
 #
 # Database
 #

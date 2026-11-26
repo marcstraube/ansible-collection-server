@@ -37,6 +37,19 @@ __postfixadmin_backup_active: >-
 __postfixadmin_config_dir: '/etc/postfixadmin'
 __postfixadmin_config_file: '{{ __postfixadmin_config_dir }}/config.local.php'
 
+# The packaged php-fpm AppArmor profile and the rules of PostfixAdmin in the
+# directory it includes
+__postfixadmin_apparmor_profile: '/etc/apparmor.d/php-fpm'
+__postfixadmin_apparmor_rules: '/etc/apparmor.d/php-fpm.d/postfixadmin'
+# Marker of a reload that has not succeeded yet (the parser skips dot files)
+__postfixadmin_apparmor_pending: '/etc/apparmor.d/php-fpm.d/.postfixadmin.reload-pending'
+
+# Role paths in the rules (apparmor.yml resolves their symlinks)
+__postfixadmin_apparmor_paths: >-
+  {{ [postfixadmin_install_dir, __postfixadmin_config_file]
+     + ([postfixadmin_db_tls_ca_file] if postfixadmin_db_tls | bool else [])
+     + ([__postfixadmin_db_socket] if __postfixadmin_db_socket | length > 0 else []) }}
+
 # Helper that runs PostfixAdmin's own code for the schema, the accounts and
 # the SOGo view (request as JSON on stdin)
 __postfixadmin_helper_dir: '/usr/local/lib/postfixadmin-ansible'

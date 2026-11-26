@@ -1,0 +1,55 @@
+---
+# A host with AppArmor as far as a container can be one: the packaged
+# php-fpm profile, the directory that marks AppArmor as active (a tmpfs in
+# place of securityfs) and a wrapper around apparmor_parser that compiles
+# the profile without loading it. EL gets a stand-in profile: the role must
+# not touch it there.
+- name: Prepare | Install the php-fpm profile (Arch, Debian)
+  ansible.builtin.package:
+    name: "{{ ['apparmor', 'apparmor-profiles'] if ansible_facts['os_family'] == 'Debian' else ['apparmor'] }}"
+    state: present
+  retries: 3
+  delay: 5
+  when: ansible_facts['os_family'] != 'RedHat'
+
+- name: Prepare | Create a stand-in profile directory (EL)
+  ansible.builtin.file:
+    path: /etc/apparmor.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Prepare | Create a stand-in profile (EL)
+  ansible.builtin.copy:
+    content: "profile php-fpm /usr/sbin/php-fpm* {\n  include if exists <php-fpm.d>\n}\n"
+    dest: /etc/apparmor.d/php-fpm
+    owner: root
+    group: root
+    mode: '0644'
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Prepare | Mount a tmpfs in place of securityfs
+  ansible.posix.mount:
+    src: tmpfs
+    path: /sys/kernel/security
+    fstype: tmpfs
+    opts: mode=0755
+    state: ephemeral
+
+- name: Prepare | Mark AppArmor as active
+  ansible.builtin.file:
+    path: /sys/kernel/security/apparmor
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Prepare | Deploy the apparmor_parser wrapper
+  ansible.builtin.copy:
+    src: apparmor_parser.sh
+    dest: /usr/local/sbin/apparmor_parser
+    owner: root
+    group: root
+    mode: '0755'

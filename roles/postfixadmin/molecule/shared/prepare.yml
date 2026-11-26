@@ -185,3 +185,8 @@
       ansible.builtin.include_role:
         name: '{{ playbook_dir }}/../../../mariadb'
       when: postfixadmin_db_type == 'mariadb'
+
+    # After every other role: the host has AppArmor for the role under test
+    - name: Prepare | Set up AppArmor
+      ansible.builtin.include_tasks: tasks/apparmor_host.yml
+      when: __molecule_apparmor | default(false) | bool

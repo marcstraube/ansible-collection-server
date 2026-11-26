@@ -283,6 +283,42 @@ __roundcube_managesieve_enabled: "{{ 'managesieve' in roundcube_plugins }}"
 __roundcube_log_dir: '/var/log/roundcube'
 __roundcube_logrotate_file: '/etc/logrotate.d/roundcube'
 
+# The packaged php-fpm AppArmor profile and the rules of Roundcube in the
+# directory it includes
+__roundcube_apparmor_profile: '/etc/apparmor.d/php-fpm'
+__roundcube_apparmor_rules: '/etc/apparmor.d/php-fpm.d/roundcube'
+# Marker of a reload that has not succeeded yet (the parser skips dot files)
+__roundcube_apparmor_pending: '/etc/apparmor.d/php-fpm.d/.roundcube.reload-pending'
+
+# CA files PHP-FPM reads with these settings
+__roundcube_apparmor_ca_files: >-
+  {{ ([roundcube_tls_ca_file]
+      + ([roundcube_db_tls_ca_file] if roundcube_db_tls | bool else [])
+      + ([roundcube_password_db_tls_ca_file]
+         if __roundcube_password_enabled | bool and roundcube_password_db_tls | bool else [])
+      + ([roundcube_redis_tls_ca_file]
+         if roundcube_session_storage == 'redis' and roundcube_redis_tls | bool else []))
+     | select('ne', '') | unique | list }}
+
+# Unix sockets PHP-FPM connects to with these settings; with PostgreSQL
+# 'path' is the socket directory and the socket is named after the port
+__roundcube_apparmor_sockets: >-
+  {{ ([{'path': __roundcube_db_socket, 'type': roundcube_db_type, 'port': roundcube_db_port}]
+      if __roundcube_db_socket | length > 0 else [])
+     + ([{'path': __roundcube_password_db_socket, 'type': roundcube_password_db_type,
+          'port': roundcube_password_db_port}]
+        if __roundcube_password_enabled | bool and __roundcube_password_db_socket | length > 0 else [])
+     + ([{'path': roundcube_redis_host, 'type': 'valkey', 'port': ''}]
+        if roundcube_session_storage == 'redis' and roundcube_redis_host is match('/') else [])
+     | unique | list }}
+
+# Role paths in the rules (apparmor.yml resolves their symlinks)
+__roundcube_apparmor_paths: >-
+  {{ [__roundcube_releases_dir, __roundcube_config_file, __roundcube_log_dir]
+     + ([roundcube_db_path | dirname] if roundcube_db_type == 'sqlite' else [])
+     + __roundcube_apparmor_ca_files
+     + __roundcube_apparmor_sockets | map(attribute='path') | list }}
+
 # Directories that are never taken over as the SQLite or backup directory
 __roundcube_system_dirs:
   - ''

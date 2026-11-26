@@ -1,0 +1,415 @@
+---
+# The AppArmor rules on the host of apparmor_host.yml (Arch, Debian): the
+# rules of converge, the compiled profile, a profile that does not load
+# (new rules and a removal, each with the reload repeated by the next run),
+# the toggle (the whole role), a host without AppArmor or without the
+# profile, a disabled profile and one in force-complain, check mode and
+# paths that need quoting. The variants run tasks/apparmor.yml alone. Ends
+# with the rules and the log of converge in place.
+- name: Verify | Read the AppArmor rules
+  ansible.builtin.slurp:
+    src: '{{ __verify_apparmor_rules }}'
+  register: __verify_apparmor_raw
+
+- name: Verify | Stat the AppArmor rules
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  loop:
+    - '{{ __verify_apparmor_rules }}'
+    - '{{ __verify_apparmor_rules | dirname }}'
+  register: __verify_apparmor_stats
+
+- name: Verify | Read the calls of apparmor_parser
+  ansible.builtin.slurp:
+    src: '{{ __verify_apparmor_log }}'
+  register: __verify_apparmor_converge_log
+
+# One call of converge: the check runs and idempotence load nothing
+- name: Verify | Assert the AppArmor rules of converge
+  ansible.builtin.assert:
+    that:
+      - __verify_lines == __verify_apparmor_expected
+      - __verify_apparmor_stats.results | map(attribute='stat.pw_name') | unique == ['root']
+      - __verify_apparmor_stats.results | map(attribute='stat.mode') == ['0644', '0755']
+      - (__verify_apparmor_converge_log.content | b64decode).splitlines() == [__verify_apparmor_reload]
+    fail_msg: '{{ __verify_lines }} {{ __verify_apparmor_converge_log.content | b64decode }}'
+  vars:
+    __verify_lines: >-
+      {{ (__verify_apparmor_raw.content | b64decode).splitlines()
+         | reject('match', '#') | select | list }}
+
+# The rules are part of the profile and compile
+- name: Verify | Compile the php-fpm profile
+  ansible.builtin.command:
+    argv: [apparmor_parser, '--preprocess', /etc/apparmor.d/php-fpm]
+  register: __verify_apparmor_compiled
+  changed_when: false
+
+- name: Verify | Assert the rules are part of the profile
+  ansible.builtin.assert:
+    that:
+      - __verify_apparmor_compiled.stdout is search('"/var/www/roundcube/releases/[*]/{temp,logs}/[*][*]" rwk,')
+
+#
+# A profile that does not load: rules of another application that do not
+# compile
+#
+
+- name: Verify | Break the php-fpm profile
+  ansible.builtin.copy:
+    content: "no AppArmor rule\n"
+    dest: '{{ __verify_apparmor_broken }}'
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Verify | Run the AppArmor tasks with new rules and the broken profile
+  block:
+    - name: Verify | Include the AppArmor tasks with another installation  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: apparmor.yml
+      vars:
+        roundcube_install_dir: '/srv/molecule-other'
+
+    - name: Verify | Fail when the profile was accepted
+      ansible.builtin.fail:
+        msg: 'The role accepted a profile that does not load'
+  rescue:
+    - name: Verify | Assert the parser error was reported
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_result.msg is search('did not load /etc/apparmor.d/php-fpm')
+          - ansible_failed_result.msg is search('molecule-broken')
+          - ansible_failed_result.msg is search('is back at its state before the run')
+        fail_msg: '{{ ansible_failed_result.msg }}'
+
+- name: Verify | Read the rules after the failed reload
+  ansible.builtin.slurp:
+    src: '{{ __verify_apparmor_rules }}'
+  register: __verify_apparmor_kept
+
+- name: Verify | Stat the pending reload after the failure
+  ansible.builtin.stat:
+    path: '{{ __verify_apparmor_pending }}'
+  register: __verify_apparmor_pending_failed
+
+# The rules that loaded before stay
+- name: Verify | Assert the rules of converge are kept and the reload is pending
+  ansible.builtin.assert:
+    that:
+      - __verify_apparmor_kept.content == __verify_apparmor_raw.content
+      - __verify_apparmor_pending_failed.stat.exists
+
+- name: Verify | Repair the php-fpm profile
+  ansible.builtin.file:
+    path: '{{ __verify_apparmor_broken }}'
+    state: absent
+
+# The rules are unchanged now; the pending reload runs all the same
+- name: Verify | Include the AppArmor tasks after the repair  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: apparmor.yml
+
+- name: Verify | Check the repeated reload
+  ansible.builtin.include_tasks: apparmor_reloaded.yml
+  vars:
+    __verify_apparmor_case: 'new rules'
+
+#
+# Toggle off, first with the broken profile
+#
+
+- name: Verify | Break the php-fpm profile again
+  ansible.builtin.copy:
+    content: "no AppArmor rule\n"
+    dest: '{{ __verify_apparmor_broken }}'
+    owner: root
+    group: root
+    mode: '0644'
+
+# The whole role: the import in main.yml has to run with the toggle off
+- name: Verify | Run the role with the AppArmor rules off and the broken profile
+  block:
+    - name: Verify | Include roundcube role with the AppArmor rules off  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        roundcube_apparmor_enabled: false
+
+    - name: Verify | Fail when the profile was accepted without the rules
+      ansible.builtin.fail:
+        msg: 'The role accepted a profile that does not load'
+  rescue:
+    - name: Verify | Assert the removed rules were reported
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_result.msg is search('stays removed')
+        fail_msg: '{{ ansible_failed_result.msg }}'
+
+- name: Verify | Stat the rules and the pending reload after the removal
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  loop:
+    - '{{ __verify_apparmor_rules }}'
+    - '{{ __verify_apparmor_pending }}'
+  register: __verify_apparmor_off
+
+- name: Verify | Assert the rules are removed and the reload is pending
+  ansible.builtin.assert:
+    that:
+      - __verify_apparmor_off.results | map(attribute='stat.exists') == [false, true]
+
+- name: Verify | Repair the php-fpm profile once more
+  ansible.builtin.file:
+    path: '{{ __verify_apparmor_broken }}'
+    state: absent
+
+# Nothing left to remove; the pending reload runs all the same
+- name: Verify | Include the AppArmor tasks with the rules off  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: apparmor.yml
+  vars:
+    roundcube_apparmor_enabled: false
+
+- name: Verify | Check the reload after the removal
+  ansible.builtin.include_tasks: apparmor_reloaded.yml
+  vars:
+    __verify_apparmor_case: 'removal'
+
+#
+# No rules without AppArmor (/sys/kernel/security/apparmor) or without
+# the profile
+#
+
+- name: Verify | Run the AppArmor tasks on a host without them
+  ansible.builtin.include_tasks: apparmor_missing.yml
+  loop:
+    - /sys/kernel/security/apparmor
+    - /etc/apparmor.d/php-fpm
+  loop_control:
+    loop_var: __verify_apparmor_missing
+
+#
+# Disabled profile and force-complain
+#
+
+- name: Verify | Read the calls of apparmor_parser before the disabled profile
+  ansible.builtin.slurp:
+    src: '{{ __verify_apparmor_log }}'
+  register: __verify_apparmor_before_disabled
+
+- name: Verify | Disable the php-fpm profile
+  ansible.builtin.file:
+    src: /etc/apparmor.d/php-fpm
+    dest: /etc/apparmor.d/disable/php-fpm
+    state: link
+
+- name: Verify | Include the AppArmor tasks with the disabled profile  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: apparmor.yml
+
+- name: Verify | Read the calls of apparmor_parser with the disabled profile
+  ansible.builtin.slurp:
+    src: '{{ __verify_apparmor_log }}'
+  register: __verify_apparmor_after_disabled
+
+- name: Verify | Stat the rules and the pending reload with the disabled profile
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  loop:
+    - '{{ __verify_apparmor_rules }}'
+    - '{{ __verify_apparmor_pending }}'
+  register: __verify_apparmor_disabled
+
+# The rules are written for a later start of the profile, nothing loads
+- name: Verify | Assert the rules were written without a reload
+  ansible.builtin.assert:
+    that:
+      - __verify_apparmor_disabled.results | map(attribute='stat.exists') == [true, false]
+      - __verify_apparmor_after_disabled.content == __verify_apparmor_before_disabled.content
+      - __roundcube_apparmor_deployed is changed
+
+- name: Verify | Enable the php-fpm profile
+  ansible.builtin.file:
+    path: /etc/apparmor.d/disable/php-fpm
+    state: absent
+
+- name: Verify | Create the force-complain directory
+  ansible.builtin.file:
+    path: /etc/apparmor.d/force-complain
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Verify | Force the php-fpm profile into complain mode
+  ansible.builtin.file:
+    src: /etc/apparmor.d/php-fpm
+    dest: /etc/apparmor.d/force-complain/php-fpm
+    state: link
+
+# Removed first, so the run writes the rules again and reloads
+- name: Verify | Remove the AppArmor rules before force-complain
+  ansible.builtin.file:
+    path: '{{ __verify_apparmor_rules }}'
+    state: absent
+
+- name: Verify | Include the AppArmor tasks with force-complain  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: apparmor.yml
+
+- name: Verify | Read the calls of apparmor_parser with force-complain
+  ansible.builtin.slurp:
+    src: '{{ __verify_apparmor_log }}'
+  register: __verify_apparmor_complain
+
+- name: Verify | Assert the profile was reloaded in complain mode
+  ansible.builtin.assert:
+    that:
+      - (__verify_apparmor_complain.content | b64decode).splitlines() | last == '-r -C /etc/apparmor.d/php-fpm'
+    fail_msg: '{{ __verify_apparmor_complain.content | b64decode }}'
+
+- name: Verify | Leave force-complain
+  ansible.builtin.file:
+    path: /etc/apparmor.d/force-complain/php-fpm
+    state: absent
+
+#
+# Check mode reports the rules without writing them
+#
+
+- name: Verify | Remove the AppArmor rules before check mode
+  ansible.builtin.file:
+    path: '{{ __verify_apparmor_rules }}'
+    state: absent
+
+# The check mode flag of main.yml, which tasks_from does not run
+- name: Verify | Include the AppArmor tasks in check mode  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: apparmor.yml
+    apply:
+      check_mode: true
+  vars:
+    __roundcube_check_mode: true
+
+- name: Verify | Stat the rules after check mode
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  loop:
+    - '{{ __verify_apparmor_rules }}'
+    - '{{ __verify_apparmor_pending }}'
+  register: __verify_apparmor_check
+
+- name: Verify | Assert check mode reported the rules
+  ansible.builtin.assert:
+    that:
+      - __roundcube_apparmor_deployed is changed
+      - __verify_apparmor_check.results | map(attribute='stat.exists') == [false, false]
+
+# A host without the rules directory: check mode does not fail on it
+- name: Verify | Move the rules directory away before check mode
+  ansible.builtin.command:
+    argv: [mv, '{{ __verify_apparmor_rules | dirname }}', '{{ __verify_apparmor_rules | dirname }}.verify']
+  changed_when: true
+
+- name: Verify | Include the AppArmor tasks in check mode without the directory  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: apparmor.yml
+    apply:
+      check_mode: true
+  vars:
+    __roundcube_check_mode: true
+
+- name: Verify | Stat the rules directory after check mode
+  ansible.builtin.stat:
+    path: '{{ __verify_apparmor_rules | dirname }}'
+  register: __verify_apparmor_check_dir
+
+- name: Verify | Move the rules directory back
+  ansible.builtin.command:
+    argv: [mv, '{{ __verify_apparmor_rules | dirname }}.verify', '{{ __verify_apparmor_rules | dirname }}']
+  changed_when: true
+
+- name: Verify | Assert check mode reported the directory without failing
+  ansible.builtin.assert:
+    that:
+      - __roundcube_apparmor_dir is changed
+      - __roundcube_apparmor_deployed is skipped
+      - not __verify_apparmor_check_dir.stat.exists
+
+#
+# Paths with a space, characters with a meaning in AppArmor rules and a
+# symlink: the parser accepts the rules, and they name the real path
+#
+
+- name: Verify | Create a symlink in the path of the installation
+  ansible.builtin.file:
+    src: /srv
+    dest: /var/molecule-apparmor
+    state: link
+
+- name: Verify | Include the AppArmor tasks with unusual paths  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: apparmor.yml
+  vars:
+    roundcube_install_dir: '/var/molecule-apparmor/round cube{a}*?[b]^@c"d'
+    roundcube_db_type: 'sqlite'
+    roundcube_db_path: '/var/lib/round cube/roundcube.db'
+    roundcube_db_tls: false
+    roundcube_log_driver: 'file'
+    roundcube_password_db_type: 'postgresql'  # pragma: allowlist secret
+    roundcube_password_db_host: '/run/postgresql'
+    roundcube_password_db_port: 5433
+    roundcube_session_storage: 'redis'
+    roundcube_redis_host: '/run/valkey/valkey.sock'
+
+- name: Verify | Read the rules of the unusual paths
+  ansible.builtin.slurp:
+    src: '{{ __verify_apparmor_rules }}'
+  register: __verify_apparmor_unusual
+
+- name: Verify | Assert the rules of the unusual paths
+  ansible.builtin.assert:
+    that:
+      - item in (__verify_apparmor_unusual.content | b64decode).splitlines()
+    fail_msg: '{{ __verify_apparmor_unusual.content | b64decode }}'
+  loop:
+    - '"/srv/round cube\{a\}\*\?\[b\]\^@c\"d/releases/**" r,'
+    - '"/srv/round cube\{a\}\*\?\[b\]\^@c\"d/releases/*/{temp,logs}/**" rwk,'
+    - '"/var/lib/round cube/" rw,'
+    - '"/var/lib/round cube/**" rwk,'
+    - '"/var/log/roundcube/" rw,'
+    - '"/var/log/roundcube/**" rwk,'
+    - '"/run/postgresql/.s.PGSQL.5433" rw,'
+    - '"/run/valkey/valkey.sock" rw,'
+
+- name: Verify | Include the AppArmor tasks with the rules of converge  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: apparmor.yml
+
+- name: Verify | Read the restored AppArmor rules
+  ansible.builtin.slurp:
+    src: '{{ __verify_apparmor_rules }}'
+  register: __verify_apparmor_restored
+
+- name: Verify | Assert the rules of converge are back
+  ansible.builtin.assert:
+    that:
+      - __verify_apparmor_restored.content == __verify_apparmor_raw.content
+
+- name: Verify | Restore the log of converge
+  ansible.builtin.copy:
+    content: '{{ __verify_apparmor_converge_log.content | b64decode }}'
+    dest: '{{ __verify_apparmor_log }}'
+    owner: root
+    group: root
+    mode: '0644'
