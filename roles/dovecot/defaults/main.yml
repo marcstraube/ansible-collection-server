@@ -340,6 +340,17 @@ dovecot_shared_mailboxes: []
 #     state: 'absent'
 
 #
+# AppArmor
+#
+
+# Rules for the Dovecot profiles of the apparmor package, written to their
+# local overrides (/etc/apparmor.d/local/usr.sbin.dovecot and
+# usr.lib.dovecot.*). Only where AppArmor is active and the profiles exist:
+# Arch Linux enforces them, and Dovecot does not deliver mail there without
+# the rules. false removes them.
+dovecot_apparmor_enabled: true
+
+#
 # Extra Configuration
 #
 

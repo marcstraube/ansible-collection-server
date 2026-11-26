@@ -1,0 +1,19 @@
+---
+# After a failed reload (__verify_apparmor_case), the next run with the
+# rules of converge reloads every Dovecot profile and clears the marker.
+- name: Verify | Read the AppArmor rules after the repair
+  ansible.builtin.include_tasks: apparmor_rules.yml
+
+- name: Verify | Stat the pending reload after the repair
+  ansible.builtin.stat:
+    path: '{{ __verify_apparmor_pending }}'
+  register: __verify_apparmor_repaired
+
+- name: Verify | Assert the pending reload ran for every profile
+  ansible.builtin.assert:
+    that:
+      - __verify_apparmor_rules == __verify_apparmor_converge
+      - __verify_apparmor_calls[-(__verify_apparmor_profiles | length):]
+        == __verify_apparmor_profiles | map('regex_replace', '^', '-r /etc/apparmor.d/') | list
+      - not __verify_apparmor_repaired.stat.exists
+    fail_msg: '{{ __verify_apparmor_case }}: {{ __verify_apparmor_rules }} {{ __verify_apparmor_calls }}'

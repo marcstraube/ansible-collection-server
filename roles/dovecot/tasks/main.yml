@@ -545,6 +545,23 @@
     - dovecot
     - dovecot:install
 
+# Before the configure and service tasks, which start or reload Dovecot
+# (directly or through the handler): a new host delivers mail after its
+# first run. The rules follow the variables of the configuration, and the
+# service needs them, so every phase that changes or starts it runs them.
+# Also runs with the toggle off: it then removes the rules.
+- name: Main | Import AppArmor tasks
+  ansible.builtin.import_tasks: apparmor.yml
+  when:
+    - dovecot_enabled | bool
+    - ansible_facts['os_family'] != 'RedHat'
+  tags:
+    - dovecot
+    - dovecot:apparmor
+    - dovecot:install
+    - dovecot:configure
+    - dovecot:service
+
 - name: Main | Import configure tasks
   ansible.builtin.import_tasks: configure.yml
   when: dovecot_enabled | bool
