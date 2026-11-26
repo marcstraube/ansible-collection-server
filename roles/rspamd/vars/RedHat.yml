@@ -1,0 +1,20 @@
+---
+# rspamd from the stable repository of the rspamd project (EL has no
+# package); address and signing key are public defaults
+# (rspamd_repo_baseurl, rspamd_repo_gpgkey)
+__rspamd_repo_name: 'rspamd'
+__rspamd_repo_file: '/etc/yum.repos.d/{{ __rspamd_repo_name }}.repo'
+
+# Dependencies of the upstream packages that only EPEL provides (EL 10:
+# only libsodium)
+__rspamd_epel_packages:
+  - 'libsodium'
+
+# Service user of the upstream package
+__rspamd_user: '_rspamd'
+__rspamd_group: '_rspamd'
+
+# Shell of the service user, should the role have to create it
+__rspamd_nologin_shell: '/sbin/nologin'
+
+__rspamd_rspamadm: '/usr/bin/rspamadm'

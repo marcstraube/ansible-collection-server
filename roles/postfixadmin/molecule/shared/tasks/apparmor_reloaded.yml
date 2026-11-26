@@ -1,0 +1,22 @@
+---
+# After a failed reload (__verify_apparmor_case), the next run reloads the
+# profile and clears the marker, although the rules did not change.
+- name: Verify | Read the calls of apparmor_parser after the repair
+  ansible.builtin.slurp:
+    src: '{{ __verify_apparmor_log }}'
+  register: __verify_apparmor_repaired_log
+
+- name: Verify | Stat the pending reload after the repair
+  ansible.builtin.stat:
+    path: '{{ __verify_apparmor_pending }}'
+  register: __verify_apparmor_repaired
+
+- name: Verify | Assert the pending reload ran
+  ansible.builtin.assert:
+    that:
+      - __postfixadmin_apparmor_deployed is not changed
+      - __postfixadmin_apparmor_removed is not changed
+      - __postfixadmin_apparmor_reload is changed
+      - (__verify_apparmor_repaired_log.content | b64decode).splitlines() | last == __verify_apparmor_reload
+      - not __verify_apparmor_repaired.stat.exists
+    fail_msg: '{{ __verify_apparmor_case }}: {{ __verify_apparmor_repaired_log.content | b64decode }}'

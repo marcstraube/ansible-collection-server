@@ -1,0 +1,368 @@
+---
+#
+# Role Control
+#
+
+# Enable the dovecot role
+dovecot_enabled: false
+
+# Enable and start the Dovecot service
+dovecot_service_enabled: true
+
+#
+# Package Updates
+#
+
+# State of the Dovecot packages:
+#   'present' installs missing packages and never updates (default).
+#   'latest'  updates the installed Dovecot packages in one transaction and
+#             restarts the Dovecot service while it still runs the replaced
+#             binary.
+# Pass 'latest' for a targeted update instead of setting it in inventory:
+#   --tags dovecot -e dovecot_packages_state=latest
+# Ignored on Arch Linux: updating single packages is a partial upgrade there,
+# Dovecot updates with the full system upgrade.
+dovecot_packages_state: 'present'
+
+# Lowest acceptable version, checked before the update (nothing changes when
+# the repository does not offer it yet) and again after it. Meant to be passed
+# with the update command to require a fix. Either an upstream version, which
+# accepts every distribution release of it:
+#   -e dovecot_packages_minimum=2.4.1
+# or the full distribution version, which also covers fixes the distribution
+# backports without a new upstream version:
+#   -e dovecot_packages_minimum=1:2.4.1+dfsg1-6+deb13u7
+# A mapping per platform (keys '<os_family>-<major>' or '<os_family>') covers
+# mixed hosts in one run; a host without a matching key fails:
+#   -e @dovecot-minimum.yml
+dovecot_packages_minimum: ''
+
+#
+# Repository (EL)
+#
+# Dovecot CE 2.4 repository of upstream that the role sets up on EL (AppStream
+# ships Dovecot 2.3); Debian and Arch Linux install from the distribution and
+# ignore both. Point them at an internal mirror (Satellite, Pulp) for hosts
+# without internet access. $releasever and $basearch stay literal, dnf
+# expands them.
+
+# dovecot_repo_baseurl
+dovecot_repo_baseurl: 'https://repo.dovecot.org/ce-2.4-latest/rhel/$releasever/RPMS/$basearch'
+
+# dovecot_repo_gpgkey
+dovecot_repo_gpgkey: 'https://repo.dovecot.org/DOVECOT-REPO-GPG-2.4'
+
+#
+# Versions
+#
+# Dovecot 2.4 reads the configuration and writes the storage in the format of
+# these versions. 2.4.0, the lowest 2.4 release, behaves alike on Debian 13
+# (2.4.1) and the newer releases of Arch Linux and the Dovecot CE repository
+# on EL. Dovecot refuses a version above the installed one; the role asserts
+# that. Raising dovecot_storage_version lets Dovecot write formats an older
+# release cannot read, so a later downgrade below it fails (see README).
+
+# dovecot_config_version
+dovecot_config_version: '2.4.0'
+
+# dovecot_storage_version
+dovecot_storage_version: '2.4.0'
+
+#
+# Mail Storage
+#
+# All mailboxes belong to one virtual mail user, created by the role (no
+# platform ships one). A mailbox lives in dovecot_mail_root/<maildir>/Maildir,
+# where <maildir> is the path PostfixAdmin stores for the mailbox (e.g.
+# example.com/alice/); the directory above Maildir is the home of the user
+# (Sieve scripts, shared mailbox indexes).
+
+# Virtual mail user and group with their IDs
+dovecot_vmail_user: 'vmail'
+dovecot_vmail_group: 'vmail'
+dovecot_vmail_uid: 5000
+dovecot_vmail_gid: 5000
+
+# Root directory of all mailboxes, owned by the virtual mail user
+dovecot_mail_root: '/var/vmail'
+
+#
+# Database
+#
+# Connection settings of the PostfixAdmin database the users come from. The
+# database server may run on another host and does not have to be managed by
+# Ansible. The user needs SELECT on the tables 'mailbox' and 'domain' only
+# (postfixadmin_db_readers of marcstraube.server.postfixadmin can create it).
+
+# Database type: 'postgresql' or 'mariadb'
+dovecot_db_type: 'postgresql'
+
+# Host name, IP address or the path of a unix socket (PostgreSQL: the socket
+# directory, MariaDB: the socket file). 'localhost' with MariaDB connects
+# through the socket the client library was built with.
+dovecot_db_host: 'localhost'
+
+# Port; PostgreSQL also uses it for a unix socket (the socket file is named
+# after it)
+dovecot_db_port: "{{ (dovecot_db_type == 'mariadb') | ternary(3306, 5432) }}"
+
+# Database name, user and password (REQUIRED). The password is written to a
+# file of its own that only root and Dovecot can read.
+dovecot_db_name: 'postfixadmin'
+dovecot_db_user: 'dovecot'
+dovecot_db_password: ''
+
+# Connect with TLS. PostgreSQL verifies the server certificate against
+# dovecot_db_tls_ca_file and the host name (sslmode verify-full). MariaDB
+# encrypts only: the MySQL driver of Dovecot 2.4 does not verify the server
+# certificate (see README), so a MariaDB server on another host belongs on
+# a private network or WireGuard. The CA file is required with TLS; use the
+# system bundle for a publicly signed certificate. Not possible through a
+# unix socket. Without TLS the connection is unencrypted: only for a
+# private network or WireGuard.
+dovecot_db_tls: false
+dovecot_db_tls_ca_file: ''
+
+# SQL queries replacing the role's defaults ('' keeps them). The defaults read
+# active mailboxes of active domains from the PostfixAdmin schema; the userdb
+# query returns home, uid and gid (and the quota with dovecot_quota_enabled),
+# see README. %{user} is the login name, quoted by Dovecot.
+dovecot_sql_passdb_query: ''
+dovecot_sql_userdb_query: ''
+
+#
+# Password Scheme
+#
+
+# Default scheme of password hashes without a {SCHEME} prefix: 'ARGON2ID',
+# 'BLF-CRYPT' or 'SHA512-CRYPT'. PostfixAdmin stores every hash with its
+# prefix, which Dovecot reads; this setting only matters for hashes without
+# one. Keep it equal to postfixadmin_password_scheme.
+dovecot_password_scheme: 'ARGON2ID'
+
+# Memory limit of the auth worker processes, which verify the password hashes.
+# One ARGON2ID verification with the PHP defaults of PostfixAdmin needs about
+# 64 MB.
+dovecot_auth_worker_vsz_limit: '256M'
+
+#
+# Protocols
+#
+
+# Addresses IMAP, POP3 and ManageSieve listen on (Dovecot 'listen' syntax;
+# '*, ::' = all IPv4 and IPv6 interfaces)
+dovecot_listen: '*, ::'
+
+# IMAP with STARTTLS on port 143, besides implicit TLS on 993. A login is
+# only accepted after STARTTLS.
+dovecot_imap_starttls_enabled: false
+
+# POP3 with implicit TLS on 995 (installs the POP3 package)
+dovecot_pop3_enabled: false
+
+# ManageSieve on 4190 (STARTTLS), used by SOGo and the Roundcube managesieve
+# plugin for filters and out-of-office replies
+dovecot_managesieve_enabled: false
+
+#
+# Postfix Interfaces
+#
+# Postfix delivers over LMTP and authenticates SMTP clients through the
+# Dovecot auth service. Neither protocol is encrypted: a TCP listener belongs
+# on a private network or WireGuard (see README).
+
+# Postfix runs on this host: unix listeners
+# /var/spool/postfix/private/dovecot-lmtp (postfix:postfix 0600) and
+# /var/spool/postfix/private/auth (postfix:postfix 0660). The role fails
+# early when /var/spool/postfix/private does not exist (Postfix not
+# installed). false for a Postfix on another host.
+dovecot_postfix_local: true
+
+# TCP listeners for a Postfix on another host as '<address>:<port>' ('' =
+# off), e.g. '192.0.2.10:24' or '[2001:db8::10]:24'. The address is
+# required; a wildcard address is refused.
+# LMTP (usually port 24)
+dovecot_lmtp_listen: ''
+
+# SASL authentication (usually port 12345)
+dovecot_auth_listen: ''
+
+#
+# Sieve Outgoing Mail
+#
+# Redirects and vacation replies of Sieve go through the local sendmail when
+# Postfix runs on this host. For a Postfix on another host they go to
+# dovecot_submission_host on port 25: Dovecot 2.4 has no SMTP AUTH for this
+# connection, the Postfix role accepts it by this host's address
+# (postfix_mynetworks). Redirected mail keeps the local recipient as envelope
+# sender (sieve_redirect_envelope_from = orig_recipient), so it passes SPF.
+
+# '<host>:25' of the Postfix on another host ('' = local sendmail)
+dovecot_submission_host: ''
+
+# TLS towards dovecot_submission_host: 'starttls', 'smtps' or 'no'. The
+# certificate is verified against the system trust store (Dovecot's default
+# ssl_client_require_valid_cert = yes). 'no' sends the
+# redirected mail and the vacation replies unencrypted: only towards a
+# Postfix on a private network or WireGuard address.
+dovecot_submission_ssl: 'starttls'
+
+#
+# TLS
+#
+# IMAP, POP3 and ManageSieve require TLS; no authentication without it. The
+# service reloads on every certificate change notified in the play (handler
+# topic 'Reload cert services' of marcstraube.common.pki).
+
+# Server certificate (with the intermediate certificates appended) and
+# private key, PEM (REQUIRED)
+dovecot_tls_cert_file: ''
+dovecot_tls_key_file: ''
+
+# Lowest accepted TLS version
+dovecot_tls_min_protocol: 'TLSv1.2'
+
+#
+# Mailboxes
+#
+
+# Folders of every user with their special-use flag. 'auto': 'subscribe'
+# creates and subscribes them at the first login, 'create' only creates
+# them, 'no' leaves it to the client.
+dovecot_mailboxes:
+  - name: 'Drafts'
+    special_use: '\Drafts'
+    auto: 'subscribe'
+  - name: 'Sent'
+    special_use: '\Sent'
+    auto: 'subscribe'
+  - name: 'Junk'
+    special_use: '\Junk'
+    auto: 'subscribe'
+  - name: 'Trash'
+    special_use: '\Trash'
+    auto: 'subscribe'
+  - name: 'Archive'
+    special_use: '\Archive'
+    auto: 'subscribe'
+
+#
+# Quota
+#
+
+# Per-mailbox quota from the PostfixAdmin schema (mailbox.quota in bytes;
+# 0 = unlimited)
+dovecot_quota_enabled: true
+
+# quota-status policy service for Postfix as '<address>:<port>' ('' = off,
+# usually port 12340): Postfix rejects mail for a full mailbox at SMTP time.
+# The protocol is not encrypted; only for a private network or WireGuard.
+# Needs dovecot_quota_enabled.
+dovecot_quota_status_listen: ''
+
+#
+# Sieve
+#
+# Global Sieve scripts executed before and after the personal script of the
+# user, in list order. Each entry has a 'name' (letters, digits, '-', '_')
+# and the script 'content'. A script that files a message and stops ends the
+# sequence: the personal script does not run for it.
+
+# Scripts before the user's script. The default files mail rspamd marked as
+# spam (header 'X-Spam: Yes') into Junk.
+dovecot_sieve_before:
+  - name: 'spam-to-junk'
+    content: |
+      require ["fileinto"];
+      if header :is "X-Spam" "Yes" {
+        fileinto "Junk";
+        stop;
+      }
+
+# Scripts after the user's script
+dovecot_sieve_after: []
+
+#
+# Spam Training
+#
+# Mail moved into the Junk folder is reported to rspamd as spam, mail moved
+# out of it (except into Trash) as ham. IMAPSieve passes the message to curl,
+# which posts it to the rspamd controller; rspamc is not needed on this host.
+
+# Enable the spam training
+dovecot_rspamd_learn_enabled: false
+
+# URL of the rspamd controller. A controller on another host requires an
+# https:// URL (a web server in front of the controller).
+dovecot_rspamd_controller_url: 'http://127.0.0.1:11334'
+
+# Controller password (the enable password of rspamd); stored in a file
+# readable by root and the mail user only and passed to curl from there
+dovecot_rspamd_controller_password: ''
+
+# CA file to verify an https:// controller ('' = system trust store)
+dovecot_rspamd_controller_ca_file: ''
+
+#
+# Shared Mailboxes
+#
+# Folders of one mailbox shown in the accounts of other users (shared/<owner>/
+# namespace), applied with doveadm acl. Every entry takes 'mode' (overrides
+# dovecot_shared_mailboxes_mode) and 'state' ('present' or 'absent'). Entries
+# that are not listed stay untouched, so shares users set up through IMAP
+# SETACL are kept.
+
+# How listed entries are applied:
+#   'managed'  - Grant exactly the listed rights on every run.
+#   'initial'  - Grant the rights when the user has no entry yet, then leave
+#                it alone.
+#   'disabled' - Skip the entry.
+dovecot_shared_mailboxes_mode: 'managed'
+
+# owner (the sharing mailbox), folder (default 'INBOX'; created when
+# missing), user (the address that gets access), rights (ACL letters of
+# 'lrwstipekx', default 'lrws'), owner_admin (default true; false removes the
+# admin right of the owner on this folder, for a mailbox that only serves as
+# shared mailbox). The role never grants 'a' (admin), so users cannot pass
+# the share on or change it.
+dovecot_shared_mailboxes: []
+# Example:
+#   - owner: 'support@example.com'
+#     user: 'alice@example.com'
+#     rights: 'lrwstipe'
+#     owner_admin: false
+#   - owner: 'support@example.com'
+#     folder: 'Archive'
+#     user: 'bob@example.com'
+#     rights: 'lr'
+#   - owner: 'support@example.com'
+#     user: 'carol@example.com'
+#     state: 'absent'
+
+#
+# AppArmor
+#
+
+# Rules for the Dovecot profiles of the apparmor package, written to their
+# local overrides (/etc/apparmor.d/local/usr.sbin.dovecot and
+# usr.lib.dovecot.*). Only where AppArmor is active and the profiles exist:
+# Arch Linux enforces them, and Dovecot does not deliver mail there without
+# the rules. false removes them.
+dovecot_apparmor_enabled: true
+
+#
+# Extra Configuration
+#
+
+# Further dovecot.conf settings, appended verbatim at the end of the file
+# (Dovecot 2.4 syntax). The rendered file is validated with doveconf before
+# it replaces the active one.
+dovecot_extra_config: ''
+# Example:
+#   dovecot_extra_config: |
+#     mail_max_userip_connections = 20
+#     namespace inbox {
+#       mailbox Trash {
+#         quota_storage_extra = 100M
+#       }
+#     }

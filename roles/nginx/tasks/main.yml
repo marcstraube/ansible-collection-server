@@ -66,6 +66,77 @@
   tags:
     - always
 
+# The path becomes part of a file context regex and of a restorecon call, so
+# only plain path characters are accepted; the dots are escaped in the regex.
+# Fails before any change.
+- name: Main | Validate the writable paths
+  ansible.builtin.assert:
+    that:
+      - __nginx_writable_path_error | length == 0
+    fail_msg: 'nginx_writable_paths: {{ __nginx_writable_path_error }}'
+    quiet: true
+  loop: '{{ nginx_writable_paths }}'
+  loop_control:
+    label: '{{ item.path | default(item) }}'
+  vars:
+    __nginx_writable_path_error: >-
+      {{
+        ('entry ' ~ (item | string) ~ ' needs a path')
+        if item is not mapping or item.path is not defined or item.path is not string
+        else ("path '" ~ item.path ~ "' must be absolute, without a trailing slash"
+              ~ " or '.' and '..' components, and contain only letters, digits"
+              ~ " and '.', '_', '@', '-'")
+        if item.path is not match('^(/(?!\.\.?(/|$))[A-Za-z0-9._@-]+)+$')
+        else ("type '" ~ item.type ~ "' of " ~ item.path ~ " must be one of "
+              ~ __nginx_writable_path_types | join(', '))
+        if item.type | default('httpd_sys_rw_content_t') not in __nginx_writable_path_types
+        else ('owner and group of ' ~ item.path ~ ' must be non-empty strings')
+        if (item.owner is defined and (item.owner is not string or item.owner | length == 0))
+           or (item.group is defined and (item.group is not string or item.group | length == 0))
+        else ('mode of ' ~ item.path ~ " must be a quoted octal string such as '0750'")
+        if item.mode is defined and (item.mode is not string or item.mode is not match('^[0-7]{3,4}$'))
+        else ''
+      }}
+  when: nginx_enabled | bool
+  tags:
+    - always
+
+# The default decides the http2 directive or listen parameter of every
+# inheriting site and of the default site. Besides true and false it accepts
+# the strings the bool filter maps unambiguously, since
+# -e nginx_http2_enabled=false passes a string; anything else, such as a
+# typo, fails before any change.
+- name: Main | Validate the HTTP/2 default
+  ansible.builtin.assert:
+    that:
+      - >-
+        nginx_http2_enabled is boolean
+        or (nginx_http2_enabled is integer and nginx_http2_enabled in [0, 1])
+        or (nginx_http2_enabled is string
+            and nginx_http2_enabled | lower in ['true', 'false', 'yes', 'no', 'on', 'off', '1', '0'])
+    fail_msg: "nginx_http2_enabled must be true or false, got '{{ nginx_http2_enabled }}'"
+    quiet: true
+  when: nginx_enabled | bool
+  tags:
+    - always
+
+# The per-site value decides the http2 directive or listen parameter of the
+# site, so only true and false are accepted. Fails before any change.
+- name: Main | Validate the HTTP/2 setting of the sites
+  ansible.builtin.assert:
+    that:
+      - item.http2 is boolean
+    fail_msg: >-
+      nginx_sites: http2 of site '{{ item.name | default('') }}' must be true
+      or false, got '{{ item.http2 }}'
+    quiet: true
+  loop: "{{ nginx_sites | selectattr('http2', 'defined') | list }}"
+  loop_control:
+    label: '{{ item.name | default(item) }}'
+  when: nginx_enabled | bool
+  tags:
+    - always
+
 - name: Main | Import install tasks
   ansible.builtin.import_tasks: install.yml
   when: nginx_enabled | bool
@@ -79,6 +150,21 @@
   tags:
     - nginx
     - nginx:configure
+
+- name: Main | Import sites tasks
+  ansible.builtin.import_tasks: sites.yml
+  when: nginx_enabled | bool
+  tags:
+    - nginx
+    - nginx:configure
+
+- name: Main | Import writable paths tasks
+  ansible.builtin.import_tasks: writable_paths.yml
+  when: nginx_enabled | bool
+  tags:
+    - nginx
+    - nginx:configure
+    - nginx:writable-paths
 
 - name: Main | Import service tasks
   ansible.builtin.import_tasks: service.yml

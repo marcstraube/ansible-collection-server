@@ -1,0 +1,310 @@
+---
+# Rollback after the update, as the README describes it. The previous
+# release is refused while the database has the newer schema; after the
+# pre-update dump is restored, the role switches 'current' back to the kept
+# previous release without a download or a schema change, the mailbox logs
+# in through it, and a second run changes nothing.
+- name: Side Effect
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - ../shared/vars/main.yml
+
+  vars:
+    __side_effect_releases: '/var/www/roundcube/releases'
+    __side_effect_web: >-
+      {{ ansible_facts['python']['executable'] }} -I /usr/local/lib/molecule-roundcube/webmail.py
+
+  tasks:
+    # The rollback runs once; a rerun of side_effect goes on with the
+    # SQLite step
+    - name: Side Effect | Stat the rollback marker
+      ansible.builtin.stat:
+        path: /root/molecule-rollback-done
+      register: __side_effect_rollback_marker
+
+    - name: Side Effect | Roll back to the previous release
+      when: not __side_effect_rollback_marker.stat.exists
+      block:
+        - name: Side Effect | Run the role with the previous release before the restore
+          block:
+            - name: Side Effect | Include roundcube role with the previous release  # noqa: role-name[path]
+              ansible.builtin.include_role:
+                name: '{{ playbook_dir }}/../..'
+              vars:
+                roundcube_version: '{{ __molecule_previous_version }}'
+                roundcube_checksum: '{{ __molecule_previous_checksum }}'
+
+            - name: Side Effect | Fail when the role accepted the newer schema
+              ansible.builtin.fail:
+                msg: The role switched to the previous release on the newer schema
+          rescue:
+            - name: Side Effect | Assert the newer schema is refused
+              ansible.builtin.assert:
+                that:
+                  - ansible_failed_result.msg | default('') is search('the\s+schema is not downgraded')
+                fail_msg: '{{ ansible_failed_result.msg | default(ansible_failed_result) }}'
+
+        - name: Side Effect | Stat the active release link after the refusal
+          ansible.builtin.stat:
+            path: /var/www/roundcube/current
+          register: __side_effect_refused
+
+        - name: Side Effect | Find the pre-update dump of the previous release
+          ansible.builtin.find:
+            paths: /var/backups/roundcube
+            patterns: 'roundcube-{{ __molecule_previous_version }}-*.sql.gz'
+          register: __side_effect_dumps
+
+        - name: Side Effect | Assert the release stayed and there is one dump
+          ansible.builtin.assert:
+            that:
+              - __side_effect_refused.stat.lnk_target is not search(__molecule_previous_version)
+              - __side_effect_dumps.files | length == 1
+
+        # The commands of the README (Backup)
+        - name: Side Effect | Restore the pre-update dump
+          ansible.builtin.shell:
+            cmd: >-
+              set -o pipefail &&
+              runuser -u postgres -- dropdb roundcube &&
+              runuser -u postgres -- createdb -O roundcube -T template0 -E UTF8 roundcube &&
+              gunzip -c {{ (__side_effect_dumps.files | first).path | quote }}
+              | runuser -u postgres -- psql -q -v ON_ERROR_STOP=1 -d roundcube
+            executable: /bin/bash
+          changed_when: true
+
+        - name: Side Effect | Include roundcube role with the previous release  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            roundcube_version: '{{ __molecule_previous_version }}'
+            roundcube_checksum: '{{ __molecule_previous_checksum }}'
+
+        - name: Side Effect | Assert the rollback run
+          ansible.builtin.assert:
+            that:
+              # The kept release: no download, no schema change, no dump
+              - __roundcube_release_present | bool
+              - __roundcube_release_changed | bool
+              - not __roundcube_schema_init | bool
+              - not __roundcube_schema_upgrade | bool
+              - __roundcube_activate is changed
+
+        - name: Side Effect | Stat the active release link after the rollback
+          ansible.builtin.stat:
+            path: /var/www/roundcube/current
+          register: __side_effect_current
+
+        - name: Side Effect | Find the release directories after the rollback
+          ansible.builtin.find:
+            paths: '{{ __side_effect_releases }}'
+            file_type: directory
+          register: __side_effect_release_dirs
+
+        - name: Side Effect | Log in through the previous release
+          ansible.builtin.command:
+            argv: "{{ __side_effect_web.split() + ['login', '--user', 'alice@example.com'] }}"
+            stdin: '{{ {"password": "alice-Secret-42"} | to_json }}'
+          register: __side_effect_login
+          changed_when: false
+
+        - name: Side Effect | Assert the previous release is active and serves
+          ansible.builtin.assert:
+            that:
+              - __side_effect_current.stat.lnk_target == __side_effect_releases ~ '/' ~ __molecule_previous_version
+              # The newer release stays as the previous one
+              - __side_effect_release_dirs.files | length == 2
+              - (__side_effect_login.stdout | from_json).login_ok
+            fail_msg: '{{ __side_effect_login.stdout }}'
+
+        - name: Side Effect | Include roundcube role with the previous release again  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            roundcube_version: '{{ __molecule_previous_version }}'
+            roundcube_checksum: '{{ __molecule_previous_checksum }}'
+
+        - name: Side Effect | Assert the second run changes nothing
+          ansible.builtin.assert:
+            that:
+              - not __roundcube_release_changed | bool
+              - __roundcube_activate is not changed
+              - __roundcube_config_result is not changed
+              - __roundcube_units is not changed
+
+        - name: Side Effect | Mark the rollback as done
+          ansible.builtin.copy:
+            content: "done\n"
+            dest: /root/molecule-rollback-done
+            owner: root
+            group: root
+            mode: '0600'
+
+# SQLite with file logs, with the release of the role default: the role
+# creates the database file in a directory of its own for the PHP-FPM user;
+# Roundcube creates the schema in the empty file on the first connection,
+# which is the schema read of the role as that user. The backup script
+# (--label, as before a host backup) copies the file with VACUUM INTO and
+# rotates the manual dumps apart from the pre-update ones, the maintenance
+# job may write the SQLite directory, and the logins land in
+# /var/log/roundcube (log_logins), owned by the PHP-FPM user.
+- name: Side Effect — SQLite and file logs
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - ../shared/vars/main.yml
+
+  vars:
+    __side_effect_web: >-
+      {{ ansible_facts['python']['executable'] }} -I /usr/local/lib/molecule-roundcube/webmail.py
+    __side_effect_sqlite: '/var/lib/roundcube/roundcube.db'
+
+  tasks:
+    # A rerun of side_effect starts from an empty SQLite directory
+    # A label of its own per run for the dump of the backup script
+    - name: Side Effect | Name the SQLite dump
+      ansible.builtin.set_fact:
+        __side_effect_label: "sqlite-{{ now(utc=true).strftime('%Y%m%dT%H%M%S') }}"
+
+    - name: Side Effect | Remove the SQLite directory of a previous run
+      ansible.builtin.file:
+        path: /var/lib/roundcube
+        state: absent
+
+    - name: Side Effect | Include roundcube role with SQLite and file logs  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        roundcube_db_type: 'sqlite'
+        roundcube_db_create: false
+        roundcube_log_driver: 'file'
+        roundcube_extra_config:
+          support_url: 'https://www.example.com/support'
+          log_logins: true
+
+    - name: Side Effect | Read the schema state of the SQLite database
+      ansible.builtin.command:
+        argv:
+          - runuser
+          - -u
+          - roundcube
+          - --
+          - php
+          - /usr/local/lib/roundcube-ansible/roundcube-schema.php
+          - /var/www/roundcube/current
+      register: __side_effect_sqlite_schema
+      changed_when: false
+
+    - name: Side Effect | Log in with the SQLite database
+      ansible.builtin.command:
+        argv: "{{ __side_effect_web.split() + ['login', '--user', 'alice@example.com'] }}"
+        stdin: '{{ {"password": "alice-Secret-42"} | to_json }}'
+      register: __side_effect_sqlite_login
+      changed_when: false
+
+    # A pre-update dump of the SQLite database (as the role writes it before
+    # a schema upgrade); the manual dumps below rotate on their own and
+    # never remove it
+    - name: Side Effect | Create a pre-update SQLite dump
+      ansible.builtin.copy:
+        content: "pre-update\n"
+        dest: /var/backups/roundcube/roundcube-1.7.6-20200101T000000.db.gz
+        owner: root
+        group: root
+        mode: '0600'
+
+    # roundcube_backup_update_keep 2: three manual dumps leave two, the last
+    # one is the dump of this run
+    - name: Side Effect | Run the backup script as before a host backup
+      ansible.builtin.command:
+        argv: ['/usr/local/bin/roundcube-backup', '--label', '{{ __side_effect_label }}-{{ item }}']
+      loop: [1, 2, 3]
+      changed_when: true
+
+    - name: Side Effect | Find the manual SQLite dumps
+      ansible.builtin.find:
+        paths: /var/backups/roundcube
+        patterns: 'roundcube-manual-*.db.gz'
+      register: __side_effect_manual_dumps
+
+    - name: Side Effect | Find the SQLite dump of this run
+      ansible.builtin.find:
+        paths: /var/backups/roundcube
+        patterns: 'roundcube-manual-{{ __side_effect_label }}-3-*.db.gz'
+      register: __side_effect_sqlite_dumps
+
+    - name: Side Effect | Stat the pre-update SQLite dump
+      ansible.builtin.stat:
+        path: /var/backups/roundcube/roundcube-1.7.6-20200101T000000.db.gz
+      register: __side_effect_pre_update_dump
+
+    - name: Side Effect | Read the header of the SQLite dump
+      ansible.builtin.command:
+        argv:
+          - '{{ ansible_facts["python"]["executable"] }}'
+          - -c
+          - 'import gzip, sys; print(gzip.open(sys.argv[1]).read(15).decode())'
+          - '{{ (__side_effect_sqlite_dumps.files | first).path }}'
+      register: __side_effect_sqlite_header
+      changed_when: false
+
+    - name: Side Effect | Run the maintenance service with SQLite
+      ansible.builtin.systemd_service:
+        name: roundcube-maintenance.service
+        state: started
+
+    - name: Side Effect | Read the result of the maintenance service
+      ansible.builtin.command:
+        argv: ['systemctl', 'show', '--property=Result,ExecMainStatus', 'roundcube-maintenance.service']
+      register: __side_effect_sqlite_maintenance
+      changed_when: false
+
+    - name: Side Effect | Stat the SQLite file, its directory and the log directory
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+        - '{{ __side_effect_sqlite }}'
+        - '{{ __side_effect_sqlite | dirname }}'
+        - /var/log/roundcube
+        - /var/log/roundcube/userlogins.log
+      register: __side_effect_sqlite_stats
+
+    - name: Side Effect | Find files in the log directory not owned by the PHP-FPM user
+      ansible.builtin.command:
+        argv: ['find', '/var/log/roundcube', '-not', '-user', 'roundcube']
+      register: __side_effect_foreign_logs
+      changed_when: false
+
+    - name: Side Effect | Assert SQLite, the dump, the maintenance job and the file logs
+      ansible.builtin.assert:
+        that:
+          - __side_effect_sqlite_state.provider == 'sqlite'
+          - __side_effect_sqlite_state.version == __side_effect_sqlite_state.target
+          - (__side_effect_sqlite_login.stdout | from_json).login_ok
+          - __side_effect_sqlite_dumps.files | length == 1
+          # Manual and pre-update dumps rotate separately
+          - __side_effect_manual_dumps.files | length == 2
+          - __side_effect_pre_update_dump.stat.exists
+          - (__side_effect_sqlite_dumps.files | first).mode == '0600'
+          - __side_effect_sqlite_header.stdout == 'SQLite format 3'
+          - "'Result=success' in __side_effect_sqlite_maintenance.stdout_lines"
+          - __s[__side_effect_sqlite].pw_name == 'roundcube'
+          - __s[__side_effect_sqlite].mode == '0640'
+          - __s[__side_effect_sqlite | dirname].pw_name == 'roundcube'
+          - __s[__side_effect_sqlite | dirname].mode == '0750'
+          - __s['/var/log/roundcube'].pw_name == 'roundcube'
+          - __s['/var/log/roundcube'].mode == '0750'
+          - __s['/var/log/roundcube/userlogins.log'].exists
+          - __side_effect_foreign_logs.stdout_lines | length == 0
+        fail_msg: >-
+          {{ __side_effect_sqlite_schema.stdout }} / {{ __side_effect_sqlite_login.stdout }} /
+          {{ __side_effect_sqlite_header.stdout }} / {{ __side_effect_sqlite_maintenance.stdout_lines }} /
+          {{ __side_effect_foreign_logs.stdout_lines }}
+      vars:
+        __side_effect_sqlite_state: '{{ __side_effect_sqlite_schema.stdout | from_json }}'
+        __s: >-
+          {{ dict(__side_effect_sqlite_stats.results | map(attribute='item')
+                  | zip(__side_effect_sqlite_stats.results | map(attribute='stat'))) }}

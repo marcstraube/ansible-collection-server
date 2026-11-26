@@ -1,0 +1,6 @@
+{{ ansible_managed | comment }}
+{% if rspamd_dns_nameservers | length > 0 %}
+dns {
+  nameserver = {{ rspamd_dns_nameservers | map('string') | list | to_json }};
+}
+{% endif %}

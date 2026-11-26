@@ -1,0 +1,54 @@
+---
+# Deploys the backup script with the oneshot service and the timer that
+# run it. sogo-tool backup runs as the sogo user (it reads sogo.conf through
+# the sogo group), so the sets belong to sogo. The unit files are always
+# deployed; the toggles only decide whether the timer runs. On Rocky Linux
+# the container mounts the backup directory while the backup is enabled.
+
+- name: Backup | Create backup directory
+  ansible.builtin.file:
+    path: '{{ sogo_backup_dir }}'
+    state: directory
+    owner: '{{ __sogo_user }}'
+    group: '{{ __sogo_group }}'
+    mode: '0700'
+  when:
+    - sogo_backup_enabled | bool
+    - not __sogo_check_mode_install | default(false) | bool
+
+- name: Backup | Deploy backup script
+  ansible.builtin.template:
+    src: sogo-backup.sh.j2
+    dest: '{{ __sogo_backup_script }}'
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Backup | Deploy backup units
+  ansible.builtin.template:
+    src: 'sogo-backup.{{ item }}.j2'
+    dest: '/etc/systemd/system/sogo-backup.{{ item }}'
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - service
+    - timer
+  notify: Reload SOGo systemd units
+  register: __sogo_backup_units
+
+# daemon_reload here instead of flushing the handlers: a restart of SOGo
+# notified by configure.yml waits for the unit of Rocky Linux (service.yml)
+- name: Backup | Manage backup timer
+  ansible.builtin.systemd_service:
+    name: '{{ __sogo_backup_timer_name }}'
+    daemon_reload: true
+    enabled: '{{ __sogo_backup_timer_active }}'
+    state: "{{ __sogo_backup_timer_active | ternary('started', 'stopped') }}"
+  vars:
+    __sogo_backup_timer_active: '{{ sogo_backup_enabled | bool and sogo_backup_timer_enabled | bool }}'
+  # Check mode writes no unit: a timer it would create is not known yet
+  when: >-
+    not (ansible_check_mode
+         and (__sogo_check_mode_install | default(false) | bool
+              or __sogo_backup_units.results | selectattr('changed') | list | length > 0))

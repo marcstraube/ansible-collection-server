@@ -1,0 +1,66 @@
+---
+# Postfix starts without the Dovecot sockets (LMTP, SASL) and defers
+# delivery and authentication until Dovecot has created them; the dovecot
+# role runs after this one. Check mode on a new host has no unit.
+- name: Service | Manage Postfix service
+  ansible.builtin.systemd_service:
+    name: '{{ __postfix_service_name }}'
+    enabled: "{{ postfix_service_enabled | bool }}"
+    state: "{{ postfix_service_enabled | bool | ternary('started', 'stopped') }}"
+  when: not __postfix_check_mode_install | default(false) | bool
+
+#
+# Milter Check
+#
+# An unreachable milter defers mail with the default action 'tempfail'. The
+# check warns about it on every run and never fails: the milter (rspamd)
+# usually comes from a role that runs after this one.
+#
+
+- name: Service | Probe the inet milters
+  ansible.builtin.wait_for:
+    host: '{{ item.host }}'
+    port: '{{ item.port }}'
+    state: started
+    timeout: 3
+  loop: "{{ __postfix_milter_probes | selectattr('type', 'eq', 'inet') | list }}"
+  loop_control:
+    label: '{{ item.milter }}'
+  register: __postfix_milter_inet
+  # A refused or timed out connection is reported below; only a reached
+  # port returns 'state'
+  failed_when: false
+
+- name: Service | Probe the unix milters
+  ansible.builtin.stat:
+    path: '{{ item.path }}'
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  loop: "{{ __postfix_milter_probes | selectattr('type', 'eq', 'unix') | list }}"
+  loop_control:
+    label: '{{ item.milter }}'
+  register: __postfix_milter_unix
+
+- name: Service | Collect the unreachable milters
+  ansible.builtin.set_fact:
+    __postfix_milters_unreachable: >-
+      {{ (__postfix_milter_inet.results | default([]) | rejectattr('skipped', 'defined')
+          | selectattr('state', 'undefined') | map(attribute='item.milter') | list)
+         + (__postfix_milter_unix.results | default([]) | rejectattr('stat.issock', 'defined')
+            | map(attribute='item.milter') | list)
+         + (__postfix_milter_unix.results | default([]) | selectattr('stat.issock', 'defined')
+            | rejectattr('stat.issock') | map(attribute='item.milter') | list) }}
+
+- name: Service | Warn about unreachable milters
+  ansible.builtin.debug:
+    msg: >-
+      Milter not reachable: {{ __postfix_milters_unreachable | join(', ') }}.
+      With postfix_milter_default_action '{{ postfix_milter_default_action }}'
+      {{ 'Postfix defers every message until the milter answers'
+         if postfix_milter_default_action == 'tempfail'
+         else 'Postfix applies this action to every message while the milter is down' }}.
+      The default of postfix_milters expects rspamd on this host
+      (marcstraube.server.rspamd); set postfix_milters to the address of the
+      milter, or to [] without one.
+  when: __postfix_milters_unreachable | length > 0

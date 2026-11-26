@@ -1,0 +1,61 @@
+---
+# One failure mode of the sogo-tool stub (__side_effect_mode.mode) with the
+# set __side_effect_mode.set and optionally a memcached on another host
+# whose flush fails (__side_effect_mode.memcached): the restore must fail at
+# the backup (backup-*) or with the error of the restore commands
+# (restore-*), never with the assert that no user was known; with the failed
+# flush, its message names the failed users and asks for another restore.
+- name: Side Effect | Set the mode of the sogo-tool stub
+  ansible.builtin.copy:
+    content: "{{ __side_effect_mode.mode }}\n"
+    dest: /etc/molecule-sogo-tool-mode
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Side Effect | Restore with the failing sogo-tool
+  block:
+    - name: Side Effect | Include sogo role with the stub  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        sogo_restore: '{{ __side_effect_mode.set }}'
+        sogo_memcached_host: "{{ __side_effect_mode.memcached | default('127.0.0.1') }}"
+        __sogo_tool: /usr/local/bin/molecule-sogo-tool-stub
+        __sogo_command_prefix: []
+
+    - name: Side Effect | Fail when the restore with the stub passed
+      ansible.builtin.fail:
+        msg: 'The restore passed with the sogo-tool mode {{ __side_effect_mode.mode }}'
+  rescue:
+    # backup-*: the backup fails, no restore command runs.
+    # restore-notfound-error: "not found" next to an error is a failure.
+    # restore-mixed: errors@example.com is unknown (skipped), alice fails for
+    # real; the run ends with the error of the loop, not "No user of".
+    - name: Side Effect | Assert the failure of the mode
+      ansible.builtin.assert:
+        that:
+          - >-
+            not __side_effect_mode.mode.startswith('backup-')
+            or (__sogo_restore_backup is failed and not (__sogo_restore_ran | bool))
+          - >-
+            __side_effect_mode.mode.startswith('backup-')
+            or (__sogo_restore_runs is failed
+                and ansible_failed_result.msg | default('') is not search('No user of'))
+          - >-
+            __side_effect_mode.mode.startswith('backup-')
+            or __side_effect_mode.memcached is defined
+            or ansible_failed_result.results is defined
+          - >-
+            __side_effect_mode.memcached is not defined
+            or (ansible_failed_result.msg | default('') is search('SERVER_ERROR molecule')
+                and ansible_failed_result.msg
+                    is search('restore is NOT complete: it failed for alice@example\\.com \\(see')
+                and ansible_failed_result.msg is not search('do NOT run it again'))
+          - >-
+            __side_effect_mode.mode != 'restore-notfound-error'
+            or __sogo_restore_skipped | length == 0
+          - >-
+            __side_effect_mode.mode != 'restore-mixed'
+            or (__sogo_restore_skipped == ['errors@example.com'] and __sogo_restored_users | length == 0)
+        fail_msg: '{{ __side_effect_mode.mode }}: {{ ansible_failed_result | default({}) | to_json }}'

@@ -1,0 +1,23 @@
+# Test resolver of the mail host: names below example.com and example.net
+# come from here, everything else (package mirrors, the container names of
+# the podman network) from the resolver the container had before.
+port=53
+bind-interfaces
+listen-address=127.0.0.1
+user=root
+no-resolv
+no-hosts
+{% for server in __prepare_upstream_resolvers %}
+server={{ server }}
+{% endfor %}
+local=/example.com/
+local=/example.net/
+
+# The mail host (host-record also writes the PTR record)
+host-record=mail.example.com,{{ ansible_facts['default_ipv4']['address'] }}
+mx-host=example.com,mail.example.com,10
+txt-record=example.com,"v=spf1 mx -all"
+
+# example.net: the outside world, the sender of verify (XCLIENT)
+mx-host=example.net,mx.example.net,10
+host-record=mx.example.net,192.0.2.25

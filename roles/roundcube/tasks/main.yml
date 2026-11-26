@@ -1,0 +1,484 @@
+---
+- name: Main | Load OS-specific variables
+  ansible.builtin.include_vars: '{{ item }}'
+  with_first_found:
+    - files:
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}.yml'
+      paths:
+        - 'vars'
+  tags:
+    - always
+
+# ansible_check_mode follows --check only, not the check_mode keyword of a
+# play, block or include. A command without check_mode: false is skipped in
+# either case, so the probe tells the read-only commands (check_mode:
+# false) and the guards below whether this run is a check run.
+- name: Main | Detect check mode
+  ansible.builtin.command: 'true'
+  register: __roundcube_check_probe
+  changed_when: false
+  when: roundcube_enabled | bool
+  tags:
+    - always
+
+- name: Main | Store the check mode
+  ansible.builtin.set_fact:
+    __roundcube_check_mode: '{{ __roundcube_check_probe is skipped }}'
+  when: roundcube_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate the release and installation settings
+  ansible.builtin.assert:
+    that:
+      - roundcube_version == 'latest' or roundcube_version is match(__roundcube_version_pattern)
+      - roundcube_version == 'latest' or roundcube_checksum is match('^sha256:[0-9a-f]{64}$')
+      - roundcube_install_dir is match('^/.+[^/]$')
+      - roundcube_php_cli | length > 0
+      - roundcube_backup_dir is match('^/.+')
+      - roundcube_backup_update_keep | int >= 1
+    fail_msg: |
+      roundcube_version must be a release such as '1.7.6' or 'latest',
+      roundcube_checksum 'sha256:<hash>' of its complete archive,
+      roundcube_install_dir an absolute path without a trailing slash,
+      roundcube_php_cli the PHP command line binary,
+      roundcube_backup_dir an absolute path and
+      roundcube_backup_update_keep at least 1.
+  when:
+    - roundcube_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate the database settings
+  ansible.builtin.assert:
+    that:
+      - roundcube_db_type in __roundcube_db_drivers
+      - roundcube_db_type != 'sqlite' or roundcube_db_path is match('^/.+[^/]$')
+      - roundcube_db_type == 'sqlite' or roundcube_db_host | length > 0
+      - roundcube_db_type == 'sqlite' or roundcube_db_name is match('^[A-Za-z0-9_]+$')
+      - roundcube_db_type == 'sqlite' or roundcube_db_user | length > 0
+      - roundcube_db_type == 'sqlite' or roundcube_db_password | length > 0
+      - not (roundcube_db_create | bool) or (roundcube_db_type != 'sqlite' and __roundcube_db_local | bool)
+    fail_msg: |
+      roundcube_db_type must be 'postgresql', 'mariadb' or 'sqlite'.
+      PostgreSQL and MariaDB need roundcube_db_host, roundcube_db_name,
+      roundcube_db_user and roundcube_db_password (store the password in the
+      vault); SQLite needs roundcube_db_path as an absolute file path.
+      roundcube_db_create needs a PostgreSQL or MariaDB server on this host
+      (roundcube_db_host a loopback address or a unix socket); create the
+      database on a remote server with its own role.
+  when:
+    - roundcube_enabled | bool
+  tags:
+    - always
+
+# TLS is optional; a connection without it is meant for a private network
+# or WireGuard. A unix socket stays on the host and takes no TLS.
+- name: Main | Validate the database TLS settings
+  ansible.builtin.assert:
+    that:
+      - not (roundcube_db_tls | bool) or roundcube_db_type != 'sqlite'
+      - not (roundcube_db_tls | bool) or roundcube_db_tls_ca_file | length > 0
+      - not (roundcube_db_tls | bool) or __roundcube_db_socket | length == 0
+    fail_msg: |
+      roundcube_db_tls needs PostgreSQL or MariaDB over TCP and
+      roundcube_db_tls_ca_file; '{{ roundcube_db_host }}' with
+      {{ roundcube_db_type }} connects through
+      {{ __roundcube_db_socket or 'a file' }} (use the host name of the
+      server certificate).
+  when:
+    - roundcube_enabled | bool
+  tags:
+    - always
+
+# des_key encrypts the IMAP password in the session; the upstream default
+# is public. The value never shows up in the output (only the expressions).
+- name: Main | Validate the configuration
+  ansible.builtin.assert:
+    that:
+      - roundcube_des_key | length >= 32
+      - roundcube_cipher_method | length > 0
+      - roundcube_log_driver in ['syslog', 'file']
+      - roundcube_max_message_size | string is match('^[0-9]+[KMG]?$')
+      - roundcube_extra_config is mapping
+    fail_msg: |
+      roundcube_des_key is required with at least 32 characters, the key length
+      of AES-256 (store it in the vault; generate it with: openssl rand -base64 24).
+      roundcube_cipher_method must be set, roundcube_log_driver 'syslog' or
+      'file', roundcube_max_message_size a size such as '25M' and
+      roundcube_extra_config a mapping.
+  when:
+    - roundcube_enabled | bool
+  tags:
+    - always
+
+# config.inc.php writes roundcube_extra_config after the settings of the
+# role variables, so a managed key there would override a setting the role
+# validates (the database connection, des_key, the TLS of the mail servers).
+- name: Main | Validate roundcube_extra_config against the managed settings
+  ansible.builtin.assert:
+    that:
+      - __roundcube_extra_config_rejected | length == 0
+    fail_msg: |
+      roundcube_extra_config sets keys the role writes from its own variables;
+      set these variables instead:
+      {% for key, variable in __roundcube_extra_config_rejected.items() %}
+      - {{ key }}: {{ variable }}
+      {% endfor %}
+  when:
+    - roundcube_enabled | bool
+  tags:
+    - always
+
+# Cleartext IMAP, SMTP and ManageSieve carry the passwords of the users;
+# only a server on this host may go without TLS.
+- name: Main | Validate the mail server settings
+  ansible.builtin.assert:
+    that:
+      - item.host | length > 0
+      - item.port | string is match('^[0-9]+$') and item.port | int >= 1 and item.port | int <= 65535
+      - item.tls in __roundcube_tls_modes
+      - item.tls != 'none' or item.host in __roundcube_loopback_hosts
+    fail_msg: >-
+      {{ item.name }}: the host must be set, the port a number from 1 to 65535
+      and the TLS mode one of {{ __roundcube_tls_modes | join(', ') }}; 'none'
+      is only accepted for a server on this host (localhost, 127.0.0.1, ::1).
+  loop:
+    - name: 'IMAP (roundcube_imap_*)'
+      host: '{{ roundcube_imap_host }}'
+      port: '{{ roundcube_imap_port }}'
+      tls: '{{ roundcube_imap_tls }}'
+    - name: 'SMTP (roundcube_smtp_*)'
+      host: '{{ roundcube_smtp_host }}'
+      port: '{{ roundcube_smtp_port }}'
+      tls: '{{ roundcube_smtp_tls }}'
+    - name: 'ManageSieve (roundcube_managesieve_*)'
+      host: '{{ roundcube_managesieve_host }}'
+      port: '{{ roundcube_managesieve_port }}'
+      tls: '{{ roundcube_managesieve_tls }}'
+  loop_control:
+    label: '{{ item.name }}'
+  when:
+    - roundcube_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate the plugin settings
+  ansible.builtin.assert:
+    that:
+      - roundcube_plugins | type_debug == 'list'
+      - roundcube_plugins | select('match', '^[a-z0-9_]+$') | list | length == roundcube_plugins | length
+      - roundcube_plugins | unique | length == roundcube_plugins | length
+      - roundcube_managesieve_vacation | int in [0, 1, 2]
+      - roundcube_managesieve_forward | int in [0, 1, 2]
+    fail_msg: |
+      roundcube_plugins must be a list of plugin names (lowercase letters,
+      digits and '_') without duplicates; roundcube_managesieve_vacation and
+      roundcube_managesieve_forward 0, 1 or 2.
+  when:
+    - roundcube_enabled | bool
+  tags:
+    - always
+
+# The password plugin writes into the PostfixAdmin database; without TLS
+# the new password hash goes over the network in plain text.
+- name: Main | Validate the password plugin settings
+  ansible.builtin.assert:
+    that:
+      - roundcube_password_db_type in ['postgresql', 'mariadb']
+      - roundcube_password_db_host | length > 0
+      - roundcube_password_db_name is match('^[A-Za-z0-9_]+$')
+      - roundcube_password_db_user | length > 0
+      - roundcube_password_db_password | length > 0
+      - not (roundcube_password_db_tls | bool) or roundcube_password_db_tls_ca_file | length > 0
+      - not (roundcube_password_db_tls | bool) or __roundcube_password_db_socket | length == 0
+      - roundcube_password_scheme in __roundcube_password_schemes
+      - roundcube_password_minimum_length | string is match('^[0-9]+$')
+    fail_msg: |
+      The password plugin needs roundcube_password_db_type ('postgresql' or
+      'mariadb'), roundcube_password_db_host, roundcube_password_db_name,
+      roundcube_password_db_user and roundcube_password_db_password (vault);
+      roundcube_password_db_tls needs a TCP connection and
+      roundcube_password_db_tls_ca_file. roundcube_password_scheme must be one
+      of {{ __roundcube_password_schemes | join(', ') }} and
+      roundcube_password_minimum_length a number.
+  when:
+    - roundcube_enabled | bool
+    - __roundcube_password_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate the session storage
+  ansible.builtin.assert:
+    that:
+      - roundcube_session_storage in ['db', 'redis']
+    fail_msg: "roundcube_session_storage must be 'db' or 'redis'."
+  when:
+    - roundcube_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate the Valkey settings
+  ansible.builtin.assert:
+    that:
+      - >-
+        roundcube_redis_host is match('^/.+')
+        or roundcube_redis_host is match('^(\\[[0-9A-Fa-f:.]+\\]|[A-Za-z0-9.-]+):[0-9]+$')
+      - not (roundcube_redis_tls | bool and roundcube_redis_host is match('^/'))
+      - roundcube_redis_database | string is match('^[0-9]+$')
+      - roundcube_redis_prefix | length > 0
+      - roundcube_redis_user | length == 0 or roundcube_redis_password | length > 0
+    fail_msg: |
+      roundcube_redis_host has to be '<host>:<port>' ('[<IPv6>]:<port>') or the
+      path of a unix socket (no TLS through a socket); roundcube_redis_database
+      a number, roundcube_redis_prefix not empty, and an ACL user in
+      roundcube_redis_user needs roundcube_redis_password.
+  when:
+    - roundcube_enabled | bool
+    - roundcube_session_storage == 'redis'
+  tags:
+    - always
+
+- name: Main | Validate the maintenance settings
+  ansible.builtin.assert:
+    that:
+      - roundcube_maintenance_on_calendar | length > 0
+      - roundcube_cleandb_days | string is match('^[0-9]+$') and roundcube_cleandb_days | int >= 1
+    fail_msg: >-
+      roundcube_maintenance_on_calendar must be a systemd OnCalendar
+      expression and roundcube_cleandb_days at least 1.
+  when:
+    - roundcube_enabled | bool
+  tags:
+    - always
+
+# The SQLite directory belongs to the PHP-FPM user and the backup directory
+# to root (0700): the role only creates and owns directories of their own,
+# never a system directory, a path of the role itself or an existing
+# directory of someone else. An existing backup directory has to be root's
+# with 0700 already; the role never tightens a shared directory.
+- name: Main | Stat the directories the role owns
+  ansible.builtin.stat:
+    path: '{{ item.path }}'
+  loop: '{{ __roundcube_owned_dirs }}'
+  loop_control:
+    label: '{{ item.path }}'
+  register: __roundcube_owned_dir_stats
+  when:
+    - roundcube_enabled | bool
+  tags:
+    - always
+
+- name: Main | Assert the directories are dedicated to Roundcube
+  ansible.builtin.assert:
+    that:
+      # The empty template renders as None
+      - __roundcube_dir_problem | default('', true) | length == 0
+    fail_msg: >-
+      {{ item.item.variable }}: {{ item.item.path }} {{ __roundcube_dir_problem }}
+  vars:
+    __roundcube_dir_problem: >-
+      {%- set path = item.item.path -%}
+      {%- set role_paths = item.item.others | select('ne', '') | map('regex_replace', '/+$', '') | list -%}
+      {%- set ns = namespace(under=role_paths | select('in', [path]) | list) -%}
+      {%- for p in role_paths if path.startswith(p ~ '/') -%}{%- set ns.under = ns.under + [p] -%}{%- endfor -%}
+      {%- if path in __roundcube_system_dirs -%}
+      is a system directory; the role would take it over (owner, mode, SELinux
+      label). Use a directory of its own, e.g. {{ item.item.example }}.
+      {%- elif ns.under | length > 0 -%}
+      is or lies in {{ ns.under | first }}, a path of the role itself. Use a
+      directory of its own, e.g. {{ item.item.example }}.
+      {%- elif item.stat.exists and item.stat.pw_name != item.item.owner and item.item.owner != 'root' -%}
+      belongs to {{ item.stat.pw_name }}, not to the PHP-FPM user {{ item.item.owner }}.
+      If the pool user changed (roundcube_php_fpm_user), hand the directory over:
+      chown -R {{ item.item.owner }}: {{ path }}
+      {%- elif item.stat.exists and item.item.owner == 'root'
+               and (item.stat.pw_name != 'root' or item.stat.mode != item.item.mode) -%}
+      exists, but is not root-owned with mode {{ item.item.mode }} (it is
+      {{ item.stat.pw_name }}, {{ item.stat.mode }}); the role does not take over a
+      shared directory. Use a directory of its own, e.g. {{ item.item.example }}.
+      {%- endif -%}
+  loop: '{{ __roundcube_owned_dir_stats.results | default([]) }}'
+  loop_control:
+    label: '{{ item.item.path }}'
+  when:
+    - roundcube_enabled | bool
+  tags:
+    - always
+
+# Certificate and host name are verified; 'localhost' is only in a
+# certificate of a CA of its own
+- name: Main | Warn about mail servers named localhost
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ __roundcube_localhost_servers | join(', ') }} connect to 'localhost' with TLS and
+      verify the certificate against the system trust store: a certificate of a public CA does not
+      name localhost. Set the host to the name in the certificate of the server.
+  when:
+    - roundcube_enabled | bool
+    - roundcube_tls_ca_file | length == 0
+    - __roundcube_localhost_servers | length > 0
+  tags:
+    - always
+
+# The release state is bootstrap: every sub-tag works on the release of
+# this run. 'latest' resolves to the newest release; its archive checksum
+# is the digest GitHub publishes for the asset.
+- name: Main | Look up the latest Roundcube release
+  ansible.builtin.uri:
+    url: '{{ __roundcube_latest_api_url }}'
+    headers:
+      Accept: 'application/vnd.github+json'
+    return_content: true
+  register: __roundcube_latest
+  check_mode: false
+  retries: 5
+  delay: 10
+  when:
+    - roundcube_enabled | bool
+    - roundcube_version == 'latest'
+  tags:
+    - always
+
+- name: Main | Set the release to install
+  ansible.builtin.set_fact:
+    __roundcube_release: >-
+      {{ __roundcube_latest.json.tag_name if roundcube_version == 'latest' else roundcube_version }}
+    __roundcube_release_checksum: >-
+      {{ (__roundcube_latest.json.assets
+          | selectattr('name', 'eq', 'roundcubemail-' ~ __roundcube_latest.json.tag_name ~ '-complete.tar.gz')
+          | map(attribute='digest') | first | default(''))
+         if roundcube_version == 'latest' else roundcube_checksum }}
+  when:
+    - roundcube_enabled | bool
+  tags:
+    - always
+
+- name: Main | Assert the release archive is known
+  ansible.builtin.assert:
+    that:
+      - __roundcube_release is match(__roundcube_version_pattern)
+      - __roundcube_release_checksum is match('^sha256:[0-9a-f]{64}$')
+    fail_msg: >-
+      The latest release '{{ __roundcube_release }}' has no complete archive
+      with a published checksum; pin roundcube_version and roundcube_checksum
+      instead.
+  when:
+    - roundcube_enabled | bool
+  tags:
+    - always
+
+- name: Main | Stat the active release link
+  ansible.builtin.stat:
+    path: '{{ __roundcube_current_link }}'
+  register: __roundcube_current_stat
+  when:
+    - roundcube_enabled | bool
+  tags:
+    - always
+
+- name: Main | Stat the release directory
+  ansible.builtin.stat:
+    path: '{{ __roundcube_release_dir }}/{{ __roundcube_release_marker }}'
+  register: __roundcube_release_stat
+  when:
+    - roundcube_enabled | bool
+  tags:
+    - always
+
+# The role replaces 'current' on a release change; anything else at that
+# path was not created by the role.
+- name: Main | Assert the active release link belongs to the role
+  ansible.builtin.assert:
+    that:
+      - not __roundcube_current_stat.stat.exists or __roundcube_current_stat.stat.islnk
+      - >-
+        not __roundcube_current_stat.stat.exists
+        or (__roundcube_current_stat.stat.lnk_target | dirname) == __roundcube_releases_dir
+    fail_msg: |
+      {{ __roundcube_current_link }} exists but is not a link into
+      {{ __roundcube_releases_dir }}; it was not created by this role. Move it away,
+      or set roundcube_install_dir to another directory.
+  when:
+    - roundcube_enabled | bool
+  tags:
+    - always
+
+# previous: the release 'current' points to before this run ('' on a first
+# install); present: the release directory is complete (marker written
+# before it was moved into place)
+- name: Main | Set the release state
+  ansible.builtin.set_fact:
+    __roundcube_release_previous: >-
+      {{ (__roundcube_current_stat.stat.lnk_target | basename) if __roundcube_current_stat.stat.exists else '' }}
+    __roundcube_release_changed: >-
+      {{ not __roundcube_current_stat.stat.exists
+         or (__roundcube_current_stat.stat.lnk_target | basename) != __roundcube_release }}
+    __roundcube_release_present: '{{ __roundcube_release_stat.stat.exists }}'
+  when:
+    - roundcube_enabled | bool
+  tags:
+    - always
+
+- name: Main | Import install tasks
+  ansible.builtin.import_tasks: install.yml
+  when: roundcube_enabled | bool
+  tags:
+    - roundcube
+    - roundcube:install
+
+# Before the configuration, which may name new paths. Also runs with the
+# toggle off: it then removes the rules.
+- name: Main | Import AppArmor tasks
+  ansible.builtin.import_tasks: apparmor.yml
+  when:
+    - roundcube_enabled | bool
+    - ansible_facts['os_family'] != 'RedHat'
+  tags:
+    - roundcube
+    - roundcube:apparmor
+    - roundcube:install
+    - roundcube:configure
+
+- name: Main | Import configure tasks
+  ansible.builtin.import_tasks: configure.yml
+  when: roundcube_enabled | bool
+  tags:
+    - roundcube
+    - roundcube:configure
+
+- name: Main | Import database tasks
+  ansible.builtin.import_tasks: database.yml
+  when: roundcube_enabled | bool
+  tags:
+    - roundcube
+    - roundcube:database
+
+# The schema of the release (pre-update dump, initdb.sh / updatedb.sh) and
+# the switch of 'current' belong together: both run with roundcube:install
+# only, so a schema upgrade never runs without the switch.
+- name: Main | Import schema tasks
+  ansible.builtin.import_tasks: schema.yml
+  when: roundcube_enabled | bool
+  tags:
+    - roundcube
+    - roundcube:install
+
+# Switches 'current' after the schema of the release is in place
+- name: Main | Import activate tasks
+  ansible.builtin.import_tasks: activate.yml
+  when: roundcube_enabled | bool
+  tags:
+    - roundcube
+    - roundcube:install
+
+- name: Main | Import maintenance tasks
+  ansible.builtin.import_tasks: maintenance.yml
+  when: roundcube_enabled | bool
+  tags:
+    - roundcube
+    - roundcube:maintenance

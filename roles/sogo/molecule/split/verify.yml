@@ -1,0 +1,46 @@
+---
+# The checks of the postgresql scenario with the database and Dovecot on the
+# backend container, and the TLS of the database connections of SOGo
+- name: Verify
+  hosts: sogo
+  gather_facts: true
+
+  vars_files:
+    - vars/main.yml
+
+  vars:
+    __verify_backend: '{{ __molecule_backend }}'
+    __verify_client: >-
+      /usr/local/bin/molecule-sogo-client --base https://{{ __molecule_mail_host }} --ca /etc/molecule-tls/ca.pem
+    __verify_db_query:
+      postgresql: >-
+        psql --no-align --tuples-only --dbname=postfixadmin --command
+
+  tasks:
+    - name: Verify | Include the checks
+      ansible.builtin.include_tasks: ../shared/tasks/checks.yml
+
+    # pg_hba.conf of the backend admits the SOGo users only with TLS; the
+    # checks above logged in, so the connections are encrypted
+    - name: Verify | List the connections of SOGo at the database server
+      ansible.builtin.command:
+        argv:
+          - psql
+          - --no-align
+          - --tuples-only
+          - --command
+          - >-
+            SELECT a.usename || ':' || s.ssl FROM pg_stat_activity a JOIN pg_stat_ssl s USING (pid)
+            WHERE a.usename IN ('sogo', 'sogo_view')
+      become: true
+      become_user: postgres
+      delegate_to: '{{ __molecule_backend }}'
+      register: __verify_pg_ssl
+      changed_when: false
+
+    - name: Verify | Assert the database connections of SOGo use TLS
+      ansible.builtin.assert:
+        that:
+          - __verify_pg_ssl.stdout_lines | length > 0
+          - __verify_pg_ssl.stdout_lines | reject('match', '^[a-z_]+:(t|true)$') | list | length == 0
+        fail_msg: '{{ __verify_pg_ssl.stdout_lines | to_json }}'

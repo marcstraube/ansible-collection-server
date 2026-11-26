@@ -1,0 +1,16 @@
+---
+# doveadm reload rereads dovecot.conf, the included files and the TLS
+# certificate; new connections use them, open sessions keep their settings.
+#
+# The handler also subscribes to the 'Reload cert services' topic of
+# marcstraube.common.pki and the certbot role, so a renewed certificate
+# takes effect without a restart. A host where the service was not started
+# yet (check mode on a new host) has nothing to reload.
+- name: Reload Dovecot
+  ansible.builtin.systemd_service:
+    name: '{{ __dovecot_service_name }}'
+    state: reloaded
+  listen: Reload cert services
+  when:
+    - dovecot_service_enabled | bool
+    - not __dovecot_check_mode_install | default(false) | bool

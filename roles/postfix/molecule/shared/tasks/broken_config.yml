@@ -1,0 +1,23 @@
+---
+# Runs the role with the converge settings plus __verify_broken in
+# postfix_extra_main_cf and records the task that stopped it.
+
+- name: Verify | Run the role with a broken setting
+  block:
+    - name: Verify | Include postfix role with a broken setting  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mta_enabled: false
+        # The converge setting of the scenarios plus the broken one; a
+        # reference to postfix_extra_main_cf itself would be recursive
+        postfix_extra_main_cf: "{{ {'defer_transports': 'smtp'} | combine(__verify_broken) }}"
+  rescue:
+    - name: Verify | Record the failure of the broken setting
+      ansible.builtin.set_fact:
+        __verify_broken_results: >-
+          {{ __verify_broken_results | default([])
+             + [{'setting': __verify_broken, 'task': ansible_failed_task.name,
+                 'msg': (ansible_failed_result.results | default([ansible_failed_result])
+                         | selectattr('failed', 'defined') | selectattr('failed')
+                         | map(attribute='stderr', default='') | join(' '))}] }}

@@ -1,0 +1,115 @@
+<?php
+{{ ansible_managed | comment(decoration='// ') }}
+// Read by every release after config/defaults.inc.php.
+{#- Renders a value as a PHP literal: strings single-quoted, lists and
+    mappings as arrays #}
+{%- macro php(value) -%}
+{%- if value is boolean -%}
+{{ value | ternary('true', 'false') }}
+{%- elif value is none -%}
+null
+{%- elif value is number -%}
+{{ value }}
+{%- elif value is string -%}
+'{{ value | replace('\\', '\\\\') | replace("'", "\\'") }}'
+{%- elif value is mapping -%}
+[{% for key, element in value.items() %}{{ php(key) }} => {{ php(element) }}{{ ', ' if not loop.last }}{% endfor %}]
+{%- else -%}
+[{% for element in value %}{{ php(element) }}{{ ', ' if not loop.last }}{% endfor %}]
+{%- endif -%}
+{%- endmacro %}
+{#- Host with the prefix of its TLS mode and the port #}
+{%- macro server(host, port, tls) -%}
+{{ __roundcube_tls_prefixes[tls] }}{{ ('[' ~ host ~ ']') if ':' in host else host }}:{{ port }}
+{%- endmacro %}
+{#- Socket options of a TLS connection: certificate and host name checked #}
+{%- set __tls_options = {'ssl': {'verify_peer': true, 'verify_peer_name': true}} -%}
+{%- if roundcube_tls_ca_file | length > 0 -%}
+{%- set __tls_options = {'ssl': {'verify_peer': true, 'verify_peer_name': true, 'cafile': roundcube_tls_ca_file}} -%}
+{%- endif %}
+
+
+$config = [];
+
+// ----------------------------------
+// SQL DATABASE
+// ----------------------------------
+$config['db_dsnw'] = {{ php(__roundcube_db_dsn) }};
+$config['db_dsnr'] = '';
+
+// ----------------------------------
+// IMAP
+// ----------------------------------
+$config['imap_host'] = {{ php(server(roundcube_imap_host, roundcube_imap_port, roundcube_imap_tls)) }};
+$config['imap_conn_options'] = {{ php(__tls_options) }};
+
+// ----------------------------------
+// SMTP
+// ----------------------------------
+// Submission with the login and password of the user
+$config['smtp_host'] = {{ php(server(roundcube_smtp_host, roundcube_smtp_port, roundcube_smtp_tls)) }};
+$config['smtp_user'] = '%u';
+$config['smtp_pass'] = '%p';
+$config['smtp_conn_options'] = {{ php(__tls_options) }};
+
+// ----------------------------------
+// SYSTEM
+// ----------------------------------
+$config['enable_installer'] = false;
+$config['des_key'] = {{ php(roundcube_des_key) }};
+$config['cipher_method'] = {{ php(roundcube_cipher_method) }};
+$config['product_name'] = {{ php(roundcube_product_name) }};
+$config['username_domain'] = {{ php(roundcube_username_domain) }};
+$config['max_message_size'] = {{ php(roundcube_max_message_size | string) }};
+
+// Logging
+$config['log_driver'] = {{ php(roundcube_log_driver) }};
+$config['syslog_id'] = 'roundcube';
+{% if roundcube_log_driver == 'file' %}
+// Outside the releases, so the logs survive the removal of a release
+$config['log_dir'] = {{ php(__roundcube_log_dir ~ '/') }};
+{% endif %}
+
+// Sessions
+{% if roundcube_session_storage == 'redis' %}
+// In Valkey through the session handler of phpredis, which authenticates
+// with the ACL user and connects with TLS; Roundcube's own redis driver
+// does neither. PHP stores and expires the sessions (session_lifetime).
+$config['session_storage'] = 'php';
+ini_set('session.save_handler', 'redis');
+ini_set('session.save_path', {{ php(__roundcube_redis_save_path | trim) }});
+{% else %}
+$config['session_storage'] = 'db';
+{% endif %}
+
+// ----------------------------------
+// PLUGINS
+// ----------------------------------
+$config['plugins'] = {{ php(roundcube_plugins) }};
+{% if __roundcube_managesieve_enabled | bool %}
+
+// managesieve: filters, forwarding and out-of-office replies
+$config['managesieve_host'] = {{ php(server(roundcube_managesieve_host, roundcube_managesieve_port, roundcube_managesieve_tls)) }};
+$config['managesieve_conn_options'] = {{ php(__tls_options) }};
+$config['managesieve_vacation'] = {{ roundcube_managesieve_vacation | int }};
+$config['managesieve_forward'] = {{ roundcube_managesieve_forward | int }};
+{% endif %}
+{% if __roundcube_password_enabled | bool %}
+
+// password: the hash goes into the PostfixAdmin mailbox table with the
+// scheme prefix, which Dovecot, SOGo and PostfixAdmin read
+$config['password_driver'] = 'sql';
+$config['password_db_dsn'] = {{ php(__roundcube_password_db_dsn) }};
+$config['password_query'] = {{ php(roundcube_password_query or (__roundcube_password_default_query | trim)) }};
+$config['password_algorithm'] = {{ php(__roundcube_password_algorithms[roundcube_password_scheme]) }};
+$config['password_algorithm_prefix'] = true;
+$config['password_confirm_current'] = true;
+$config['password_minimum_length'] = {{ roundcube_password_minimum_length | int }};
+{% endif %}
+{% if roundcube_extra_config | length > 0 %}
+
+// Extra settings (never a key written above: the role rejects those)
+{% for key, value in roundcube_extra_config.items() %}
+$config[{{ php(key) }}] = {{ php(value) }};
+{% endfor %}
+{% endif %}

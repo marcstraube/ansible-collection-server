@@ -1,0 +1,169 @@
+---
+#
+# Schema
+#
+# Roundcube owns its schema: bin/initdb.sh creates the tables in an empty
+# database, bin/updatedb.sh applies the updates of a newer release. The
+# schema version is the 'roundcube-version' row of the system table, the
+# target the newest update the release ships (SQL/<driver>/). The tasks run
+# with the release of this run before 'current' points to it, so a failed
+# upgrade leaves the active release in place. The schema scripts and the
+# helper run as the PHP-FPM user: they need nothing but config.inc.php
+# (group-readable) and, with roundcube_log_driver 'file', write their log
+# files as that user.
+#
+
+# A check run before the first install has no release to read, and with a
+# changed config.inc.php the release would still read the old one
+- name: Schema | Read the schema state
+  ansible.builtin.command:
+    argv:
+      - '{{ roundcube_php_cli }}'
+      - '{{ __roundcube_helper }}'
+      - '{{ __roundcube_release_dir }}'
+  become: true
+  become_user: '{{ __roundcube_fpm_user }}'
+  register: __roundcube_schema_status
+  changed_when: false
+  check_mode: false
+  when: >-
+    not __roundcube_check_mode
+    or (__roundcube_release_present | bool and __roundcube_config_result | default({}) is not changed)
+
+- name: Schema | Assert the schema belongs to the release
+  ansible.builtin.assert:
+    that:
+      - __roundcube_schema.tables == 0 or __roundcube_schema.system
+      - __roundcube_schema.version <= __roundcube_schema.target
+    fail_msg: |
+      {% if not __roundcube_schema.system %}
+      The database {{ roundcube_db_name if roundcube_db_type != 'sqlite' else roundcube_db_path }} holds
+      {{ __roundcube_schema.tables }} tables but no Roundcube schema (no system table).
+      Use an empty database for Roundcube.
+      {% else %}
+      The schema is at version {{ __roundcube_schema.version }}, newer than the newest of
+      Roundcube {{ __roundcube_schema.release }} ({{ __roundcube_schema.target }}): the
+      schema is not downgraded. Keep roundcube_version at the release that upgraded it,
+      or restore the dump taken before that update first
+      (roundcube-<release>-<timestamp> in {{ roundcube_backup_dir }}, see README).
+      {% endif %}
+  vars:
+    __roundcube_schema: '{{ __roundcube_schema_status.stdout | from_json }}'
+  when: __roundcube_schema_status is not skipped
+
+- name: Schema | Set the schema state
+  ansible.builtin.set_fact:
+    __roundcube_schema_init: '{{ __roundcube_schema.tables == 0 }}'
+    __roundcube_schema_upgrade: >-
+      {{ __roundcube_schema.system and __roundcube_schema.version < __roundcube_schema.target }}
+  vars:
+    __roundcube_schema: '{{ __roundcube_schema_status.stdout | from_json }}'
+  when: __roundcube_schema_status is not skipped
+
+# Pre-update backup: before the schema upgrade of a new release the dump of
+# a database on this host is the way back (the upgrade is forward-only).
+- name: Schema | Create the backup directory
+  ansible.builtin.file:
+    path: '{{ roundcube_backup_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  when: __roundcube_backup_active | bool
+
+- name: Schema | Deploy the backup script
+  ansible.builtin.template:
+    src: roundcube-backup.sh.j2
+    dest: '{{ __roundcube_backup_script }}'
+    owner: root
+    group: root
+    mode: '0750'
+  when: __roundcube_backup_active | bool
+
+# The dumps already written stay; only the script goes
+- name: Schema | Remove the backup script
+  ansible.builtin.file:
+    path: '{{ __roundcube_backup_script }}'
+    state: absent
+  when: not __roundcube_backup_active | bool
+
+- name: Schema | Dump the database before the schema upgrade
+  ansible.builtin.command:
+    argv:
+      - '{{ __roundcube_backup_script }}'
+      # The release the schema in the dump belongs to: the active one, or
+      # the schema version when no release of the role is active
+      - >-
+        {{ __roundcube_release_previous
+           or ('schema' ~ (__roundcube_schema_status.stdout | from_json).version) }}
+  register: __roundcube_backup
+  changed_when: true
+  when:
+    - __roundcube_backup_active | bool
+    - __roundcube_schema_upgrade | default(false) | bool
+
+# The upgrade goes on: the role cannot dump a database on another host, and
+# roundcube_backup_enabled: false is a choice of the inventory.
+- name: Schema | Warn about a schema upgrade without a pre-update dump
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: the Roundcube schema is upgraded for {{ __roundcube_release }} without a
+      pre-update dump ({{ 'roundcube_backup_enabled is false' if not roundcube_backup_enabled | bool
+          else 'the database server ' ~ roundcube_db_host ~ ' is not on this host' }}).
+      The upgrade cannot be undone; going back to {{ __roundcube_release_previous or 'the previous release' }}
+      needs a backup of the database {{ roundcube_db_name }} taken before this run. Pin
+      roundcube_version and roundcube_checksum in the inventory to update only when the backup
+      is in place.
+  when:
+    - not __roundcube_backup_active | bool
+    - __roundcube_schema_upgrade | default(false) | bool
+
+- name: Schema | Create the schema
+  ansible.builtin.command:
+    argv:
+      - '{{ roundcube_php_cli }}'
+      - '{{ __roundcube_release_dir }}/bin/initdb.sh'
+      - '--dir={{ __roundcube_release_dir }}/SQL'
+  become: true
+  become_user: '{{ __roundcube_fpm_user }}'
+  register: __roundcube_schema_create
+  changed_when: true
+  when: __roundcube_schema_init | default(false) | bool
+
+- name: Schema | Upgrade the schema
+  ansible.builtin.command:
+    argv:
+      - '{{ roundcube_php_cli }}'
+      - '{{ __roundcube_release_dir }}/bin/updatedb.sh'
+      - '--package=roundcube'
+      - '--dir={{ __roundcube_release_dir }}/SQL'
+  become: true
+  become_user: '{{ __roundcube_fpm_user }}'
+  register: __roundcube_schema_update
+  changed_when: true
+  when: __roundcube_schema_upgrade | default(false) | bool
+
+- name: Schema | Read the schema state after the change
+  ansible.builtin.command:
+    argv:
+      - '{{ roundcube_php_cli }}'
+      - '{{ __roundcube_helper }}'
+      - '{{ __roundcube_release_dir }}'
+  become: true
+  become_user: '{{ __roundcube_fpm_user }}'
+  register: __roundcube_schema_after
+  changed_when: false
+  when: __roundcube_schema_create is changed or __roundcube_schema_update is changed
+
+- name: Schema | Assert the schema is up to date
+  ansible.builtin.assert:
+    that:
+      - __roundcube_schema.system
+      - __roundcube_schema.version == __roundcube_schema.target
+    fail_msg: >-
+      The schema is at version {{ __roundcube_schema.version }}, Roundcube
+      {{ __roundcube_schema.release }} expects {{ __roundcube_schema.target }}.
+    quiet: true
+  vars:
+    __roundcube_schema: '{{ __roundcube_schema_after.stdout | from_json }}'
+  when: __roundcube_schema_after is not skipped

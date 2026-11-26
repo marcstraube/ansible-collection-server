@@ -1,0 +1,165 @@
+---
+# The packaged php-fpm profile grants no files of an application; it
+# includes every file of /etc/apparmor.d/php-fpm.d, where the role puts the
+# rules of Roundcube. The profile comes with the apparmor package (Arch
+# Linux, enforced) or with apparmor-profiles (Debian, complain mode); a host
+# without AppArmor or without the profile needs no rules.
+
+- name: AppArmor | Check if AppArmor is active
+  ansible.builtin.stat:
+    path: /sys/kernel/security/apparmor
+  register: __roundcube_apparmor_active
+
+- name: AppArmor | Check if the php-fpm profile exists
+  ansible.builtin.stat:
+    path: '{{ __roundcube_apparmor_profile }}'
+  register: __roundcube_apparmor_profile_stat
+
+- name: AppArmor | Manage the rules of Roundcube
+  when:
+    - __roundcube_apparmor_active.stat.exists
+    - __roundcube_apparmor_profile_stat.stat.exists
+  vars:
+    __roundcube_apparmor_disabled: '{{ __roundcube_apparmor_mode.results[0].stat.exists }}'
+  block:
+    # A disabled profile is not loaded; one in force-complain is loaded in
+    # complain mode
+    - name: AppArmor | Check the mode of the php-fpm profile
+      ansible.builtin.stat:
+        path: '{{ item }}/{{ __roundcube_apparmor_profile | basename }}'
+      loop:
+        - '{{ __roundcube_apparmor_profile | dirname }}/disable'
+        - '{{ __roundcube_apparmor_profile | dirname }}/force-complain'
+      register: __roundcube_apparmor_mode
+
+    # AppArmor matches the path behind symlinks
+    - name: AppArmor | Resolve the paths of the rules
+      ansible.builtin.command:
+        argv: "{{ ['realpath', '-m', '--'] + __roundcube_apparmor_paths }}"
+      register: __roundcube_apparmor_realpath
+      changed_when: false
+      check_mode: false
+      when: roundcube_apparmor_enabled | bool
+
+    # Restored when the profile does not load with the new rules
+    - name: AppArmor | Read the current rules
+      ansible.builtin.slurp:
+        src: '{{ __roundcube_apparmor_rules }}'
+      register: __roundcube_apparmor_previous
+      failed_when: false
+      when: roundcube_apparmor_enabled | bool
+
+    - name: AppArmor | Create the rules directory of the php-fpm profile
+      ansible.builtin.file:
+        path: '{{ __roundcube_apparmor_rules | dirname }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      register: __roundcube_apparmor_dir
+      when: roundcube_apparmor_enabled | bool
+
+    - name: AppArmor | Deploy the rules
+      ansible.builtin.template:
+        src: apparmor-php-fpm.j2
+        dest: '{{ __roundcube_apparmor_rules }}'
+        owner: root
+        group: root
+        mode: '0644'
+      register: __roundcube_apparmor_deployed
+      # In check mode a missing directory is not created
+      when:
+        - roundcube_apparmor_enabled | bool
+        - not (__roundcube_check_mode | default(ansible_check_mode) and __roundcube_apparmor_dir is changed)
+
+    - name: AppArmor | Remove the rules
+      ansible.builtin.file:
+        path: '{{ __roundcube_apparmor_rules }}'
+        state: absent
+      register: __roundcube_apparmor_removed
+      when: not roundcube_apparmor_enabled | bool
+
+    - name: AppArmor | Report the rules of the disabled profile
+      ansible.builtin.debug:
+        msg: >-
+          The php-fpm profile is disabled
+          ({{ __roundcube_apparmor_mode.results[0].stat.path }}); the rules in
+          {{ __roundcube_apparmor_rules | dirname }} apply once it is enabled.
+      when:
+        - __roundcube_apparmor_disabled | bool
+        - __roundcube_apparmor_deployed is changed or __roundcube_apparmor_removed is changed
+
+    # A reload that failed or did not happen (an interrupted run) is
+    # repeated on the next run, also when the rules are unchanged then
+    - name: AppArmor | Check for a pending reload
+      ansible.builtin.stat:
+        path: '{{ __roundcube_apparmor_pending }}'
+      register: __roundcube_apparmor_pending_stat
+
+    - name: AppArmor | Mark the reload as pending
+      ansible.builtin.copy:
+        content: ''
+        dest: '{{ __roundcube_apparmor_pending }}'
+        owner: root
+        group: root
+        mode: '0644'
+      when:
+        - not __roundcube_apparmor_disabled | bool
+        - __roundcube_apparmor_deployed is changed or __roundcube_apparmor_removed is changed
+
+    # Runs immediately, not as a handler: the rules are in place before
+    # PHP-FPM needs them. Running workers get the replaced profile at once.
+    - name: AppArmor | Load the rules
+      when:
+        - not __roundcube_apparmor_disabled | bool
+        - >-
+          __roundcube_apparmor_deployed is changed or __roundcube_apparmor_removed is changed
+          or __roundcube_apparmor_pending_stat.stat.exists
+      block:
+        - name: AppArmor | Reload the php-fpm profile
+          ansible.builtin.command:
+            argv: >-
+              {{ ['apparmor_parser', '-r']
+                 + (['-C'] if __roundcube_apparmor_mode.results[1].stat.exists else [])
+                 + [__roundcube_apparmor_profile] }}
+          register: __roundcube_apparmor_reload
+          changed_when: true
+
+        - name: AppArmor | Clear the pending reload
+          ansible.builtin.file:
+            path: '{{ __roundcube_apparmor_pending }}'
+            state: absent
+      rescue:
+        # New rules the profile does not load with are replaced by the ones
+        # before (rules of another file may be the cause), so the next boot
+        # loads the profile. Removed rules stay removed.
+        - name: AppArmor | Restore the rules before the run
+          ansible.builtin.copy:
+            content: '{{ __roundcube_apparmor_previous.content | b64decode }}'
+            dest: '{{ __roundcube_apparmor_rules }}'
+            owner: root
+            group: root
+            mode: '0644'
+          when:
+            - __roundcube_apparmor_deployed is changed
+            - __roundcube_apparmor_previous.content is defined
+
+        - name: AppArmor | Remove the new rules
+          ansible.builtin.file:
+            path: '{{ __roundcube_apparmor_rules }}'
+            state: absent
+          when:
+            - __roundcube_apparmor_deployed is changed
+            - __roundcube_apparmor_previous.content is not defined
+
+        - name: AppArmor | Fail on the php-fpm profile
+          ansible.builtin.fail:
+            msg: >-
+              apparmor_parser did not load {{ __roundcube_apparmor_profile }}
+              ({{ __roundcube_apparmor_reload.stderr | default(__roundcube_apparmor_reload.msg, true) | trim }}).
+              PHP-FPM keeps the profile that was loaded before;
+              {{ __roundcube_apparmor_rules }}
+              {{ 'is back at its state before the run' if __roundcube_apparmor_deployed is changed
+                 else 'stays removed' if __roundcube_apparmor_removed is changed
+                 else 'is unchanged' }}.
+              Fix the profile and run the role again; it repeats the reload.

@@ -1,0 +1,120 @@
+---
+# Web host: PHP of the base system, nginx of the web_server playbook and
+# PostfixAdmin, Roundcube and SOGo of the mail_server playbook. The
+# databases are on the database host, IMAP, submission and ManageSieve on
+# the mail host, everything with TLS.
+ansible_python_interpreter: /usr/bin/python3
+
+php_enabled: true
+php_versions:
+  - version: 'auto'
+    extensions: ['pdo_pgsql', 'intl', 'mbstring', 'xml']
+    fpm: true
+php_default_version: 'auto'
+
+# Roundcube on the www pool of Debian 13 (PHP 8.4) for localhost, SOGo with
+# TLS for the host name
+nginx_enabled: true
+nginx_sites:
+  - name: 'roundcube'
+    server_names:
+      - 'localhost'
+    type: 'custom'
+    root: '/var/www/roundcube/current/public_html'
+    index: 'index.php'
+    locations:
+      - path: '/'
+        config: |
+          try_files $uri $uri/ /index.php$is_args$args;
+      - path: '~ \.php(/|$)'
+        config: |
+          fastcgi_split_path_info ^(.+?\.php)(/.*)$;
+          try_files $fastcgi_script_name =404;
+          set $path_info $fastcgi_path_info;
+          fastcgi_pass unix:/run/php/php8.4-fpm.sock;
+          fastcgi_index index.php;
+          include fastcgi_params;
+          fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+          fastcgi_param DOCUMENT_ROOT $realpath_root;
+          fastcgi_param PATH_INFO $path_info;
+  - name: 'sogo'
+    server_names:
+      - '{{ __molecule_web_host }}'
+    type: 'custom'
+    ssl:
+      enabled: true
+      certificate: '/etc/molecule-tls/web.pem'
+      certificate_key: '/etc/molecule-tls/web.key'
+    http_redirect: true
+    client_max_body_size: '50m'
+    locations:
+      - path: '= /'
+        config: 'return 302 /SOGo/;'
+      - path: '^~ /SOGo.woa/WebServerResources/'
+        config: |
+          alias /usr/share/GNUstep/SOGo/WebServerResources/;
+          expires max;
+      - path: '^~ /SOGo/WebServerResources/'
+        config: |
+          alias /usr/share/GNUstep/SOGo/WebServerResources/;
+          expires max;
+      - path: '^~ /SOGo'
+        config: |
+          proxy_pass http://127.0.0.1:20000;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header x-webobjects-server-protocol HTTP/1.0;
+          proxy_set_header x-webobjects-remote-host $remote_addr;
+          proxy_set_header x-webobjects-server-name $server_name;
+          proxy_set_header x-webobjects-server-url $scheme://$host;
+          proxy_set_header x-webobjects-server-port $server_port;
+          proxy_read_timeout 300;
+
+postfixadmin_enabled: true
+postfixadmin_db_type: 'postgresql'
+postfixadmin_db_host: '{{ __molecule_db_host }}'
+postfixadmin_db_password: '{{ __molecule_db_passwords.postfixadmin }}'
+postfixadmin_db_tls: true
+postfixadmin_db_tls_ca_file: '{{ __molecule_ca_file }}'
+postfixadmin_sogo_view_enabled: true
+postfixadmin_extra_config:
+  emailcheck_resolve_domain: 'NO'
+postfixadmin_domains:
+  - domain: 'example.com'
+postfixadmin_mailboxes:
+  - username: 'alice@example.com'
+    password: "{{ __molecule_passwords['alice@example.com'] }}"
+    name: 'Alice'
+  - username: 'bob@example.com'
+    password: "{{ __molecule_passwords['bob@example.com'] }}"
+    name: 'Bob'
+  - username: 'support@example.com'
+    password: "{{ __molecule_passwords['support@example.com'] }}"
+    name: 'Support'
+
+roundcube_enabled: true
+roundcube_des_key: 'molecule-des-key-0123456789abcdef'
+roundcube_db_host: '{{ __molecule_db_host }}'
+roundcube_db_password: '{{ __molecule_db_passwords.roundcube }}'
+roundcube_db_tls: true
+roundcube_db_tls_ca_file: '{{ __molecule_ca_file }}'
+roundcube_imap_host: '{{ __molecule_mail_host }}'
+roundcube_smtp_host: '{{ __molecule_mail_host }}'
+roundcube_tls_ca_file: '{{ __molecule_ca_file }}'
+
+sogo_enabled: true
+sogo_db_type: 'postgresql'
+sogo_db_host: '{{ __molecule_db_host }}'
+sogo_db_password: '{{ __molecule_db_passwords.sogo }}'
+sogo_db_tls: true
+sogo_db_tls_ca_file: '{{ __molecule_ca_file }}'
+sogo_postfixadmin_db_user: 'sogo_view'
+sogo_postfixadmin_db_password: '{{ __molecule_db_passwords.sogo_view }}'
+sogo_mail_domain: 'example.com'
+# SOGo verifies Dovecot and Postfix against the trust store of the host
+sogo_imap_server: 'imaps://{{ __molecule_mail_host }}:993'
+sogo_smtp_server: 'smtp://{{ __molecule_mail_host }}:587/?tls=YES'
+sogo_sieve_server: 'sieve://{{ __molecule_mail_host }}:4190/?tls=YES'
+sogo_workers: 2

@@ -1,0 +1,81 @@
+---
+# PostfixAdmin owns its schema: upgrade.php (what setup.php runs) creates
+# the tables in an empty database and applies the upgrades of a new
+# release. The helper runs it from the command line; the schema version is
+# the 'version' row of the config table, the target the version the
+# installed release requires ($min_db_version). The upgrade belongs to a
+# release change, so its tasks also run under postfixadmin:install; the
+# SOGo view stays under postfixadmin:schema.
+
+- name: Schema | Read the schema version
+  ansible.builtin.command:
+    argv:
+      - '{{ postfixadmin_php_cli }}'
+      - '{{ __postfixadmin_helper }}'
+      - '{{ postfixadmin_install_dir }}'
+    stdin: '{{ {"action": "status"} | to_json }}'
+  register: __postfixadmin_schema_status
+  changed_when: false
+  check_mode: false
+  # A check run before the first install has no release to read
+  failed_when:
+    - __postfixadmin_schema_status.rc != 0
+    - not (__postfixadmin_check_mode and __postfixadmin_release_changed | default(false) | bool)
+  tags:
+    - postfixadmin:install
+
+- name: Schema | Upgrade the schema
+  ansible.builtin.command:
+    argv:
+      - '{{ postfixadmin_php_cli }}'
+      - '{{ __postfixadmin_helper }}'
+      - '{{ postfixadmin_install_dir }}'
+    stdin: '{{ {"action": "upgrade"} | to_json }}'
+  register: __postfixadmin_schema_upgrade
+  # A failed run prints the helper's message, not a 'changed' key
+  changed_when: __postfixadmin_schema_upgrade.rc == 0 and (__postfixadmin_schema_upgrade.stdout | from_json).changed
+  when:
+    - __postfixadmin_schema_status.rc == 0
+    - __postfixadmin_schema.db_version < __postfixadmin_schema.target_version
+  vars:
+    __postfixadmin_schema: '{{ __postfixadmin_schema_status.stdout | from_json }}'
+  tags:
+    - postfixadmin:install
+
+- name: Schema | Assert the schema is up to date
+  ansible.builtin.assert:
+    that:
+      - __postfixadmin_schema_version >= __postfixadmin_schema.target_version
+    fail_msg: >-
+      The schema is at version {{ __postfixadmin_schema_version }}, the release
+      {{ __postfixadmin_schema.release }} expects {{ __postfixadmin_schema.target_version }}.
+    quiet: true
+  vars:
+    __postfixadmin_schema: '{{ __postfixadmin_schema_status.stdout | from_json }}'
+    __postfixadmin_schema_version: >-
+      {{ (__postfixadmin_schema_upgrade.stdout | from_json).db_version
+         if __postfixadmin_schema_upgrade.stdout is defined
+         else __postfixadmin_schema.db_version }}
+  when:
+    - not __postfixadmin_check_mode
+    - __postfixadmin_schema_status.rc == 0
+  tags:
+    - postfixadmin:install
+
+# Dropped when disabled, but only a view with exactly the columns of the
+# role's view; another object of that name stays.
+- name: Schema | Manage the SOGo view
+  ansible.builtin.command:
+    argv:
+      - '{{ postfixadmin_php_cli }}'
+      - '{{ __postfixadmin_helper }}'
+      - '{{ postfixadmin_install_dir }}'
+    stdin: >-
+      {{ {'action': 'sogo_view', 'name': postfixadmin_sogo_view_name,
+          'state': postfixadmin_sogo_view_enabled | bool | ternary('present', 'absent'),
+          'check': __postfixadmin_check_mode} | to_json }}
+  register: __postfixadmin_sogo_view
+  # A failed run prints the helper's message, not a 'changed' key
+  changed_when: __postfixadmin_sogo_view.rc == 0 and (__postfixadmin_sogo_view.stdout | from_json).changed
+  check_mode: false
+  when: __postfixadmin_schema_status.rc == 0

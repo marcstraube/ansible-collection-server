@@ -1,0 +1,145 @@
+---
+# The community.general.dig lookup runs on the controller. Missing records
+# never fail the run. The expected records are printed on every run, also
+# when the check is off or the lookup itself fails. The DKIM records come
+# from the public records the role stored next to the keys (dkim.yml); a
+# key that does not exist yet (check mode on a new host) is listed without
+# its value and not checked.
+
+- name: DNS | Read the public DKIM records
+  ansible.builtin.slurp:
+    src: '{{ __rspamd_dkim_dir }}/{{ item.domain | lower }}.{{ item.selector }}.txt'
+  loop: '{{ rspamd_dkim_domains }}'
+  loop_control:
+    label: '{{ item.selector }}._domainkey.{{ item.domain | lower }}'
+  register: __rspamd_dkim_public
+  # A key the role has not created (yet) has no record file
+  failed_when: false
+
+# domain|selector -> 'v=DKIM1; k=rsa; p=...'
+- name: DNS | Collect the public DKIM records
+  ansible.builtin.set_fact:
+    __rspamd_dkim_records: >-
+      {{ dict(__rspamd_dkim_public.results
+              | map(attribute='item') | map(attribute='domain') | map('lower')
+              | zip(__rspamd_dkim_public.results | map(attribute='item') | map(attribute='selector'))
+              | map('join', '|')
+              | zip(__rspamd_dkim_public.results | map(attribute='content', default='')
+                    | map('b64decode') | map('trim'))) }}
+
+# Starts every run from the unchecked records, so a report or an error of an
+# earlier run in the same play never shows up again
+- name: DNS | Reset report
+  ansible.builtin.set_fact:
+    __rspamd_dns_report: >-
+      {{ __rspamd_dns_records | map('combine', {'status': 'unchecked', 'found': []}) | list }}
+    __rspamd_dns_error: ''
+
+- name: DNS | Check records
+  when:
+    - rspamd_dns_check_enabled | bool
+    - __rspamd_dns_records | length > 0
+  block:
+    - name: DNS | Query records
+      ansible.builtin.set_fact:
+        __rspamd_dns_answer: >-
+          {{ query('community.general.dig', item.query, *__rspamd_dns_servers,
+                   qtype='TXT', **__rspamd_dns_options) }}
+      loop: '{{ __rspamd_dns_records }}'
+      loop_control:
+        label: '{{ item.type }} {{ item.name }}'
+      register: __rspamd_dns_answers
+
+    # TXT '"part" "part"' -> one string. DKIM counts the records with a p=
+    # tag (v=DKIM1 is optional, RFC 6376 3.6.1) and compares the public key,
+    # DMARC counts the records with
+    # v=DMARC1 and compares the tags without whitespace and case. A DKIM
+    # record without a key file stays unchecked.
+    - name: DNS | Compare records
+      ansible.builtin.set_fact:
+        __rspamd_dns_result:
+          name: '{{ __record.name }}'
+          type: '{{ __record.type }}'
+          record: '{{ __record.record }}'
+          found: '{{ __found }}'
+          status: >-
+            {{ 'unchecked' if __record.value | length == 0
+               else 'missing' if __found | length == 0
+               else 'present' if __expected in (__found | map('regex_replace', __normalize, '') | map('lower')
+                                                 | map('regex_replace', ';$', '') | list
+                                                if __record.type == 'DMARC'
+                                                else __found | map('regex_findall', 'p=([^;\s]*)')
+                                                     | map('join', '') | list)
+               else 'different' }}
+      loop: '{{ __rspamd_dns_answers.results }}'
+      loop_control:
+        label: '{{ __record.type }} {{ __record.name }}'
+      register: __rspamd_dns_results
+      vars:
+        __normalize: '\s+'
+        __record: '{{ item.item }}'
+        __answer: >-
+          {{ item.ansible_facts.__rspamd_dns_answer | reject('in', ['', 'NXDOMAIN']) | map('string')
+             | map('regex_replace', '"\s+"', '') | map('regex_replace', '^"|"$', '') | list }}
+        __found: >-
+          {{ (__answer | select('match', '(?i)^v=DMARC1\s*(;|$)') | list)
+             if __record.type == 'DMARC'
+             else (__answer | select('search', '(?i)(^|;)\s*p=') | list) }}
+        __expected: >-
+          {{ (__record.value | regex_replace(__normalize, '') | lower | regex_replace(';$', ''))
+             if __record.type == 'DMARC'
+             else (__record.value | regex_findall('p=([^;\s]*)') + ['']) | first }}
+
+    - name: DNS | Collect report
+      ansible.builtin.set_fact:
+        __rspamd_dns_report: >-
+          {{ __rspamd_dns_results.results
+             | map(attribute='ansible_facts.__rspamd_dns_result') | list }}
+
+  # Only an error of the dig lookup itself (dnspython missing, a resolver name
+  # that does not resolve, an unexpected resolver error) skips the check. The
+  # lookup plugin is named in its error message, also per item of a loop; any
+  # other error, such as a broken variable, is a bug and fails the run with
+  # its original message.
+  rescue:
+    - name: DNS | Fail on errors other than the lookup
+      ansible.builtin.fail:
+        msg: '{{ __rspamd_dns_failures | unique | join(" ") }}'
+      when: >-
+        __rspamd_dns_failures | length == 0
+        or __rspamd_dns_failures
+           | reject('search', "lookup plugin 'community.general.dig'") | list | length > 0
+      vars:
+        __rspamd_dns_failures: &rspamd_dns_failures >-
+          {{ (ansible_failed_result.results | default([ansible_failed_result]))
+             | selectattr('failed', 'defined') | selectattr('failed')
+             | map(attribute='msg', default='') | list }}
+
+    - name: DNS | Record lookup error
+      ansible.builtin.set_fact:
+        __rspamd_dns_error: '{{ __rspamd_dns_failures | first }}'
+      vars:
+        __rspamd_dns_failures: *rspamd_dns_failures
+
+- name: DNS | Show records
+  ansible.builtin.debug:
+    msg: >-
+      {{
+        __rspamd_dns_report
+        | map(attribute='status') | map('upper')
+        | zip(__rspamd_dns_report | map(attribute='record'),
+              __rspamd_dns_report | map(attribute='found') | map('join', ', '))
+        | map('join', ' | ') | map('regex_replace', ' [|] $', '') | list
+      }}
+  when: __rspamd_dns_records | length > 0
+
+- name: DNS | Warn about the failed check
+  ansible.builtin.debug:
+    msg: >-
+      The DNS check could not run, the records above are unchecked. Lookup
+      error: {{ __rspamd_dns_error }}
+      The controller needs the Python library dnspython for the
+      community.general.dig lookup, and rspamd_dns_resolver must be an IPv4
+      address or a name the controller resolves. Set
+      rspamd_dns_check_enabled to false to turn the check off.
+  when: __rspamd_dns_error | length > 0

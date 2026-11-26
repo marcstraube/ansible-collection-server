@@ -1,0 +1,7 @@
+{{ ansible_managed | comment }}
+#
+# HTTP/2 is configured in apache2.conf (Protocols, H2* settings) and in the
+# SSL vhosts. The version of this file shipped with apache2 sets
+# 'Protocols h2 h2c http/1.1' server-wide; Protocols directives in one context
+# add up, so it would turn on h2 and h2c for every vhost that inherits the
+# server default, whatever the role sets.

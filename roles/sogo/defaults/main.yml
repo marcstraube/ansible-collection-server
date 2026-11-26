@@ -1,0 +1,314 @@
+---
+#
+# Role Control
+#
+
+# Enable the sogo role
+sogo_enabled: false
+
+# Enable and start the SOGo service
+sogo_service_enabled: true
+
+#
+# Package Updates
+#
+
+# State of the SOGo packages:
+#   'present' installs missing packages and never updates (default).
+#   'latest'  updates the installed SOGo packages in one transaction and
+#             restarts SOGo while it still runs the replaced binary. On
+#             Rocky Linux it rebuilds the container image from a freshly
+#             pulled base image, copies the web resources again and
+#             restarts SOGo with the new image.
+# Pass 'latest' for a targeted update instead of setting it in inventory:
+#   --tags sogo -e sogo_packages_state=latest
+# Ignored on Arch Linux: SOGo comes from the AUR and updates with the full
+# system upgrade through the AUR helper.
+sogo_packages_state: 'present'
+
+# Lowest acceptable SOGo version, checked before the update (nothing changes
+# when the repository does not offer it yet) and again after it. Meant to be
+# passed with the update command to require a fix. Either an upstream
+# version, which accepts every distribution release of it:
+#   -e sogo_packages_minimum=5.12.1
+# or the full distribution version, which also covers fixes the
+# distribution backports without a new upstream version:
+#   -e sogo_packages_minimum=5.12.1-3+deb13u3
+# Rocky Linux compares the Debian package in the container image. A mapping
+# per platform (keys '<os_family>-<major>' or '<os_family>') covers mixed
+# hosts in one run; a host without a matching key fails:
+#   -e @sogo-minimum.yml
+sogo_packages_minimum: ''
+
+#
+# Installation
+#
+
+# ActiveSync (Microsoft-Server-ActiveSync): the sogo-activesync package on
+# Debian and in the container image of Rocky Linux; the AUR build of Arch
+# Linux always contains it
+sogo_activesync_enabled: false
+
+# Rocky Linux Container
+#
+# EL has no SOGo packages; the role builds a local image on this base image
+# with the Debian package and runs it with rootless podman under the sogo
+# user (podman from marcstraube.common.podman). The base image has to be a
+# Debian release with a sogo package.
+
+# Base image of the local SOGo image (Rocky Linux only)
+sogo_container_base_image: 'docker.io/library/debian:trixie'
+
+# Subordinate UID/GID range of the sogo user for the user namespace of the
+# container (Rocky Linux only); it must not overlap with the ranges of other
+# users in /etc/subuid and /etc/subgid (the default follows the range of the
+# activepieces role)
+sogo_subid_start: 231072
+sogo_subid_count: 65536
+
+# Debian mirrors the build uses instead of deb.debian.org (Rocky Linux only;
+# empty: the sources of the base image), e.g. an internal mirror of a host
+# without internet access. The base image itself comes from
+# sogo_container_base_image (an internal registry then).
+sogo_container_debian_mirror: ''
+sogo_container_debian_security_mirror: ''
+
+# Directory the role copies the WebServerResources of the image to after
+# every build, served by the web server (Rocky Linux only; Debian and Arch
+# Linux serve them from the package, see README). Letters, digits, '.',
+# '_', '-' and '/' only, no '.' or '..' segments, at least two levels
+# deep.
+sogo_web_resources_dir: '/usr/local/share/sogo/WebServerResources'
+
+# Seconds the role waits for sogod after a (re)start; the first start of a
+# new image copies its layers into the user namespace of the sogo user
+sogo_service_start_timeout: 600
+
+#
+# Network
+#
+
+# Address and port of sogod (WOPort). The web server on this host proxies
+# to it; keep it on the loopback interface.
+sogo_bind: '127.0.0.1:20000'
+
+# memcached server of SOGo (SOGoMemcachedHost): a host name or IP address
+# with an optional port ('host:port', '[v6]:port', a bare IPv6 address) or
+# a socket path (not in the container of Rocky Linux). A loopback address
+# ('localhost', '127.0.0.1', '::1', '[::1]', with or without a port) or a
+# socket path counts as this host: the role installs and enables memcached
+# here, and a restore restarts it. Another host gets flush_all after a
+# restore.
+sogo_memcached_host: '127.0.0.1'
+
+#
+# Database
+#
+# Connection settings of the SOGo database (profiles, folders, sessions,
+# e-mail alarms and the combined store, ACL and cache tables). SOGo creates
+# its tables itself; the database server may run on another host and does
+# not have to be managed by Ansible.
+
+# Database type: 'postgresql' or 'mariadb'
+sogo_db_type: 'postgresql'
+
+# Host name or IP address (TCP). SOGo cannot use the unix socket of a
+# server on this host in the container of Rocky Linux; the loopback address
+# works on every platform.
+sogo_db_host: '127.0.0.1'
+
+# Port of the database server
+sogo_db_port: "{{ (sogo_db_type == 'mariadb') | ternary(3306, 5432) }}"
+
+# Database name, user and password (REQUIRED). SOGo puts the password into
+# a database URL: letters, digits and - . _ ~ ! $ & ' ( ) * + , ; = only.
+sogo_db_name: 'sogo'
+sogo_db_user: 'sogo'
+sogo_db_password: ''
+
+# Connect with TLS and verify the server certificate against
+# sogo_db_tls_ca_file (PostgreSQL sslmode verify-full; MariaDB
+# MySQL4SSLEnabled). Applies to every database connection of SOGo, the
+# PostfixAdmin database included. Without TLS the connection is
+# unencrypted: only for a private network or WireGuard.
+sogo_db_tls: false
+sogo_db_tls_ca_file: ''
+
+# Create the database and its owner sogo_db_user. Only for a database server
+# on the same host (sogo_db_host a loopback address); requires the
+# marcstraube.server.postgresql or marcstraube.server.mariadb role to run
+# first.
+sogo_db_create: false
+
+#
+# Users
+#
+# SOGo authenticates the users against the SOGo view of the PostfixAdmin
+# database (postfixadmin_sogo_view_enabled of marcstraube.server.postfixadmin)
+# with a database user of postfixadmin_db_readers. The database type is
+# sogo_db_type.
+
+# Connection to the PostfixAdmin database
+sogo_postfixadmin_db_host: '{{ sogo_db_host }}'
+sogo_postfixadmin_db_port: '{{ sogo_db_port }}'
+sogo_postfixadmin_db_name: 'postfixadmin'
+
+# User of the view: SELECT, and UPDATE on c_password when password changes
+# are enabled (REQUIRED password, same characters as sogo_db_password; see
+# README). Whoever can read sogo.conf can then set the password of every
+# mailbox. It differs from sogo_db_user: on one database server both are
+# the same account otherwise.
+sogo_postfixadmin_db_user: 'sogo_view'
+sogo_postfixadmin_db_password: ''
+
+# Name of the view (postfixadmin_sogo_view_name)
+sogo_postfixadmin_view: 'sogo_users'
+
+# Scheme of the password hashes (userPasswordAlgorithm), the one of
+# postfixadmin_password_scheme: 'ARGON2ID', 'BLF-CRYPT' or 'SHA512-CRYPT'.
+# SOGo reads the scheme prefix of a stored hash and writes a changed
+# password with the prefix (prependPasswordScheme), as PostfixAdmin does.
+sogo_password_scheme: 'ARGON2ID'
+
+# Users may change their password in SOGo (SOGoPasswordChangeEnabled).
+# Such a change bypasses postfixadmin_password_validation, and the next run
+# of the postfixadmin role resets it for mailboxes in 'managed' mode (see
+# README); needs UPDATE on c_password for sogo_postfixadmin_db_user.
+sogo_password_change_enabled: false
+
+# Login brute-force protection (SOGoMaximumFailedLoginCount,
+# SOGoMaximumFailedLoginInterval, SOGoFailedLoginBlockInterval): SOGo counts
+# the failed logins of an account from its first failure for
+# sogo_failed_login_block_interval seconds (then the count starts again).
+# Once the count reaches sogo_failed_login_count, every login of the
+# account, also with the correct password, is refused until
+# min(last failure + sogo_failed_login_interval, first failure +
+# sogo_failed_login_block_interval). 0 failures disables the protection.
+sogo_failed_login_count: 10
+sogo_failed_login_interval: 300
+sogo_failed_login_block_interval: 300
+
+# SOGo user sources (SOGoUserSources) replacing the source on the
+# PostfixAdmin view: a list of mappings with the keys of a SOGo source,
+# written as they are. Empty: the source on the PostfixAdmin view.
+sogo_user_sources: []
+# Example:
+#   - id: 'directory'
+#     type: 'ldap'
+#     CNFieldName: 'cn'
+#     UIDFieldName: 'uid'
+#     baseDN: 'ou=users,dc=example,dc=com'
+#     bindDN: 'uid=sogo,ou=services,dc=example,dc=com'
+#     bindPassword: '{{ vault_sogo_ldap_password }}'
+#     canAuthenticate: true
+#     isAddressBook: true
+#     hostname: 'ldaps://ldap.example.com'
+
+#
+# Mail
+#
+# SOGo reaches Dovecot and Postfix with TLS and verifies their certificates
+# against the system trust store and the host name in the URL: use the name
+# in the certificates, not 'localhost'.
+
+# Mail domain of the users without one in their login (SOGoMailDomain,
+# REQUIRED)
+sogo_mail_domain: ''
+
+# IMAP server of Dovecot (SOGoIMAPServer)
+sogo_imap_server: "imaps://{{ ansible_facts['fqdn'] }}:993"
+
+# SMTP submission of Postfix (SOGoSMTPServer); SOGo authenticates with the
+# credentials of the user
+sogo_smtp_server: "smtp://{{ ansible_facts['fqdn'] }}:587/?tls=YES"
+
+# ManageSieve of Dovecot (SOGoSieveServer) for filters, forwarding and
+# out-of-office replies; dovecot_managesieve_enabled has to be true. Empty
+# disables the three features.
+sogo_sieve_server: "sieve://{{ ansible_facts['fqdn'] }}:4190/?tls=YES"
+
+# Mail filters, forwarding and out-of-office replies in the preferences
+# (SOGoSieveScriptsEnabled, SOGoForwardEnabled, SOGoVacationEnabled); need
+# sogo_sieve_server
+sogo_sieve_scripts_enabled: true
+sogo_forward_enabled: true
+sogo_vacation_enabled: true
+
+#
+# Settings
+#
+
+# Default time zone and language of the users (SOGoTimeZone, SOGoLanguage)
+sogo_timezone: 'UTC'
+sogo_language: 'English'
+
+# Worker processes of sogod (WOWorkersCount; Debian sets it through
+# /etc/default/sogo)
+sogo_workers: 3
+
+# Further sogo.conf keys (name => value): strings, numbers, booleans, lists
+# and mappings are written in the property list syntax of sogo.conf. Keys
+# the role writes from its own variables are rejected.
+sogo_extra_config: {}
+# Example:
+#   SOGoPageTitle: 'Example Mail'
+#   SOGoMailAuxiliaryUserAccountsEnabled: true
+
+#
+# Periodic Jobs
+#
+# systemd timers instead of the cron jobs of the packages.
+
+# Sessions without activity for this many minutes end
+# (sogo-tool expire-sessions, every minute)
+sogo_session_timeout: 60
+sogo_expire_sessions_timer_enabled: true
+
+# E-mail alarms of events and tasks (SOGoEnableEMailAlarms,
+# sogo-ealarms-notify every minute)
+sogo_ealarms_timer_enabled: true
+
+# Activate and end out-of-office replies by their dates
+# (sogo-tool update-autoreply every 5 minutes). Needs a Sieve administrator
+# that may log in as every user (a Dovecot master user, see README); the
+# credentials go into a file readable by the sogo group only. Without them
+# the timer is stopped and the file removed.
+sogo_autoreply_timer_enabled: true
+sogo_sieve_admin_username: ''
+sogo_sieve_admin_password: ''
+
+#
+# Backup
+#
+# sogo-tool backup of all users (calendars, address books, preferences,
+# filters) into one directory per run.
+
+# Back up on a schedule
+sogo_backup_enabled: false
+
+# Directory of the backup sets (sogo:sogo 0700; letters, digits, '.', '_',
+# '-' and '/' only, no '.' or '..' segments, at least two levels deep).
+# Dedicated to the backups: the role refuses an existing directory of
+# another user instead of taking it over. The sogo user has to reach it:
+# on Rocky Linux podman mounts it as sogo, and /var/backups is often
+# root-only (0700)
+sogo_backup_dir: '/var/lib/sogo/backups'
+
+# Backup sets to keep (count-based, newest first)
+sogo_backup_keep: 7
+
+# Run the backup with a timer, and when
+sogo_backup_timer_enabled: true
+sogo_backup_on_calendar: 'daily'
+
+# Name of a backup set in sogo_backup_dir to restore, e.g.
+# 'sogo-20261101-030000'. Passed with -e for one run, never set in the
+# inventory. The role takes a fresh backup first (the named set is never
+# rotated; with no user data yet there is nothing to save and the restore
+# goes on), then restores every user of the set with sogo-tool restore (all
+# folders, replacing their content, and the preferences). Users the user
+# source does not know are skipped with a warning; when no user could be
+# restored, the run fails. Afterwards it restarts a memcached on this host
+# or sends flush_all to one on another host (cached folder information),
+# restarts SOGo and waits for it. Needs sogo_backup_enabled.
+sogo_restore: ''

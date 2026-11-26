@@ -1,0 +1,41 @@
+---
+# Database host: PostgreSQL with TLS. The users of the other hosts connect
+# with TLS only (hostssl, no host entry for them).
+ansible_python_interpreter: /usr/bin/python3
+
+postgresql_enabled: true
+postgresql_listen_addresses: '*'
+postgresql_firewalld_enabled: false
+postgresql_shared_buffers: '64MB'
+postgresql_effective_cache_size: '128MB'
+postgresql_lc_messages: 'en_US.UTF-8'
+postgresql_lc_monetary: 'en_US.UTF-8'
+postgresql_lc_numeric: 'en_US.UTF-8'
+postgresql_lc_time: 'en_US.UTF-8'
+postgresql_ssl_enabled: true
+postgresql_ssl_cert_file: '/etc/molecule-tls/db.pem'
+postgresql_ssl_key_file: '/etc/molecule-tls/db.key'
+postgresql_hba_additional:
+  - {type: 'hostssl', database: 'postfixadmin', user: 'postfixadmin', address: '0.0.0.0/0', method: 'scram-sha-256'}
+  - {type: 'hostssl', database: 'postfixadmin', user: 'postfix', address: '0.0.0.0/0', method: 'scram-sha-256'}
+  - {type: 'hostssl', database: 'postfixadmin', user: 'dovecot', address: '0.0.0.0/0', method: 'scram-sha-256'}
+  - {type: 'hostssl', database: 'postfixadmin', user: 'sogo_view', address: '0.0.0.0/0', method: 'scram-sha-256'}
+  - {type: 'hostssl', database: 'roundcube', user: 'roundcube', address: '0.0.0.0/0', method: 'scram-sha-256'}
+  - {type: 'hostssl', database: 'sogo', user: 'sogo', address: '0.0.0.0/0', method: 'scram-sha-256'}
+
+# The owners of the three databases and the read-only users of the
+# PostfixAdmin tables; their SELECT privileges are granted on this host
+# (postfixadmin_db_readers needs the database server on the PostfixAdmin
+# host), see converge.yml
+postgresql_users: >-
+  {{ __molecule_db_passwords | dict2items(key_name='name', value_name='password') }}
+postgresql_databases:
+  - name: 'postfixadmin'
+    owner: 'postfixadmin'
+  - name: 'roundcube'
+    owner: 'roundcube'
+  - name: 'sogo'
+    owner: 'sogo'
+    encoding: 'UTF8'
+    lc_collate: 'en_US.UTF-8'
+    lc_ctype: 'en_US.UTF-8'

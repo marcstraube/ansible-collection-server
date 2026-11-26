@@ -1,0 +1,53 @@
+---
+# The plays of a site playbook in the order of the README: the base system
+# (PHP of the web host, clamd of the clamd host; facts of every host), the
+# database and web server playbooks, the grants of the read-only users on the
+# database host, then the mail_server playbook.
+
+# Stand-in for the base play (marcstraube.common base_system) with the two
+# roles the mail stack needs
+- name: Converge — Base system
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Converge | Include php role
+      ansible.builtin.include_role:
+        name: marcstraube.common.php
+      when: php_enabled | bool
+
+    - name: Converge | Include clamav role
+      ansible.builtin.include_role:
+        name: marcstraube.common.clamav
+      when: clamav_enabled | bool
+
+- name: Converge — Database server playbook
+  ansible.builtin.import_playbook: marcstraube.server.database_server
+
+# postfixadmin_db_readers needs the database server on the PostfixAdmin
+# host; with the database on another host the read-only users get their
+# privileges there. PostfixAdmin creates its tables only in the mail play,
+# so the operator grants SELECT on the tables (and the SOGo view) the
+# PostfixAdmin user creates in the future.
+- name: Converge — Read-only users of the PostfixAdmin database
+  hosts: db_servers
+  gather_facts: false
+
+  tasks:
+    - name: Converge | Grant SELECT on the PostfixAdmin tables to the read-only users
+      community.postgresql.postgresql_privs:
+        login_db: 'postfixadmin'
+        type: 'default_privs'
+        target_roles: 'postfixadmin'
+        schema: 'public'
+        objs: 'TABLES'
+        privs: 'SELECT'
+        roles: 'postfix,dovecot,sogo_view'
+      become: true
+      become_user: postgres
+
+- name: Converge — Web server playbook
+  ansible.builtin.import_playbook: marcstraube.server.web_server
+
+- name: Converge — Mail server playbook
+  ansible.builtin.import_playbook: marcstraube.server.mail_server

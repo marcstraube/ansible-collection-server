@@ -1,0 +1,618 @@
+---
+# The AppArmor rules on the host of apparmor_host.yml with the Dovecot
+# profiles (Arch Linux): the rules of converge, the compiled profiles,
+# profiles that do not load (new, unchanged and removed rules, with the
+# reload repeated by the next run), files of the administrator, the toggle
+# (the whole role), a host without AppArmor or without a profile, a
+# disabled profile and one in force-complain, check mode and the rules
+# that depend on the variables. The variants run tasks/apparmor.yml alone.
+# Every step that breaks the host restores it in an always section, so a
+# failed assertion leaves the instance usable for the next verify. Ends
+# with the rules and the log of converge in place.
+- name: Verify | Read the AppArmor rules of converge
+  ansible.builtin.include_tasks: apparmor_rules.yml
+
+- name: Verify | Stat the AppArmor rules of converge
+  ansible.builtin.stat:
+    path: '{{ __verify_apparmor_dir }}/{{ item }}'
+  loop: '{{ __verify_apparmor_expected.keys() | list }}'
+  register: __verify_apparmor_stats
+
+# One call per file of converge: the check runs and idempotence load
+# nothing
+- name: Verify | Assert the AppArmor rules of converge
+  ansible.builtin.assert:
+    that:
+      - __verify_apparmor_rules == __verify_apparmor_converge
+      - __verify_apparmor_stats.results | map(attribute='stat.pw_name') | unique == ['root']
+      - __verify_apparmor_stats.results | map(attribute='stat.mode') | unique == ['0644']
+      - __verify_apparmor_calls
+        == __verify_apparmor_expected.keys() | map('regex_replace', '^', '-r /etc/apparmor.d/') | list
+    fail_msg: '{{ __verify_apparmor_rules | to_json }} {{ __verify_apparmor_calls | to_json }}'
+
+- name: Verify | Record the AppArmor rules and the log of converge
+  ansible.builtin.set_fact:
+    __verify_apparmor_converge_log: '{{ __verify_apparmor_calls }}'
+
+# The rules are part of the profiles and compile, sendmail and the spam
+# training programs with a profile of their own
+- name: Verify | Compile the Dovecot profiles
+  ansible.builtin.command:
+    argv: [apparmor_parser, --names, '/etc/apparmor.d/{{ item }}']
+  loop: '{{ __verify_apparmor_expected.keys() | list }}'
+  register: __verify_apparmor_compiled
+  changed_when: false
+
+- name: Verify | Assert the profiles compile with the rules
+  ansible.builtin.assert:
+    that:
+      - __verify_apparmor_compiled.results | map(attribute='stdout_lines') | flatten
+        == ['dovecot', 'dovecot-config', 'dovecot-lmtp', 'dovecot-lmtp//sendmail', 'dovecot-imap',
+            'dovecot-imap//rspamd-learn', 'dovecot-managesieve']
+    fail_msg: '{{ __verify_apparmor_compiled.results | map(attribute="stdout_lines") | list | to_json }}'
+
+#
+# Profiles that do not load: a broken file of tunables/dovecot.d, which the
+# profiles of lmtp, imap, pop3 and managesieve include. New rules for the
+# master and the config process (another certificate) load, new rules for
+# lmtp and imap (another mail root) do not, and the rules of managesieve
+# are removed.
+#
+
+- name: Verify | Run the AppArmor tasks with new rules and broken profiles
+  block:
+    - name: Verify | Create the drop-in directory of the Dovecot tunables
+      ansible.builtin.file:
+        path: '{{ __verify_apparmor_broken | dirname }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Verify | Break the profiles of lmtp, imap, pop3 and managesieve
+      ansible.builtin.copy:
+        content: "no AppArmor rule\n"
+        dest: '{{ __verify_apparmor_broken }}'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Verify | Include the AppArmor tasks with other paths  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: apparmor.yml
+      vars:
+        dovecot_tls_cert_file: '/srv/molecule-tls/cert.pem'
+        dovecot_mail_root: '/srv/molecule-mail'
+        dovecot_managesieve_enabled: false
+
+    - name: Verify | Fail when the broken profiles were accepted
+      ansible.builtin.fail:
+        msg: 'The role accepted profiles that do not load'
+  rescue:
+    - name: Verify | Assert the parser errors were reported
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_result.msg is search('did not load /etc/apparmor.d/usr.lib.dovecot.lmtp \(.*molecule-broken')
+          - ansible_failed_result.msg is search('local/usr.lib.dovecot.lmtp is back at its state before the run')
+          - ansible_failed_result.msg is search('local/usr.lib.dovecot.imap is back at its state before the run')
+          - ansible_failed_result.msg is search('local/usr.lib.dovecot.managesieve stays removed')
+          - ansible_failed_result.msg is not search('usr.sbin.dovecot')
+          - ansible_failed_result.msg is not search('usr.lib.dovecot.config')
+        fail_msg: '{{ ansible_failed_result.msg }}'
+
+    - name: Verify | Read the AppArmor rules after the failed reload
+      ansible.builtin.include_tasks: apparmor_rules.yml
+
+    - name: Verify | Stat the pending reload after the failure
+      ansible.builtin.stat:
+        path: '{{ __verify_apparmor_pending }}'
+      register: __verify_apparmor_pending_failed
+
+    # The rules that loaded stay, the others are back as before or removed
+    - name: Verify | Assert the loaded rules are kept, the others restored and the reload pending
+      ansible.builtin.assert:
+        that:
+          - __verify_apparmor_rules['usr.sbin.dovecot'] == __verify_apparmor_new_tls
+          - __verify_apparmor_rules['usr.lib.dovecot.config'] == __verify_apparmor_new_tls
+          - __verify_apparmor_rules['usr.lib.dovecot.lmtp'] == __verify_apparmor_converge['usr.lib.dovecot.lmtp']
+          - __verify_apparmor_rules['usr.lib.dovecot.imap'] == __verify_apparmor_converge['usr.lib.dovecot.imap']
+          - __verify_apparmor_rules['usr.lib.dovecot.managesieve'] is none
+          - __verify_apparmor_pending_failed.stat.exists
+        fail_msg: '{{ __verify_apparmor_rules | to_json }}'
+      vars:
+        __verify_apparmor_new_tls: ['"/srv/molecule-tls/cert.pem" r,', '"/etc/ssl/private/molecule-dovecot.key" r,']
+  always:
+    - name: Verify | Repair the Dovecot profiles
+      ansible.builtin.file:
+        path: '{{ __verify_apparmor_broken }}'
+        state: absent
+
+# The rules of converge again: the pending reload covers every profile
+- name: Verify | Include the AppArmor tasks after the repair  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: apparmor.yml
+
+- name: Verify | Check the repeated reload
+  ansible.builtin.include_tasks: apparmor_reloaded.yml
+  vars:
+    __verify_apparmor_case: 'repair'
+
+#
+# Toggle off with a file of the administrator: the whole role, the import in
+# main.yml has to run with it. The files of the role go, the other stays.
+#
+
+- name: Verify | Write a pop3 rules file of the administrator
+  ansible.builtin.copy:
+    content: "# Rules of the administrator\n/srv/molecule-admin/ r,\n"
+    dest: '{{ __verify_apparmor_dir }}/usr.lib.dovecot.pop3'
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Verify | Include dovecot role with the AppArmor rules off  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+  vars:
+    dovecot_apparmor_enabled: false
+
+- name: Verify | Read the AppArmor rules with the toggle off
+  ansible.builtin.include_tasks: apparmor_rules.yml
+
+- name: Verify | Stat the pending reload with the toggle off
+  ansible.builtin.stat:
+    path: '{{ __verify_apparmor_pending }}'
+  register: __verify_apparmor_off
+
+# The profiles that lost their rules are reloaded
+- name: Verify | Assert the rules of the role are removed and the profiles reloaded
+  ansible.builtin.assert:
+    that:
+      - "__verify_apparmor_rules | dict2items | rejectattr('value', 'none') | items2dict
+        == {'usr.lib.dovecot.pop3': ['/srv/molecule-admin/ r,']}"
+      - __verify_apparmor_calls[-5:] == __verify_apparmor_converge_log
+      - not __verify_apparmor_off.stat.exists
+    fail_msg: '{{ __verify_apparmor_rules | to_json }} {{ __verify_apparmor_calls | to_json }}'
+
+- name: Verify | Remove the pop3 rules file of the administrator
+  ansible.builtin.file:
+    path: '{{ __verify_apparmor_dir }}/usr.lib.dovecot.pop3'
+    state: absent
+
+#
+# No rules without AppArmor (/sys/kernel/security/apparmor) or without the
+# profile
+#
+
+- name: Verify | Run the AppArmor tasks on a host without them
+  ansible.builtin.include_tasks: apparmor_missing.yml
+  loop:
+    - /sys/kernel/security/apparmor
+    - /etc/apparmor.d/usr.lib.dovecot.lmtp
+  loop_control:
+    loop_var: __verify_apparmor_missing
+
+#
+# Disabled profile and force-complain
+#
+
+- name: Verify | Run the AppArmor tasks with a disabled profile and force-complain
+  block:
+    - name: Verify | Remove the AppArmor rules before the disabled profile
+      ansible.builtin.file:
+        path: '{{ __verify_apparmor_dir }}/{{ item }}'
+        state: absent
+      loop: '{{ __verify_apparmor_profiles }}'
+
+    - name: Verify | Create the force-complain directory
+      ansible.builtin.file:
+        path: /etc/apparmor.d/force-complain
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Verify | Disable the lmtp profile and force imap into complain mode
+      ansible.builtin.file:
+        src: '/etc/apparmor.d/{{ item.profile }}'
+        dest: '/etc/apparmor.d/{{ item.mode }}/{{ item.profile }}'
+        state: link
+      loop:
+        - {profile: 'usr.lib.dovecot.lmtp', mode: 'disable'}
+        - {profile: 'usr.lib.dovecot.imap', mode: 'force-complain'}
+
+    - name: Verify | Read the calls of apparmor_parser before the disabled profile
+      ansible.builtin.slurp:
+        src: '{{ __verify_apparmor_log }}'
+      register: __verify_apparmor_before_modes
+
+    - name: Verify | Include the AppArmor tasks with the disabled profile  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: apparmor.yml
+
+    - name: Verify | Read the AppArmor rules with the disabled profile
+      ansible.builtin.include_tasks: apparmor_rules.yml
+
+    - name: Verify | Stat the pending reload with the disabled profile
+      ansible.builtin.stat:
+        path: '{{ __verify_apparmor_pending }}'
+      register: __verify_apparmor_modes_pending
+
+    # The rules of the disabled profile are written for a later start of
+    # it, nothing loads it; imap loads in complain mode
+    - name: Verify | Assert the disabled profile was not loaded and imap in complain mode
+      ansible.builtin.assert:
+        that:
+          - __verify_apparmor_rules == __verify_apparmor_converge
+          - __verify_apparmor_calls[__verify_apparmor_lines_before:]
+            == ['-r /etc/apparmor.d/usr.sbin.dovecot', '-r /etc/apparmor.d/usr.lib.dovecot.config',
+                '-r -C /etc/apparmor.d/usr.lib.dovecot.imap', '-r /etc/apparmor.d/usr.lib.dovecot.managesieve']
+          - not __verify_apparmor_modes_pending.stat.exists
+        fail_msg: '{{ __verify_apparmor_calls | to_json }}'
+      vars:
+        __verify_apparmor_lines_before: >-
+          {{ (__verify_apparmor_before_modes.content | b64decode).splitlines() | length }}
+  always:
+    - name: Verify | Enable the lmtp profile and leave force-complain
+      ansible.builtin.file:
+        path: '/etc/apparmor.d/{{ item }}'
+        state: absent
+      loop:
+        - disable/usr.lib.dovecot.lmtp
+        - force-complain/usr.lib.dovecot.imap
+
+#
+# A file of the administrator for a profile the role writes: the run fails
+# before any change
+#
+
+- name: Verify | Run the AppArmor tasks with a lmtp rules file of the administrator
+  block:
+    - name: Verify | Read the calls of apparmor_parser before the file of the administrator
+      ansible.builtin.slurp:
+        src: '{{ __verify_apparmor_log }}'
+      register: __verify_apparmor_before_foreign
+
+    - name: Verify | Write a lmtp rules file of the administrator
+      ansible.builtin.copy:
+        content: "# Rules of the administrator\n/srv/molecule-admin/ r,\n"
+        dest: '{{ __verify_apparmor_dir }}/usr.lib.dovecot.lmtp'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Verify | Include the AppArmor tasks with the file of the administrator  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: apparmor.yml
+      vars:
+        dovecot_tls_cert_file: '/srv/molecule-tls/cert.pem'
+
+    - name: Verify | Fail when the file of the administrator was replaced
+      ansible.builtin.fail:
+        msg: 'The role replaced a rules file it did not write'
+  rescue:
+    - name: Verify | Read the AppArmor rules after the refused run
+      ansible.builtin.include_tasks: apparmor_rules.yml
+
+    - name: Verify | Stat the pending reload after the refused run
+      ansible.builtin.stat:
+        path: '{{ __verify_apparmor_pending }}'
+      register: __verify_apparmor_foreign_pending
+
+    - name: Verify | Assert the file of the administrator stopped the run before any change
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_result.msg is search('local/usr.lib.dovecot.lmtp was not written by the role')
+          - ansible_failed_result.msg is search('abstractions/dovecot-common.d/')
+          - ansible_failed_result.msg is search('Nothing was changed')
+          - __verify_apparmor_rules['usr.lib.dovecot.lmtp'] == ['/srv/molecule-admin/ r,']
+          - __verify_apparmor_rules['usr.sbin.dovecot'] == __verify_apparmor_converge['usr.sbin.dovecot']
+          - __verify_apparmor_calls == (__verify_apparmor_before_foreign.content | b64decode).splitlines()
+          - not __verify_apparmor_foreign_pending.stat.exists
+        fail_msg: '{{ ansible_failed_result.msg }} {{ __verify_apparmor_rules | to_json }}'
+  always:
+    - name: Verify | Remove the lmtp rules file of the administrator
+      ansible.builtin.file:
+        path: '{{ __verify_apparmor_dir }}/usr.lib.dovecot.lmtp'
+        state: absent
+
+#
+# Check mode reports the rules without writing them
+#
+
+# Check mode through apply; __dovecot_check_mode stands in for
+# ansible_check_mode, which apply does not set
+- name: Verify | Include the AppArmor tasks in check mode  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: apparmor.yml
+    apply:
+      check_mode: true
+  vars:
+    __dovecot_check_mode: true
+
+- name: Verify | Stat the rules after check mode
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  loop:
+    - '{{ __verify_apparmor_dir }}/usr.lib.dovecot.lmtp'
+    - '{{ __verify_apparmor_pending }}'
+  register: __verify_apparmor_check
+
+- name: Verify | Assert check mode reported the rules
+  ansible.builtin.assert:
+    that:
+      - __dovecot_apparmor_deployed.results | selectattr('changed') | map(attribute='item') | list
+        == ['usr.lib.dovecot.lmtp']
+      - __verify_apparmor_check.results | map(attribute='stat.exists') == [false, false]
+
+# A host without the directory of the local overrides: check mode does not
+# fail on it. Copied and removed instead of renamed: the package may have
+# created it in a lower layer of the container image, where a rename can
+# leave the directory behind.
+- name: Verify | Run the AppArmor tasks in check mode without the directory
+  block:
+    - name: Verify | Move the directory of the local overrides away before check mode
+      ansible.builtin.shell:
+        cmd: >-
+          cp -a {{ __verify_apparmor_dir | quote }} {{ (__verify_apparmor_dir ~ '.verify') | quote }}
+          && rm -r {{ __verify_apparmor_dir | quote }}
+      changed_when: true
+
+    - name: Verify | Include the AppArmor tasks in check mode without the directory  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: apparmor.yml
+        apply:
+          check_mode: true
+      vars:
+        __dovecot_check_mode: true
+
+    - name: Verify | Stat the directory of the local overrides after check mode
+      ansible.builtin.stat:
+        path: '{{ __verify_apparmor_dir }}'
+      register: __verify_apparmor_check_dir
+
+    - name: Verify | Assert check mode reported the directory without failing
+      ansible.builtin.assert:
+        that:
+          - __dovecot_apparmor_dir is changed
+          - __dovecot_apparmor_deployed.results | rejectattr('skipped', 'defined') | list | length == 0
+          - not __verify_apparmor_check_dir.stat.exists
+  always:
+    - name: Verify | Move the directory of the local overrides back
+      ansible.builtin.shell:
+        cmd: >-
+          test ! -e {{ (__verify_apparmor_dir ~ '.verify') | quote }}
+          || { rm -rf {{ __verify_apparmor_dir | quote }}
+          && cp -a {{ (__verify_apparmor_dir ~ '.verify') | quote }} {{ __verify_apparmor_dir | quote }}
+          && rm -r {{ (__verify_apparmor_dir ~ '.verify') | quote }}; }
+      changed_when: true
+
+#
+# The rules that depend on the variables, with paths that have a space,
+# characters with a meaning in AppArmor rules and a symlink: the parser
+# accepts them, and they name the real path
+#
+
+- name: Verify | Create a symlink in the path of the mail root
+  ansible.builtin.file:
+    src: /srv
+    dest: /var/molecule-apparmor
+    state: link
+
+- name: Verify | Include the AppArmor tasks with the conditional rules  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: apparmor.yml
+  vars:
+    dovecot_mail_root: '/var/molecule-apparmor/mail {a}*?[b]^@c"d'
+    dovecot_tls_cert_file: '/var/molecule-apparmor/tls/cert.pem'
+    dovecot_tls_key_file: '/etc/letsencrypt/archive/mail.example.com/privkey1.pem'
+    dovecot_db_type: 'postgresql'
+    dovecot_db_host: '/run/postgresql'
+    dovecot_db_port: 5433
+    dovecot_db_tls: true
+    dovecot_db_tls_ca_file: '/srv/molecule-ca/db.pem'
+    dovecot_rspamd_controller_ca_file: '/srv/molecule-ca/rspamd.pem'
+    dovecot_pop3_enabled: true
+    dovecot_sieve_after: []
+    dovecot_submission_host: 'mx.example.com:25'
+
+- name: Verify | Read the AppArmor rules with the conditional rules
+  ansible.builtin.include_tasks: apparmor_rules.yml
+
+# The expected lines are spelled out; task variables get the prefix
+# __verify_apparmor_, as verify.yml registers results under shorter names
+# (registered results take precedence over task variables)
+- name: Verify | Assert the conditional rules
+  ansible.builtin.assert:
+    that:
+      - __verify_apparmor_rules == __verify_apparmor_conditional
+    fail_msg: >-
+      actual: {{ __verify_apparmor_rules | to_json }}
+      expected: {{ __verify_apparmor_conditional | to_json }}
+  vars:
+    __verify_apparmor_cond_mail:
+      - '"/srv/mail \{a\}\*\?\[b\]\^@c\"d/" rw,'
+      - '"/srv/mail \{a\}\*\?\[b\]\^@c\"d/**" rwkl,'
+    __verify_apparmor_cond_tls:
+      - '"/srv/tls/cert.pem" r,'
+      - '"/var/molecule-apparmor/tls/cert.pem" r,'
+      - '"/etc/letsencrypt/archive/mail.example.com/privkey1.pem" r,'
+    __verify_apparmor_conditional:
+      usr.sbin.dovecot: '{{ __verify_apparmor_cond_tls }}'
+      usr.lib.dovecot.config: '{{ __verify_apparmor_cond_tls }}'
+      usr.lib.dovecot.auth:
+        - '"/srv/molecule-ca/db.pem" r,'
+        - '"/run/postgresql/.s.PGSQL.5433" rw,'
+      usr.lib.dovecot.lmtp: >-
+        {{ ['@{PROC}/@{pid}/stat r,',
+            '"/etc/dovecot/sieve/before.d/" r,',
+            '"/etc/dovecot/sieve/before.d/*" r,']
+           + __verify_apparmor_cond_mail }}
+      usr.lib.dovecot.imap: >-
+        {{ __verify_apparmor_cond_mail
+           + ['"/etc/dovecot/sieve/imapsieve/*" r,',
+              '"/usr/local/lib/dovecot/sieve-pipe/rspamd-learn-*.sh" rCx -> rspamd-learn,',
+              'signal (send) set=(term, kill) peer=dovecot-imap//rspamd-learn,',
+              'profile rspamd-learn {',
+              '  include <abstractions/base>',
+              '  include <abstractions/nameservice>',
+              '  include <abstractions/ssl_certs>',
+              '  signal (receive) peer=dovecot-imap,',
+              '  /usr/bin/{,ba,da}sh ix,',
+              '  "/usr/local/lib/dovecot/sieve-pipe/rspamd-learn-*.sh" r,',
+              '  /usr/bin/curl ix,',
+              '  "/etc/dovecot/rspamd-controller.header" r,',
+              '  "/srv/molecule-ca/rspamd.pem" r,',
+              '}'] }}
+      usr.lib.dovecot.pop3: '{{ __verify_apparmor_cond_mail }}'
+      usr.lib.dovecot.managesieve: "{{ ['@{PROC}/@{pid}/stat r,'] + __verify_apparmor_cond_mail }}"
+
+# The spam training and the global Sieve scripts before the personal one
+# off, MariaDB through a socket path (no .s.PGSQL suffix)
+- name: Verify | Include the AppArmor tasks without spam training  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: apparmor.yml
+  vars:
+    dovecot_rspamd_learn_enabled: false
+    dovecot_sieve_before: []
+    dovecot_db_host: '/run/mysqld/mysqld.sock'
+
+- name: Verify | Read the AppArmor rules without spam training
+  ansible.builtin.include_tasks: apparmor_rules.yml
+
+- name: Verify | Assert the rules without spam training
+  ansible.builtin.assert:
+    that:
+      - __verify_apparmor_rules['usr.lib.dovecot.imap'] == __verify_apparmor_mail
+      - __verify_apparmor_rules['usr.lib.dovecot.lmtp']
+        == ['@{PROC}/@{pid}/stat r,', '"/etc/dovecot/sieve/after.d/" r,', '"/etc/dovecot/sieve/after.d/*" r,']
+           + __verify_apparmor_mail + __verify_apparmor_sendmail
+      - __verify_apparmor_rules['usr.lib.dovecot.auth'] == ['"/run/mysqld/mysqld.sock" rw,']
+      - __verify_apparmor_rules['usr.lib.dovecot.pop3'] is none
+    fail_msg: '{{ __verify_apparmor_rules | to_json }}'
+
+#
+# Certificates of certbot: the live symlinks and their targets get rules;
+# a renewal outside Ansible points the symlink to a new file in the
+# archive, which the TLS abstractions of the profiles allow until the
+# next run writes its rule
+#
+
+- name: Verify | Run the AppArmor tasks with certbot certificates
+  vars:
+    __verify_apparmor_live: '/etc/letsencrypt/live/molecule.example.com'
+    __verify_apparmor_archive: '/etc/letsencrypt/archive/molecule.example.com'
+  block:
+    - name: Verify | Create the certbot directories
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+      loop:
+        - '{{ __verify_apparmor_live }}'
+        - '{{ __verify_apparmor_archive }}'
+
+    - name: Verify | Link the live certificate and key to the archive
+      ansible.builtin.file:
+        src: '{{ __verify_apparmor_archive }}/{{ item }}1.pem'
+        dest: '{{ __verify_apparmor_live }}/{{ item }}.pem'
+        state: link
+        force: true
+      loop:
+        - fullchain
+        - privkey
+
+    - name: Verify | Include the AppArmor tasks with certbot certificates  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: apparmor.yml
+      vars: &verify_certbot
+        dovecot_tls_cert_file: '{{ __verify_apparmor_live }}/fullchain.pem'
+        dovecot_tls_key_file: '{{ __verify_apparmor_live }}/privkey.pem'
+
+    - name: Verify | Renew the certificate outside Ansible
+      ansible.builtin.file:
+        src: '{{ __verify_apparmor_archive }}/fullchain2.pem'
+        dest: '{{ __verify_apparmor_live }}/fullchain.pem'
+        state: link
+        force: true
+
+    - name: Verify | Read the AppArmor rules after the renewal
+      ansible.builtin.include_tasks: apparmor_rules.yml
+
+    # The config profile still compiles and allows the new archive file
+    # through its TLS abstraction
+    - name: Verify | Expand the config profile after the renewal
+      ansible.builtin.command:
+        argv: [apparmor_parser, --preprocess, /etc/apparmor.d/usr.lib.dovecot.config]
+      register: __verify_apparmor_renewed
+      changed_when: false
+
+    - name: Verify | Assert the rules of the certbot certificates
+      ansible.builtin.assert:
+        that:
+          - __verify_apparmor_rules['usr.lib.dovecot.config']
+            == ['"' ~ __verify_apparmor_archive ~ '/fullchain1.pem" r,',
+                '"' ~ __verify_apparmor_live ~ '/fullchain.pem" r,',
+                '"' ~ __verify_apparmor_archive ~ '/privkey1.pem" r,',
+                '"' ~ __verify_apparmor_live ~ '/privkey.pem" r,']
+          - __verify_apparmor_renewed.stdout is search('/etc/letsencrypt/archive/\*/fullchain\*\.pem r,')
+          - __verify_apparmor_renewed.stdout is search('/etc/letsencrypt/archive/\*/privkey\*\.pem r,')
+        fail_msg: '{{ __verify_apparmor_rules | to_json }}'
+
+    # The next run names the new file
+    - name: Verify | Include the AppArmor tasks after the renewal  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: apparmor.yml
+      vars: *verify_certbot
+
+    - name: Verify | Assert the next run names the renewed certificate
+      ansible.builtin.assert:
+        that:
+          - __dovecot_apparmor_deployed.results | selectattr('changed') | map(attribute='item') | list
+            == ['usr.sbin.dovecot', 'usr.lib.dovecot.config']
+  always:
+    - name: Verify | Remove the certbot directories
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: absent
+      loop:
+        - '{{ __verify_apparmor_live }}'
+        - '{{ __verify_apparmor_archive }}'
+
+#
+# Back to converge
+#
+
+- name: Verify | Include the AppArmor tasks with the rules of converge  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: apparmor.yml
+
+- name: Verify | Read the restored AppArmor rules
+  ansible.builtin.include_tasks: apparmor_rules.yml
+
+- name: Verify | Assert the rules of converge are back
+  ansible.builtin.assert:
+    that:
+      - __verify_apparmor_rules == __verify_apparmor_converge
+    fail_msg: '{{ __verify_apparmor_rules | to_json }}'
+
+- name: Verify | Restore the log of converge
+  ansible.builtin.copy:
+    content: "{{ __verify_apparmor_converge_log | join('\n') }}\n"
+    dest: '{{ __verify_apparmor_log }}'
+    owner: root
+    group: root
+    mode: '0644'

@@ -1,0 +1,12 @@
+---
+- name: Converge
+  hosts: sogo
+  gather_facts: true
+
+  vars_files:
+    - vars/main.yml
+
+  tasks:
+    - name: Converge | Include sogo role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'

@@ -1,0 +1,12 @@
+{{ ansible_managed | comment }}
+# Schedule of {{ __sogo_backup_service_name }} (marcstraube.server.sogo)
+
+[Unit]
+Description=Back up the SOGo data of all users (timer)
+
+[Timer]
+OnCalendar={{ sogo_backup_on_calendar }}
+Persistent=true
+
+[Install]
+WantedBy=timers.target

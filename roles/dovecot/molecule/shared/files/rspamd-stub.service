@@ -1,0 +1,9 @@
+[Unit]
+Description=Molecule stand-in for the rspamd controller
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/env python3 -I /usr/local/lib/molecule/rspamd_stub.py 11334 /var/log/molecule-rspamd-learn.log
+
+[Install]
+WantedBy=multi-user.target

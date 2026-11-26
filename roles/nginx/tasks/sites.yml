@@ -1,0 +1,225 @@
+---
+# Default site and sites, deployed according to the certificates on the host:
+# nginx refuses to load a configuration that names a missing certificate or
+# key. main.yml imports these tasks; a play includes them again with
+# tasks_from once the certificates exist.
+
+- name: Sites | Import HTTP/2 syntax tasks
+  ansible.builtin.import_tasks: http2_syntax.yml
+  when: __nginx_http2_directive is undefined
+
+# The files nginx loads for the HTTPS servers of the enabled sites; the empty
+# name stands for the default site. A value with a variable or a scheme
+# (data:, engine:, store:) names no file that could be checked.
+- name: Sites | Check the certificate and key files
+  ansible.builtin.stat:
+    path: "{{ __nginx_ssl_file if __nginx_ssl_file is match('/') else __nginx_config_dir ~ '/' ~ __nginx_ssl_file }}"
+    follow: true
+    get_attributes: false
+    get_checksum: false
+    get_mime: false
+  loop: '{{ __nginx_ssl_files }}'
+  loop_control:
+    label: '{{ item.file }}'
+  register: __nginx_ssl_file_stat
+  vars:
+    # Without the quotes nginx accepts around the value
+    __nginx_ssl_file: >-
+      {{ item.file | regex_replace('^[\x22\x27]|[\x22\x27]$', '') }}
+    __nginx_ssl_files: >-
+      {%- set files = [] -%}
+      {%- if nginx_default_site_enabled | bool and nginx_default_site_ssl_certificate | length > 0 -%}
+        {%- set _ = files.append({'site': '', 'file': nginx_default_site_ssl_certificate}) -%}
+        {%- set _ = files.append({'site': '', 'file': nginx_default_site_ssl_certificate_key}) -%}
+      {%- endif -%}
+      {%- for site in nginx_sites
+         if site.enabled | default(true)
+            and site.ssl is defined and site.ssl.enabled | default(false) -%}
+        {%- set _ = files.append({'site': site.name, 'file': site.ssl.certificate}) -%}
+        {%- set _ = files.append({'site': site.name, 'file': site.ssl.certificate_key}) -%}
+      {%- endfor -%}
+      {{ files | rejectattr('file', 'search', '[$]|^[\x22\x27]?(data|engine|store):') | list }}
+
+- name: Sites | List the missing certificate and key files
+  ansible.builtin.set_fact:
+    __nginx_ssl_files_missing: >-
+      {{ __nginx_ssl_file_stat.results | rejectattr('stat.exists') | map(attribute='item') | list }}
+
+# Prints "<file>:<match>" for the enabled sites with a main server (the comment
+# line of the template) or an HTTPS listener; a site that is not enabled yet
+# has no file there (-s, rc 2)
+- name: Sites | Read the servers deployed for the missing files
+  ansible.builtin.command:
+    argv: >-
+      {{ ['grep', '-HosE', '^# Main server block|^[[:space:]]*listen[[:space:]].*[[:space:]]ssl[[:space:];]']
+         + __nginx_site_links }}
+  vars:
+    __nginx_site_links: >-
+      {{ __nginx_ssl_files_missing | map(attribute='site') | reject('eq', '') | unique
+         | map('regex_replace', '^(.*)$', __nginx_sites_enabled_dir ~ '/\1.conf') | list }}
+  register: __nginx_deployed_servers
+  changed_when: false
+  failed_when: __nginx_deployed_servers.rc not in [0, 1, 2]
+  check_mode: false
+  when: __nginx_site_links | length > 0
+
+# Sites with a missing file: broken when their HTTPS server is deployed, kept
+# on HTTP when only a plain HTTP main server is, pending otherwise. Without
+# the HTTPS servers only the HTTP redirect is left of a pending site, so
+# without http_redirect it is not enabled.
+- name: Sites | Select the sites waiting for their certificate
+  ansible.builtin.set_fact:
+    __nginx_default_site_self_signed: "{{ nginx_default_site_ssl_certificate | length == 0 or '' in __nginx_missing }}"
+    __nginx_sites_broken: '{{ __nginx_https }}'
+    __nginx_sites_http: '{{ __nginx_http }}'
+    __nginx_sites_pending: '{{ __nginx_waiting }}'
+    __nginx_sites_active: >-
+      {{
+        __nginx_enabled | rejectattr('name', 'in', __nginx_waiting) | list
+        + __nginx_enabled | selectattr('name', 'in', __nginx_waiting)
+          | selectattr('http_redirect', 'defined') | selectattr('http_redirect') | list
+      }}
+  vars:
+    __nginx_missing: "{{ __nginx_ssl_files_missing | map(attribute='site') | unique | list }}"
+    __nginx_lines: '{{ __nginx_deployed_servers.stdout_lines | default([]) }}'
+    __nginx_https: >-
+      {{ __nginx_lines | reject('search', '\.conf:# Main server block$')
+         | map('regex_replace', '\.conf:.*$', '') | map('basename') | unique | list }}
+    __nginx_http: >-
+      {{ __nginx_lines | map('regex_replace', '\.conf:.*$', '') | map('basename')
+         | unique | difference(__nginx_https) | list }}
+    __nginx_waiting: >-
+      {{ __nginx_missing | difference(__nginx_https) | difference(__nginx_http) | reject('eq', '') | list }}
+    __nginx_enabled: >-
+      {{
+        nginx_sites | selectattr('enabled', 'undefined') | list
+        + nginx_sites | selectattr('enabled', 'defined') | selectattr('enabled') | list
+      }}
+
+# Fails before any site is changed. In check mode only the report: a role
+# earlier in the play may create the files.
+- name: Sites | Assert the deployed HTTPS sites have their certificates
+  ansible.builtin.assert:
+    that:
+      - ansible_check_mode
+    fail_msg: '{{ __nginx_message }}'
+    success_msg: '{{ __nginx_message }}'
+  vars:
+    __nginx_message: >-
+      Site '{{ item }}' serves HTTPS, but these files are missing:
+      {{ __nginx_ssl_files_missing | selectattr('site', 'eq', item) | map(attribute='file') | join(', ') }}.
+      Restore them or correct the paths in nginx_sites. To deploy the site
+      without HTTPS until the certificate exists, remove
+      {{ __nginx_sites_enabled_dir }}/{{ item }}.conf and run again.
+  loop: '{{ __nginx_sites_broken }}'
+
+- name: Sites | Report the default site waiting for its certificate
+  ansible.builtin.debug:
+    msg: >-
+      Default site uses its self-signed certificate, missing:
+      {{ __nginx_ssl_files_missing | selectattr('site', 'eq', '') | map(attribute='file') | join(', ') }}
+  when: "'' in __nginx_ssl_files_missing | map(attribute='site')"
+
+- name: Sites | Report the sites waiting for their certificate
+  ansible.builtin.debug:
+    msg: >-
+      Site '{{ item }}' {{ __nginx_state }}, missing:
+      {{ __nginx_ssl_files_missing | selectattr('site', 'eq', item) | map(attribute='file') | join(', ') }}
+  vars:
+    __nginx_state: >-
+      {{ 'kept on HTTP' if item in __nginx_sites_http
+         else 'deployed without its HTTPS servers' if item in __nginx_sites_active | map(attribute='name')
+         else 'not enabled' }}
+  loop: '{{ __nginx_sites_http + __nginx_sites_pending }}'
+
+- name: Sites | Create SSL directory
+  ansible.builtin.file:
+    path: '{{ __nginx_config_dir }}/ssl'
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  when:
+    - nginx_default_site_enabled | bool
+    - __nginx_default_site_self_signed | bool
+
+- name: Sites | Generate self-signed certificate for default site
+  ansible.builtin.command:
+    cmd: >-
+      openssl req -x509 -nodes -days 3650 -newkey rsa:2048
+      -keyout {{ __nginx_config_dir }}/ssl/default.key
+      -out {{ __nginx_config_dir }}/ssl/default.crt
+      -subj "/CN=localhost"
+    creates: '{{ __nginx_config_dir }}/ssl/default.crt'
+  register: __nginx_default_site_key
+  when:
+    - nginx_default_site_enabled | bool
+    - __nginx_default_site_self_signed | bool
+
+# In check mode there is no key yet when the task above would generate it
+- name: Sites | Set permissions on self-signed key
+  ansible.builtin.file:
+    path: '{{ __nginx_config_dir }}/ssl/default.key'
+    owner: root
+    group: root
+    mode: '0600'
+  when:
+    - nginx_default_site_enabled | bool
+    - __nginx_default_site_self_signed | bool
+    - not (ansible_check_mode and __nginx_default_site_key is changed)
+
+- name: Sites | Deploy default site
+  ansible.builtin.template:
+    src: default-site.conf.j2
+    dest: '{{ __nginx_sites_dir }}/default.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  when: nginx_default_site_enabled | bool
+  notify: Reload Nginx
+
+- name: Sites | Enable default site
+  ansible.builtin.file:
+    src: '{{ __nginx_sites_dir }}/default.conf'
+    dest: '{{ __nginx_sites_enabled_dir }}/default.conf'
+    state: link
+  when: nginx_default_site_enabled | bool
+  notify: Reload Nginx
+
+- name: Sites | Disable default site
+  ansible.builtin.file:
+    path: '{{ __nginx_sites_enabled_dir }}/default.conf'
+    state: absent
+  when: not (nginx_default_site_enabled | bool)
+  notify: Reload Nginx
+
+- name: Sites | Deploy site configurations
+  ansible.builtin.template:
+    src: site.conf.j2
+    dest: '{{ __nginx_sites_dir }}/{{ item.name }}.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  loop: '{{ nginx_sites }}'
+  loop_control:
+    label: '{{ item.name }}'
+  notify: Reload Nginx
+
+- name: Sites | Enable sites
+  ansible.builtin.file:
+    src: '{{ __nginx_sites_dir }}/{{ item.name }}.conf'
+    dest: '{{ __nginx_sites_enabled_dir }}/{{ item.name }}.conf'
+    state: link
+  loop: '{{ __nginx_sites_active }}'
+  loop_control:
+    label: '{{ item.name }}'
+  notify: Reload Nginx
+
+- name: Sites | Disable sites
+  ansible.builtin.file:
+    path: '{{ __nginx_sites_enabled_dir }}/{{ item.name }}.conf'
+    state: absent
+  loop: "{{ nginx_sites | rejectattr('name', 'in', __nginx_sites_active | map(attribute='name') | list) | list }}"
+  loop_control:
+    label: '{{ item.name }}'
+  notify: Reload Nginx

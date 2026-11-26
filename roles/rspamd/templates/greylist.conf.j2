@@ -1,0 +1,2 @@
+{{ ansible_managed | comment }}
+enabled = {{ rspamd_greylisting_enabled | bool | to_json }};

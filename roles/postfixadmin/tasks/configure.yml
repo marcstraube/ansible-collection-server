@@ -1,0 +1,104 @@
+---
+# config.local.php holds the database password: root writes it, the
+# PHP-FPM group reads it. It stays in place when a new release replaces
+# the installation directory, which links to it.
+
+- name: Configure | Create the configuration directory
+  ansible.builtin.file:
+    path: '{{ __postfixadmin_config_dir }}'
+    state: directory
+    owner: root
+    group: '{{ __postfixadmin_fpm_group }}'
+    mode: '0750'
+
+# The setup password comes in plain text and config.local.php holds its
+# hash. password_hash() salts every hash anew, so the hash of the existing
+# file stays while it matches the password and a run without a change
+# leaves the file alone; a hash of an older PHP default stays valid and is
+# kept as well. The password reaches PHP on stdin, not in the process
+# list, and has to meet postfixadmin_password_validation like the accounts.
+- name: Configure | Read the existing configuration for the setup password
+  ansible.builtin.slurp:
+    src: '{{ __postfixadmin_config_file }}'
+  register: __postfixadmin_config_current
+  # A missing file (first run) is expected; any other error is not
+  failed_when:
+    - __postfixadmin_config_current is failed
+    - "'not found' not in (__postfixadmin_config_current.msg | default(''))"
+  no_log: true
+  when: postfixadmin_setup_password | length > 0
+
+# Prints JSON: the hash, or the error (the message key of the failed rule
+# or PHP's message), never the password. Warnings go to stderr, so stdout
+# holds the JSON alone.
+- name: Configure | Hash the setup password
+  ansible.builtin.command:
+    argv:
+      - '{{ postfixadmin_php_cli }}'
+      - '-d'
+      - 'display_errors=stderr'
+      - '-r'
+      - >-
+        $i = json_decode(stream_get_contents(STDIN), true);
+        $p = $i['password'];
+        foreach ($i['rules'] as $re => $msg) {
+        if (!preg_match($re, $p)) { echo json_encode(['error' => $msg]); exit(0); } }
+        try {
+        echo json_encode(['hash' => ($i['hash'] !== '' && password_verify($p, $i['hash']))
+        ? $i['hash'] : password_hash($p, PASSWORD_DEFAULT)]);
+        } catch (\ValueError $e) { echo json_encode(['error' => $e->getMessage()]); }
+    stdin: >-
+      {{ {'password': postfixadmin_setup_password, 'hash': __postfixadmin_setup_hash_current,
+          'rules': postfixadmin_password_validation} | to_json }}
+    stdin_add_newline: false
+  vars:
+    __postfixadmin_setup_hash_current: >-
+      {{ __postfixadmin_config_current.content | default('') | b64decode
+         | regex_findall(__postfixadmin_setup_password_pattern, multiline=True)
+         | first | default('') }}
+  register: __postfixadmin_setup_password_result
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: true
+  when: postfixadmin_setup_password | length > 0
+
+# Outside of no_log: the output names the rule or the PHP error, never the
+# password
+- name: Configure | Check the setup password
+  ansible.builtin.assert:
+    that:
+      - __postfixadmin_setup_password_result.rc == 0
+      - __postfixadmin_setup_reply.error is not defined
+      - __postfixadmin_setup_reply.hash | default('') is match('^[$][0-9a-z]+[$][./0-9A-Za-z$=,+-]+$')
+    fail_msg: >-
+      postfixadmin_setup_password:
+      {{ __postfixadmin_setup_reply.error
+         | default('PHP failed (' ~ postfixadmin_php_cli ~ '): '
+                   ~ (__postfixadmin_setup_password_result.stderr | default('no output'))) }}
+    quiet: true
+  vars:
+    __postfixadmin_setup_reply: >-
+      {{ (__postfixadmin_setup_password_result.stdout | default('') | from_json)
+         if (__postfixadmin_setup_password_result.rc | default(1)) == 0
+            and __postfixadmin_setup_password_result.stdout | default('') | length > 0
+         else {} }}
+  when: postfixadmin_setup_password | length > 0
+
+- name: Configure | Set the setup password hash
+  ansible.builtin.set_fact:
+    __postfixadmin_setup_password_hash: >-
+      {{ (__postfixadmin_setup_password_result.stdout | from_json).hash
+         if postfixadmin_setup_password | length > 0 else '' }}
+  no_log: true
+
+- name: Configure | Deploy config.local.php
+  ansible.builtin.template:
+    src: config.local.php.j2
+    dest: '{{ __postfixadmin_config_file }}'
+    owner: root
+    group: '{{ __postfixadmin_fpm_group }}'
+    mode: '0640'
+    validate: '{{ postfixadmin_php_cli }} -l %s'
+  no_log: true
+  diff: false

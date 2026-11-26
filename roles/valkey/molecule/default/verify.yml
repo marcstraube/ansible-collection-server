@@ -1,0 +1,737 @@
+---
+# valkey-cli exits with 0 on error replies (NOAUTH, NOPERM, WRONGPASS), so
+# every check reads the reply instead of the exit code.
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __verify_socket: '/run/valkey/valkey.sock'
+    __verify_socket_group: 'valkey-clients'
+    __verify_ca: '/etc/molecule-tls/ca.crt'
+    __verify_app_auth:
+      - '--user'
+      - 'app'
+      - '--pass'
+      - 'app-secret'
+      - '--no-auth-warning'
+    __verify_admin_auth:
+      - '--user'
+      - 'admin'
+      - '--pass'
+      - 'admin-secret'
+      - '--no-auth-warning'
+    # Password of the 'inject' user of vars/converge.yml
+    __verify_inject_password: "inject secret\nuser evil on nopass ~* +@all"
+
+  tasks:
+    - name: Verify | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Verify | Load OS-specific variables
+      ansible.builtin.include_vars: '{{ item }}'
+      with_first_found:
+        - files:
+            - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["distribution"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}.yml'
+          paths:
+            - '../../vars'
+
+    #
+    # Service
+    #
+
+    - name: Verify | Check Valkey service status
+      ansible.builtin.systemd_service:
+        name: '{{ __valkey_service_name }}'
+      register: __verify_service
+
+    - name: Verify | Assert Valkey service is active and enabled
+      ansible.builtin.assert:
+        that:
+          - __verify_service.status.ActiveState == 'active'
+          - __verify_service.status.UnitFileState in ['enabled', 'alias']
+        fail_msg: >-
+          Valkey service is {{ __verify_service.status.ActiveState }} /
+          {{ __verify_service.status.UnitFileState }}
+        success_msg: 'Valkey service is active and enabled'
+
+    - name: Verify | Assert Valkey listens on the plain and the TLS port
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: '{{ item }}'
+        timeout: 10
+      loop:
+        - 6379
+        - 6380
+
+    #
+    # Configuration
+    #
+
+    - name: Verify | Stat valkey.conf and users.conf
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+        - '{{ __valkey_config_file }}'
+        - '{{ __valkey_users_file }}'
+      register: __verify_config_stat
+
+    - name: Verify | Assert valkey.conf and users.conf ownership and mode
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.pw_name == __valkey_config_owner
+          - item.stat.gr_name == __valkey_config_group
+          - item.stat.mode == __valkey_config_mode
+        fail_msg: >-
+          {{ item.item }} is {{ item.stat.pw_name | default('missing') }}:{{ item.stat.gr_name | default('') }}
+          {{ item.stat.mode | default('') }}, expected {{ __valkey_config_owner }}:{{ __valkey_config_group }}
+          {{ __valkey_config_mode }}
+        success_msg: >-
+          {{ item.item }} is {{ __valkey_config_owner }}:{{ __valkey_config_group }} {{ __valkey_config_mode }}
+      loop: '{{ __verify_config_stat.results }}'
+      loop_control:
+        label: '{{ item.item }}'
+
+    - name: Verify | Read valkey.conf and users.conf
+      ansible.builtin.slurp:
+        src: '{{ item }}'
+      loop:
+        - '{{ __valkey_config_file }}'
+        - '{{ __valkey_users_file }}'
+      register: __verify_config
+
+    - name: Verify | Assert valkey.conf includes the users and holds none
+      ansible.builtin.assert:
+        that:
+          - __verify_config_content is search('(?m)^include ' ~ (__valkey_users_file | regex_escape) ~ '$')
+          - __verify_config_content is not search('(?m)^user ')
+          - __verify_config_content is not search('#[0-9a-f]{64}')
+        fail_msg: 'valkey.conf misses the include of {{ __valkey_users_file }} or holds a user line or hash'
+        success_msg: 'valkey.conf includes {{ __valkey_users_file }} and holds no user and no hash'
+      vars:
+        __verify_config_content: '{{ __verify_config.results[0].content | b64decode }}'
+
+    - name: Verify | Assert the passwords are stored as hashes only
+      ansible.builtin.assert:
+        that:
+          - "'app-secret' not in __verify_users_content"
+          - "'admin-secret' not in __verify_users_content"
+          - "'backup secret' not in __verify_users_content"
+          - ('#' ~ ('app-secret' | hash('sha256'))) in __verify_users_content
+          - ('#' ~ (__verify_inject_password | hash('sha256'))) in __verify_users_content
+          - __verify_users_content is search('(?m)^user default reset$')
+          - "'evil' not in __verify_users_content"
+        fail_msg: 'users.conf holds a plaintext password, misses a hash or holds the injected user'
+        success_msg: 'users.conf holds the SHA-256 hashes only, the line break in a password adds no user'
+      vars:
+        __verify_users_content: '{{ __verify_config.results[1].content | b64decode }}'
+
+    #
+    # ACL Users
+    #
+
+    - name: Verify | Ping, write and read a key of the app user
+      ansible.builtin.command:
+        argv: >-
+          {{ ['valkey-cli', '-h', '127.0.0.1', '-p', '6379'] + __verify_app_auth + item }}
+      loop:
+        - ['PING']
+        - ['SET', 'app:verify', 'ok']
+        - ['GET', 'app:verify']
+      register: __verify_app_rw
+      changed_when: false
+
+    - name: Verify | Assert the app user reads and writes its keys
+      ansible.builtin.assert:
+        that:
+          - __verify_app_rw.results | map(attribute='stdout') | list == ['PONG', 'OK', 'ok']
+        fail_msg: >-
+          PING, SET, GET: {{ __verify_app_rw.results | map(attribute='stdout') | list }}
+        success_msg: 'The app user authenticates and uses its key pattern'
+
+    - name: Verify | Authenticate the app user with a wrong password
+      ansible.builtin.command:
+        argv:
+          - valkey-cli
+          - -h
+          - 127.0.0.1
+          - -p
+          - '6379'
+          - AUTH
+          - app
+          - wrong-secret
+      register: __verify_wrongpass
+      changed_when: false
+
+    - name: Verify | Assert a wrong password is refused
+      ansible.builtin.assert:
+        that:
+          - __verify_wrongpass.stdout is search('^WRONGPASS')
+        fail_msg: 'Expected WRONGPASS, got {{ __verify_wrongpass.stdout }}'
+        success_msg: 'A wrong password is refused with WRONGPASS'
+
+    # The password holds a line break followed by a user line: it must work
+    # as one password and add no user
+    - name: Verify | Ping as the user with a line break in the password
+      ansible.builtin.command:
+        argv:
+          - valkey-cli
+          - -h
+          - 127.0.0.1
+          - -p
+          - '6379'
+          - --user
+          - inject
+          - --pass
+          - '{{ __verify_inject_password }}'
+          - --no-auth-warning
+          - PING
+      register: __verify_inject_ping
+      changed_when: false
+
+    - name: Verify | Try the user the line break would add
+      ansible.builtin.command:
+        argv:
+          - valkey-cli
+          - -h
+          - 127.0.0.1
+          - -p
+          - '6379'
+          - AUTH
+          - evil
+          - anything
+      register: __verify_inject_evil
+      changed_when: false
+
+    - name: Verify | Assert the line break stays part of the password
+      ansible.builtin.assert:
+        that:
+          - __verify_inject_ping.stdout == 'PONG'
+          - __verify_inject_evil.stdout is search('^WRONGPASS')
+        fail_msg: >-
+          inject: {{ __verify_inject_ping.stdout }}, evil: {{ __verify_inject_evil.stdout }}
+        success_msg: 'A line break in a password is part of its hash and adds no user'
+
+    - name: Verify | Try a foreign key and a dangerous command as the app user
+      ansible.builtin.command:
+        argv: >-
+          {{ ['valkey-cli', '-h', '127.0.0.1', '-p', '6379'] + __verify_app_auth + item }}
+      loop:
+        - ['SET', 'other:verify', 'no']
+        - ['FLUSHALL']
+      register: __verify_app_denied
+      changed_when: false
+
+    - name: Verify | Assert the app user is limited by its ACL rules
+      ansible.builtin.assert:
+        that:
+          - __verify_app_denied.results | map(attribute='stdout') | select('search', '^NOPERM') | list | length == 2
+        fail_msg: >-
+          Expected NOPERM, got {{ __verify_app_denied.results | map(attribute='stdout') | list }}
+        success_msg: 'Foreign keys and @dangerous commands are refused for the app user'
+
+    - name: Verify | Connect without credentials and as the default user
+      ansible.builtin.command:
+        argv: '{{ item }}'
+      loop:
+        - ['valkey-cli', '-h', '127.0.0.1', '-p', '6379', 'PING']
+        - ['valkey-cli', '-h', '127.0.0.1', '-p', '6379', 'AUTH', 'default', 'anything']
+        - ['valkey-cli', '-s', '{{ __verify_socket }}', 'PING']
+      register: __verify_default
+      changed_when: false
+
+    - name: Verify | Assert the default user is rejected
+      ansible.builtin.assert:
+        that:
+          - __verify_default.results[0].stdout is search('NOAUTH')
+          - __verify_default.results[1].stdout is search('WRONGPASS')
+          - __verify_default.results[2].stdout is search('NOAUTH')
+        fail_msg: >-
+          {{ __verify_default.results | map(attribute='stdout') | list }}
+        success_msg: 'Connections without an ACL user are not authenticated, the default user is disabled'
+
+    - name: Verify | Read the ACL users as admin
+      ansible.builtin.command:
+        argv: >-
+          {{ ['valkey-cli', '-h', '127.0.0.1', '-p', '6379'] + __verify_admin_auth + ['ACL', 'LIST'] }}
+      register: __verify_acl_list
+      changed_when: false
+
+    - name: Verify | Assert the ACL users
+      ansible.builtin.assert:
+        that:
+          - __verify_acl_list.stdout is search('(?m)^user default off .*-@all')
+          - __verify_acl_list.stdout is search('(?m)^user app on .*~app:\* .*\+@all -@dangerous')
+          - __verify_acl_list.stdout is search('(?m)^user admin on .*~\* .*\+@all$')
+          - __verify_acl_list.stdout is search('(?m)^user backup on .*-@all \+ping \+replconf \+sync$')
+          - __verify_acl_list.stdout is not search('(?m)^user backup .*~')
+          - __verify_acl_list.stdout is not search('(?m)^user evil ')
+        fail_msg: '{{ __verify_acl_list.stdout }}'
+        success_msg: 'default is off, app, admin and backup carry their rules, no injected user'
+
+    #
+    # Unix Socket
+    #
+
+    - name: Verify | Stat the unix socket
+      ansible.builtin.stat:
+        path: '{{ __verify_socket }}'
+      register: __verify_socket_stat
+
+    - name: Verify | Assert the unix socket group and mode
+      ansible.builtin.assert:
+        that:
+          - __verify_socket_stat.stat.issock
+          - __verify_socket_stat.stat.gr_name == __verify_socket_group
+          - __verify_socket_stat.stat.mode == '0770'
+        fail_msg: >-
+          {{ __verify_socket }}: {{ __verify_socket_stat.stat.gr_name | default('missing') }}
+          {{ __verify_socket_stat.stat.mode | default('') }}
+        success_msg: 'The socket belongs to {{ __verify_socket_group }} with mode 0770'
+
+    - name: Verify | Look up the socket group
+      ansible.builtin.getent:
+        database: group
+        key: '{{ __verify_socket_group }}'
+
+    # setpriv drops to nobody (65534), once without and once with the socket
+    # group; root would pass the socket permissions in any case
+    - name: Verify | Connect through the socket as a non-member and as a member
+      ansible.builtin.command:
+        argv: >-
+          {{ ['setpriv', '--reuid=65534', '--regid=65534'] + item
+             + ['valkey-cli', '-s', __verify_socket] + __verify_app_auth + ['PING'] }}
+      loop:
+        - ['--clear-groups']
+        - ['--groups={{ ansible_facts["getent_group"][__verify_socket_group][1] }}']
+      register: __verify_socket_ping
+      changed_when: false
+      # The non-member is expected to fail with exit status 1
+      failed_when: __verify_socket_ping.rc not in [0, 1]
+
+    - name: Verify | Assert only members of the socket group connect
+      ansible.builtin.assert:
+        that:
+          - (__verify_socket_ping.results[0].stdout ~ __verify_socket_ping.results[0].stderr)
+            is search('Permission denied')
+          - __verify_socket_ping.results[1].stdout == 'PONG'
+        fail_msg: >-
+          non-member: {{ __verify_socket_ping.results[0].stdout }} {{ __verify_socket_ping.results[0].stderr }};
+          member: {{ __verify_socket_ping.results[1].stdout }} {{ __verify_socket_ping.results[1].stderr }}
+        success_msg: 'The socket accepts members of {{ __verify_socket_group }} only'
+
+    - name: Verify | Stat the systemd drop-in for the socket group (Debian)
+      ansible.builtin.stat:
+        path: '/etc/systemd/system/{{ __valkey_service_name }}.service.d/socket-group.conf'
+      register: __verify_dropin
+      when: __valkey_socket_group_dropin | bool
+
+    - name: Verify | Assert the systemd drop-in for the socket group (Debian)
+      ansible.builtin.assert:
+        that:
+          - __verify_dropin.stat.exists
+        fail_msg: 'The socket group drop-in is missing'
+      when: __valkey_socket_group_dropin | bool
+
+    #
+    # TLS
+    #
+
+    - name: Verify | Connect over TLS
+      ansible.builtin.command:
+        argv: >-
+          {{ ['valkey-cli', '--tls', '--cacert', __verify_ca, '-h', 'localhost', '-p', '6380']
+             + __verify_app_auth + ['GET', 'app:verify'] }}
+      register: __verify_tls
+      changed_when: false
+
+    # The server closes a connection without TLS handshake: valkey-cli
+    # exits with 1
+    - name: Verify | Connect to the TLS port without TLS
+      ansible.builtin.command:
+        argv: >-
+          {{ ['valkey-cli', '-h', '127.0.0.1', '-p', '6380'] + __verify_app_auth + ['PING'] }}
+      register: __verify_tls_plain
+      changed_when: false
+      failed_when: __verify_tls_plain.rc not in [0, 1]
+
+    - name: Verify | Assert TLS works and the TLS port refuses plain clients
+      ansible.builtin.assert:
+        that:
+          - __verify_tls.stdout == 'ok'
+          - __verify_tls_plain.rc == 1
+          - (__verify_tls_plain.stdout ~ __verify_tls_plain.stderr)
+            is search('Server closed the connection|Connection reset')
+        fail_msg: >-
+          TLS: {{ __verify_tls.stdout }} {{ __verify_tls.stderr }};
+          plain on the TLS port (rc {{ __verify_tls_plain.rc }}):
+          {{ __verify_tls_plain.stdout }} {{ __verify_tls_plain.stderr }}
+        success_msg: 'The app user connects over TLS; the TLS port closes plain connections'
+
+    #
+    # Memory, Persistence, Extra Configuration
+    #
+
+    # tls-protocols is checked in the running configuration only. A refused
+    # TLS 1.1 handshake (openssl s_client -tls1_1) would prove nothing: the
+    # OpenSSL defaults of the platforms (security level, EL crypto-policies)
+    # refuse TLS 1.1 on both ends whatever tls-protocols says.
+    - name: Verify | Read the running configuration
+      ansible.builtin.command:
+        argv: >-
+          {{ ['valkey-cli', '-h', '127.0.0.1', '-p', '6379', '--raw'] + __verify_admin_auth
+             + ['CONFIG', 'GET', item] }}
+      loop:
+        - maxmemory
+        - maxmemory-policy
+        - save
+        - appendonly
+        - tcp-keepalive
+        - protected-mode
+        - bind
+        - tls-protocols
+      register: __verify_running_config
+      changed_when: false
+
+    - name: Verify | Assert the running configuration
+      ansible.builtin.assert:
+        that:
+          - __verify_running['maxmemory'] == '67108864'
+          - __verify_running['maxmemory-policy'] == 'allkeys-lru'
+          - __verify_running['save'] == '900 1'
+          - __verify_running['appendonly'] == 'yes'
+          - __verify_running['tcp-keepalive'] == '120'
+          - __verify_running['protected-mode'] == 'yes'
+          - __verify_running['bind'] == '127.0.0.1'
+          - __verify_running['tls-protocols'] == 'TLSv1.2 TLSv1.3'
+        fail_msg: '{{ __verify_running | to_json }}'
+        success_msg: 'Memory, persistence, extra, network and TLS protocol settings are active'
+      vars:
+        __verify_running: >-
+          {{ dict(__verify_running_config.results | map(attribute='item')
+                  | zip(__verify_running_config.results | map(attribute='stdout_lines')
+                        | map('last'))) }}
+
+    - name: Verify | Find the append-only directory
+      ansible.builtin.stat:
+        path: '{{ __valkey_data_dir }}/appendonlydir'
+      register: __verify_aof
+
+    - name: Verify | Assert the append-only directory exists
+      ansible.builtin.assert:
+        that:
+          - __verify_aof.stat.isdir | default(false)
+        fail_msg: 'appendonly is on, but {{ __valkey_data_dir }}/appendonlydir is missing'
+
+    #
+    # Package Update (side_effect.yml)
+    #
+
+    - name: Verify | Read the server package versions around the rollback
+      ansible.builtin.slurp:
+        src: /root/valkey-update-versions
+      register: __verify_update_versions
+
+    - name: Verify | Stat the version record
+      ansible.builtin.stat:
+        path: /root/valkey-update-versions
+      register: __verify_update_stat
+
+    - name: Verify | Gather package facts after the update
+      ansible.builtin.package_facts:
+
+    - name: Verify | Set update version facts
+      ansible.builtin.set_fact:
+        __verify_version_latest: '{{ (__verify_update_versions.content | b64decode).splitlines()[0] | trim }}'
+        __verify_version_rolled_back: '{{ (__verify_update_versions.content | b64decode).splitlines()[1] | trim }}'
+        __verify_version_now: >-
+          {{ ((__verify_pkg.epoch ~ ':')
+              if ((__verify_pkg.epoch | default('', true) | string) not in ['', 'None', '0']) else '')
+             ~ (__verify_pkg.version | default(''))
+             ~ (('-' ~ __verify_pkg.release) if (__verify_pkg.release | default('', true)) else '') }}
+      vars:
+        __verify_pkg: "{{ ansible_facts['packages'][__valkey_packages | first] | default([{}]) | first }}"
+
+    - name: Verify | Assert the update restored the latest build
+      ansible.builtin.assert:
+        that:
+          - __verify_version_now == __verify_version_latest
+        fail_msg: >-
+          {{ __valkey_packages | first }} is at {{ __verify_version_now }} after
+          the update, expected {{ __verify_version_latest }} (rolled back to
+          {{ __verify_version_rolled_back }})
+        success_msg: >-
+          Updated from {{ __verify_version_rolled_back }} to {{ __verify_version_now }}
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    - name: Verify | Read the main PID of the running server
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - '--property=MainPID'
+          - '--value'
+          - '{{ __valkey_service_name }}'
+      register: __verify_main_pid
+      changed_when: false
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    # readlink reports a replaced binary as "<path> (deleted)"
+    - name: Verify | Read the binary of the running server
+      ansible.builtin.command:
+        argv:
+          - readlink
+          - '/proc/{{ __verify_main_pid.stdout | trim }}/exe'
+      register: __verify_server_exe
+      changed_when: false
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    - name: Verify | Assert the server runs the updated binary
+      ansible.builtin.assert:
+        that:
+          - __verify_main_pid.stdout | trim not in ['', '0']
+          - __verify_server_exe.stdout is not search(' \(deleted\)$')
+        fail_msg: 'The server still runs the replaced binary: {{ __verify_server_exe.stdout }}'
+        success_msg: 'The server runs the updated binary'
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    # side_effect blocks the package restart on Debian, so the role has to
+    # restart the server there; on EL the package restarts it and the role
+    # must not restart it again.
+    - name: Verify | Read the server starts since the update
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - '--unit={{ __valkey_service_name }}'
+          - '--since=@{{ __verify_update_stat.stat.mtime }}'
+          - '--output=cat'
+          - '--no-pager'
+      register: __verify_update_journal
+      changed_when: false
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    - name: Verify | Assert the update restarted the server exactly once
+      ansible.builtin.assert:
+        that:
+          - __verify_update_starts | length == 1
+        fail_msg: >-
+          The server started {{ __verify_update_starts | length }} times after
+          the package update, expected once: {{ __verify_update_starts }}
+        success_msg: 'The server started once after the package update'
+      vars:
+        __verify_update_starts: >-
+          {{ __verify_update_journal.stdout_lines | select('match', '^Started ') | list }}
+      when: __verify_version_rolled_back != __verify_version_latest
+
+#
+# Backup and restore: side_effect ran the backup service once next to two
+# older snapshots with valkey_backup_keep 2, after writing a marker key, and
+# changed the data afterwards.
+#
+
+- name: Verify — Backup and Restore
+  hosts: all
+  gather_facts: true
+
+  # The converge settings: the play runs the role for the restore
+  vars_files:
+    - vars/converge.yml
+
+  vars:
+    __verify_backup_dir: '/var/backups/valkey'
+    __verify_set_re: '^valkey-[0-9]{8}T[0-9]{6}[.]rdb$'
+    __verify_admin:
+      - 'valkey-cli'
+      - '-h'
+      - '127.0.0.1'
+      - '-p'
+      - '6379'
+      - '--user'
+      - 'admin'
+      - '--pass'
+      - 'admin-secret'
+      - '--no-auth-warning'
+
+  tasks:
+    - name: Verify | Load shared variables
+      ansible.builtin.include_vars:
+        file: '../../vars/main.yml'
+
+    - name: Verify | Load OS-specific variables
+      ansible.builtin.include_vars: '{{ item }}'
+      with_first_found:
+        - files:
+            - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+            - '{{ ansible_facts["distribution"] }}.yml'
+            - '{{ ansible_facts["os_family"] }}.yml'
+          paths:
+            - '../../vars'
+
+    - name: Verify | Stat the backup script, directory and password file
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+        - '{{ __valkey_backup_script }}'
+        - '{{ __verify_backup_dir }}'
+        - '{{ __valkey_backup_auth_file }}'
+      register: __verify_backup_paths
+
+    - name: Verify | Assert the backup files belong to root
+      ansible.builtin.assert:
+        that:
+          - __verify_backup_paths.results[0].stat.exists
+          - __verify_backup_paths.results[0].stat.mode == '0750'
+          - __verify_backup_paths.results[0].stat.pw_name == 'root'
+          - __verify_backup_paths.results[1].stat.isdir
+          - __verify_backup_paths.results[1].stat.mode == '0700'
+          - __verify_backup_paths.results[1].stat.pw_name == 'root'
+          - __verify_backup_paths.results[2].stat.exists
+          - __verify_backup_paths.results[2].stat.mode == '0600'
+          - __verify_backup_paths.results[2].stat.pw_name == 'root'
+        fail_msg: >-
+          {% for r in __verify_backup_paths.results %}{{ r.item }}: {{ r.stat.pw_name | default('missing') }}
+          {{ r.stat.mode | default('') }}; {% endfor %}
+
+    - name: Verify | Read the backup timer state
+      ansible.builtin.systemd_service:
+        name: '{{ __valkey_backup_timer_name }}'
+      register: __verify_backup_timer
+
+    - name: Verify | Assert the backup timer is enabled and active
+      ansible.builtin.assert:
+        that:
+          - __verify_backup_timer.status.UnitFileState == 'enabled'
+          - __verify_backup_timer.status.ActiveState == 'active'
+        fail_msg: >-
+          UnitFileState={{ __verify_backup_timer.status.UnitFileState }}
+          ActiveState={{ __verify_backup_timer.status.ActiveState }}
+
+    - name: Verify | Read the backup service state
+      ansible.builtin.systemd_service:
+        name: '{{ __valkey_backup_service_name }}'
+      register: __verify_backup_service
+
+    - name: Verify | Assert the backup service ran after Valkey and succeeded
+      ansible.builtin.assert:
+        that:
+          - (__valkey_service_name ~ '.service') in __verify_backup_service.status.After.split()
+          - __verify_backup_service.status.Result == 'success'
+          - __verify_backup_service.status.ExecMainStatus == '0'
+        fail_msg: >-
+          After={{ __verify_backup_service.status.After }}
+          Result={{ __verify_backup_service.status.Result }}
+          ExecMainStatus={{ __verify_backup_service.status.ExecMainStatus }}
+
+    - name: Verify | List the snapshots
+      ansible.builtin.find:
+        paths: '{{ __verify_backup_dir }}'
+        patterns: '*'
+      register: __verify_snapshots
+
+    # keep 2: the snapshot of the service run and the newest older one stay,
+    # the oldest goes; a file that is not named like a snapshot stays
+    - name: Verify | Assert the rotation kept the newest snapshots
+      ansible.builtin.assert:
+        that:
+          - __verify_snapshot_names | select('match', __verify_set_re) | list | length == 2
+          - "'valkey-20250102T000000.rdb' in __verify_snapshot_names"
+          - "'valkey-20250101T000000.rdb' not in __verify_snapshot_names"
+          - "'valkey-manual.rdb' in __verify_snapshot_names"
+          - __verify_snapshot_names | select('search', '[.]partial$') | list | length == 0
+          - __verify_snapshots.files | rejectattr('pw_name', 'equalto', 'root') | list | length == 0
+          - __verify_snapshots.files | rejectattr('mode', 'equalto', '0600') | list | length == 0
+        fail_msg: 'Snapshots: {{ __verify_snapshot_names | sort }}'
+      vars:
+        __verify_snapshot_names: "{{ __verify_snapshots.files | map(attribute='path') | map('basename') | list }}"
+
+    - name: Verify | Set the snapshot of the backup run
+      ansible.builtin.set_fact:
+        __verify_restore_set: >-
+          {{ __verify_snapshots.files | map(attribute='path') | map('basename')
+             | select('match', __verify_set_re) | reject('equalto', 'valkey-20250102T000000.rdb') | first }}
+
+    # Fails in restore.yml after the install, configure and backup tasks,
+    # which the converge settings leave unchanged
+    - name: Verify | Restore a snapshot that does not exist
+      block:
+        - name: Verify | Include valkey role with a missing snapshot  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            valkey_restore: 'valkey-20200101T000000.rdb'
+      rescue:
+        - name: Verify | Record the refused restore of a missing snapshot
+          ansible.builtin.set_fact:
+            __verify_restore_missing_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Assert the restore of a missing snapshot was refused
+      ansible.builtin.assert:
+        that:
+          - __verify_restore_missing_error is defined
+          - "'valkey-20200101T000000.rdb does not exist' in __verify_restore_missing_error"
+        fail_msg: >-
+          The restore of a missing snapshot was not refused:
+          {{ __verify_restore_missing_error | default('no failure') }}
+
+    - name: Verify | Restore the snapshot of the backup run  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        valkey_restore: '{{ __verify_restore_set }}'
+
+    - name: Verify | Read the data after the restore
+      ansible.builtin.command:
+        argv: '{{ __verify_admin + item }}'
+      loop:
+        - ['GET', 'backup:marker']
+        - ['EXISTS', 'backup:after']
+      register: __verify_restored
+      changed_when: false
+
+    # With appendonly the server loads the AOF: a second restart shows that
+    # the restored data is in the AOF, not only in memory
+    - name: Verify | Restart Valkey after the restore
+      ansible.builtin.systemd_service:
+        name: '{{ __valkey_service_name }}'
+        state: restarted
+
+    - name: Verify | Read the marker after the restart
+      ansible.builtin.command:
+        argv: "{{ __verify_admin + ['GET', 'backup:marker'] }}"
+      register: __verify_restored_restart
+      changed_when: false
+
+    - name: Verify | Assert the restore brought back the data of the backup
+      ansible.builtin.assert:
+        that:
+          - __verify_restored.results[0].stdout == 'before the backup'
+          - __verify_restored.results[1].stdout == '0'
+          - __verify_restored_restart.stdout == 'before the backup'
+        fail_msg: >-
+          marker: {{ __verify_restored.results[0].stdout }},
+          key written after the backup: {{ __verify_restored.results[1].stdout }},
+          marker after a restart: {{ __verify_restored_restart.stdout }}
+        success_msg: 'The restore replaced the data with the snapshot, also in the AOF'
+
+    - name: Verify | List the snapshots after the restore
+      ansible.builtin.find:
+        paths: '{{ __verify_backup_dir }}'
+        patterns: 'valkey-*.rdb'
+      register: __verify_snapshots_after
+
+    # The fresh snapshot of the restore is new; the restored snapshot is
+    # protected from its rotation
+    - name: Verify | Assert the restore took a fresh snapshot and kept the restored one
+      ansible.builtin.assert:
+        that:
+          - __verify_restore_set in __verify_names_after
+          - __verify_names_after | select('match', __verify_set_re) | list | length == 3
+        fail_msg: 'Snapshots: {{ __verify_names_after | sort }}'
+      vars:
+        __verify_names_after: "{{ __verify_snapshots_after.files | map(attribute='path') | map('basename') | list }}"

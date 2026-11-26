@@ -1,0 +1,167 @@
+---
+# Environment shared by both scenarios: packages, the test resolver and the
+# certificates the web server examples of the README expect from certbot.
+
+- name: Prepare | Update package cache (Arch)
+  community.general.pacman:
+    update_cache: true
+    upgrade: true
+  retries: 3
+  delay: 5
+  when: ansible_facts['os_family'] == 'Archlinux'
+
+- name: Prepare | Update package cache (Debian)
+  ansible.builtin.apt:
+    update_cache: true
+  retries: 3
+  delay: 5
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Prepare | Update package cache (RedHat)
+  ansible.builtin.dnf:
+    update_cache: true
+  retries: 3
+  delay: 5
+  when: ansible_facts['os_family'] == 'RedHat'
+
+# curl comes with the Arch base system and as curl-minimal on Rocky Linux;
+# diffutils provides the cmp of verify (missing from the Rocky 9 image)
+- name: Prepare | Install container dependencies
+  ansible.builtin.package:
+    name: '{{ __prepare_packages[ansible_facts["os_family"]] }}'
+    state: present
+  retries: 3
+  delay: 5
+  vars:
+    __prepare_packages:
+      Archlinux:
+        - systemd
+        - dbus
+        - procps-ng
+        - openssl
+        - dnsmasq
+        - diffutils
+      Debian:
+        - systemd
+        - dbus
+        - procps
+        - openssl
+        - curl
+        - dnsmasq-base
+        - diffutils
+      RedHat:
+        - systemd
+        - dbus
+        - procps-ng
+        - openssl
+        - dnsmasq
+        - diffutils
+
+#
+# Test resolver
+#
+
+# Below /etc/dnsmasq.d: an AppArmor profile for dnsmasq on the container host
+# attaches by path to the dnsmasq inside the container and only allows its
+# standard configuration paths
+- name: Prepare | Create test resolver configuration directory
+  ansible.builtin.file:
+    path: /etc/dnsmasq.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Prepare | Deploy test resolver configuration
+  ansible.builtin.copy:
+    src: '{{ playbook_dir }}/../shared/files/molecule-dns.conf'
+    dest: /etc/dnsmasq.d/molecule-dns.conf
+    owner: root
+    group: root
+    mode: '0644'
+
+# /usr/sbin/dnsmasq on Debian and Rocky Linux; /usr/sbin links to /usr/bin
+# on Arch Linux
+- name: Prepare | Deploy test resolver unit
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=Test resolver for the mail_autoconfig DNS check
+
+      [Service]
+      ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/etc/dnsmasq.d/molecule-dns.conf
+
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/molecule-dns.service
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Prepare | Start test resolver
+  ansible.builtin.systemd_service:
+    name: molecule-dns.service
+    state: started
+    enabled: true
+    daemon_reload: true
+
+#
+# Certificates
+#
+
+- name: Prepare | Create certificate directories
+  ansible.builtin.file:
+    path: '/etc/letsencrypt/live/autoconfig.{{ item }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop: '{{ mail_autoconfig_domains }}'
+
+# Same paths as a certbot certificate named autoconfig.<domain>, so the web
+# server example of the README applies unchanged; the first one also covers
+# the web host name, like the README certificate. The certificate is its own
+# CA: verify passes it to curl with --cacert.
+- name: Prepare | Generate self-signed certificates
+  ansible.builtin.command:
+    cmd: >-
+      openssl req -x509 -nodes -days 30 -newkey rsa:2048
+      -keyout /etc/letsencrypt/live/autoconfig.{{ item }}/privkey.pem
+      -out /etc/letsencrypt/live/autoconfig.{{ item }}/fullchain.pem
+      -subj /CN=autoconfig.{{ item }}
+      -addext subjectAltName={{ __prepare_names | map('regex_replace', '^', 'DNS:') | join(',') }}
+    creates: '/etc/letsencrypt/live/autoconfig.{{ item }}/fullchain.pem'
+  loop: '{{ mail_autoconfig_domains }}'
+  vars:
+    __prepare_names: >-
+      {{ ['autoconfig.' ~ item, 'autodiscover.' ~ item]
+         + ([mail_autoconfig_web_host] if item == mail_autoconfig_domains | first else []) }}
+
+# Both self-signed certificates in one file: the CA file of the HTTP check
+# (mail_autoconfig_http_check_ca_path in shared/vars)
+- name: Prepare | Read self-signed certificates
+  ansible.builtin.slurp:
+    src: '/etc/letsencrypt/live/autoconfig.{{ item }}/fullchain.pem'
+  loop: '{{ mail_autoconfig_domains }}'
+  register: __prepare_certificates
+
+- name: Prepare | Deploy CA file of the HTTP check
+  ansible.builtin.copy:
+    content: >-
+      {{ __prepare_certificates.results | map(attribute='content') | map('b64decode') | join('') }}
+    dest: '{{ mail_autoconfig_http_check_ca_path }}'
+    owner: root
+    group: root
+    mode: '0644'
+
+# The role creates a missing web root as well; it exists here already so the
+# web server serves an existing document root from its first start. Owner
+# and mode as the role requires of an existing web root (verify.yml creates
+# a new one through the role).
+- name: Prepare | Create web root
+  ansible.builtin.file:
+    path: '{{ mail_autoconfig_web_root | default("/var/www/mail-autoconfig") }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'

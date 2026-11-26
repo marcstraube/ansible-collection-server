@@ -1,0 +1,41 @@
+{{ ansible_managed | comment }}
+# Included by the php-fpm profile: files PHP-FPM needs for Roundcube.
+{#- The real path of a role path, with the characters that have a meaning
+    in AppArmor rules escaped #}
+{%- set __real = dict(__roundcube_apparmor_paths | zip(__roundcube_apparmor_realpath.stdout_lines)) -%}
+{%- macro path(name) -%}
+{{ __real[name] | regex_replace('([\\\\"*?\\[\\]{}^])', '\\\\\\1') }}
+{%- endmacro %}
+
+
+# Releases
+"{{ path(__roundcube_releases_dir) }}/" r,
+"{{ path(__roundcube_releases_dir) }}/**" r,
+"{{ path(__roundcube_releases_dir) }}/*/{temp,logs}/" rw,
+"{{ path(__roundcube_releases_dir) }}/*/{temp,logs}/**" rwk,
+
+# Configuration and the MIME types of the system
+"{{ path(__roundcube_config_file) }}" r,
+/etc/{,apache2/,httpd/,nginx/}mime.types r,
+{% for ca_file in __roundcube_apparmor_ca_files %}
+"{{ path(ca_file) }}" r,
+{% endfor %}
+{% if roundcube_log_driver == 'file' %}
+
+# File logs
+"{{ path(__roundcube_log_dir) }}/" rw,
+"{{ path(__roundcube_log_dir) }}/**" rwk,
+{% endif %}
+{% if roundcube_db_type == 'sqlite' %}
+
+# SQLite database with its journal
+"{{ path(roundcube_db_path | dirname) }}/" rw,
+"{{ path(roundcube_db_path | dirname) }}/**" rwk,
+{% endif %}
+{% if __roundcube_apparmor_sockets | length > 0 %}
+
+# Unix sockets
+{% for socket in __roundcube_apparmor_sockets %}
+"{{ path(socket.path) }}{{ ('/.s.PGSQL.' ~ socket.port) if socket.type == 'postgresql' else '' }}" rw,
+{% endfor %}
+{% endif %}

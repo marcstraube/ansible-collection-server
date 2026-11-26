@@ -1,0 +1,27 @@
+---
+# Runs the role with sogo_restore and the given memcached host and expects it
+# to fail with a message matching __side_effect_expected (and, when given,
+# not matching __side_effect_not_expected).
+# Input: __side_effect_case_set, __side_effect_case_memcached, __side_effect_expected,
+# optional __side_effect_not_expected
+- name: Side Effect | Restore and expect a failure
+  block:
+    - name: Side Effect | Include sogo role with the restore  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        sogo_restore: '{{ __side_effect_case_set }}'
+        sogo_memcached_host: '{{ __side_effect_case_memcached }}'
+
+    - name: Side Effect | Fail when the restore passed
+      ansible.builtin.fail:
+        msg: 'The restore of {{ __side_effect_case_set }} passed, expected: {{ __side_effect_expected }}'
+  rescue:
+    - name: Side Effect | Assert the expected failure
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_result.msg | default('') is search(__side_effect_expected)
+          - >-
+            __side_effect_not_expected is not defined
+            or ansible_failed_result.msg | default('') is not search(__side_effect_not_expected)
+        fail_msg: '{{ ansible_failed_result | default({}) | to_json }}'

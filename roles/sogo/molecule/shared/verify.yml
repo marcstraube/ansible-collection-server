@@ -1,0 +1,483 @@
+---
+# Checks of the postgresql and mariadb scenarios: files and permissions, the
+# service (the container on Rocky Linux), memcached, nginx with the login
+# page, a static resource and the .well-known redirects, the login of a
+# PostfixAdmin account with an {ARGON2ID} hash, a rejected password, a
+# password change in SOGo that Dovecot accepts, the shared mailbox and the
+# IMAP folders through SOGo, a message sent through SOGo, a CalDAV event, a
+# CardDAV contact, a Sieve filter through ManageSieve, the timers and their
+# jobs, ActiveSync, the update of side_effect and the backup.
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - vars/main.yml
+
+  vars:
+    __verify_client: >-
+      /usr/local/bin/molecule-sogo-client --base https://{{ __molecule_mail_host }} --ca /etc/molecule-tls/ca.pem
+    __verify_db_query:
+      postgresql: >-
+        psql --no-align --tuples-only --dbname=postfixadmin --command
+      mariadb: >-
+        mariadb --batch --skip-column-names postfixadmin --execute
+
+  tasks:
+    # Before the checks, which store the contact again
+    - name: Verify | Fetch the restored contact of alice
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_client | split + ['fetch', '--kind', 'contact', '--user', 'alice@example.com'] }}
+        stdin: "{{ {'password': __molecule_passwords['alice@example.com']} | to_json }}"
+      register: __verify_restored_contact
+      changed_when: false
+      no_log: true
+      when: sogo_backup_enabled | default(false) | bool
+
+    - name: Verify | Assert the restore brought the contact back
+      ansible.builtin.assert:
+        that:
+          - (__verify_restored_contact.stdout | from_json).fetched == 200
+          - (__verify_restored_contact.stdout | from_json).body is search('FN:Molecule Contact')
+        fail_msg: '{{ __verify_restored_contact.stdout }}'
+        success_msg: 'sogo_restore brought back the contact deleted after the backup'
+      when: sogo_backup_enabled | default(false) | bool
+
+    - name: Verify | Include the checks
+      ansible.builtin.include_tasks: tasks/checks.yml
+
+    #
+    # Update of side_effect
+    #
+
+    - name: Verify | Read the update of side_effect
+      ansible.builtin.slurp:
+        src: /root/sogo-update
+      register: __verify_update_file
+
+    # Debian: the policy-rc.d of the image kept the package from restarting
+    # SOGo, so the role restarted it once and sogod runs the new binary.
+    # Rocky Linux: a new image, the container runs it and the web resources
+    # come from it. Arch Linux: nothing to update, no restart.
+    - name: Verify | Assert the outcome of the update
+      ansible.builtin.assert:
+        that:
+          - >-
+            ansible_facts['os_family'] != 'Debian'
+            or (__verify_update.after.version == __verify_update.candidate
+                and __verify_update.after.exe is not search('deleted'))
+          - >-
+            ansible_facts['os_family'] != 'Debian'
+            or (__verify_update.before.version != __verify_update.after.version
+                and __verify_update.after.pid != __verify_update.before.pid
+                and __verify_update.starts == 1)
+          - >-
+            ansible_facts['os_family'] != 'RedHat'
+            or (__verify_update.after.image != __verify_update.before.image
+                and __verify_update.after.running == __verify_update.after.image
+                and __verify_update.after.resources | trim == __verify_update.after.image
+                and __verify_update.starts == 1)
+          - >-
+            ansible_facts['os_family'] != 'Archlinux'
+            or (__verify_update.after == __verify_update.before
+                and __verify_update.starts == 0)
+        fail_msg: '{{ __verify_update | to_json }}'
+        success_msg: '{{ __verify_update | to_json }}'
+      vars:
+        __verify_update: '{{ __verify_update_file.content | b64decode | from_json }}'
+
+    #
+    # Backup and restore of side_effect
+    #
+
+    - name: Verify | Read the restored set
+      ansible.builtin.slurp:
+        src: /root/sogo-restore
+      register: __verify_restored_set
+      when: sogo_backup_enabled | default(false) | bool
+
+    - name: Verify | List the backup sets
+      ansible.builtin.find:
+        paths: '{{ sogo_backup_dir }}'
+        file_type: directory
+        patterns: 'sogo-*'
+        excludes: '*.partial'
+      register: __verify_backup_sets
+      when: sogo_backup_enabled | default(false) | bool
+
+    - name: Verify | List the files of the fresh backup
+      ansible.builtin.find:
+        paths: >-
+          {{ __verify_backup_sets.files | map(attribute='path')
+             | reject('search', (__verify_restored_set.content | b64decode | trim) ~ '$') | first }}
+      register: __verify_backup_files
+      when: sogo_backup_enabled | default(false) | bool
+
+    # The rotation keeps one set; the last restore that took a backup (the
+    # one of the set with errors@example.com only) kept its protected set:
+    # that set and the fresh backup, which holds alice's data
+    - name: Verify | Assert the rotation and the set kept for the restore
+      ansible.builtin.assert:
+        that:
+          - __verify_backup_sets.files | length == 2
+          - >-
+            (__verify_restored_set.content | b64decode | trim)
+            in __verify_backup_sets.files | map(attribute='path') | map('basename') | list
+          - >-
+            __verify_backup_files.files | map(attribute='path') | map('basename')
+            | select('search', 'alice@example.com') | list | length == 1
+        fail_msg: >-
+          {{ __verify_backup_sets.files | map(attribute='path') | list }}
+          {{ __verify_backup_files.files | map(attribute='path') | list }}
+      when: sogo_backup_enabled | default(false) | bool
+
+    #
+    # Previous image (Rocky Linux) and input validation
+    #
+
+    # The rebuild of the update kept the replaced image as the one previous
+    # image: two tags of localhost/sogo, no untagged leftover
+    - name: Verify | List the SOGo images of the sogo user (RedHat)
+      ansible.builtin.command:
+        argv: ['podman', 'images', '--format', 'json', 'localhost/sogo']
+      become: true
+      become_user: sogo
+      environment:
+        XDG_RUNTIME_DIR: /run/sogo
+      register: __verify_sogo_images
+      changed_when: false
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Verify | List the untagged images of the sogo user (RedHat)
+      ansible.builtin.command:
+        argv: ['podman', 'images', '--filter', 'dangling=true', '--quiet']
+      become: true
+      become_user: sogo
+      environment:
+        XDG_RUNTIME_DIR: /run/sogo
+      register: __verify_dangling
+      changed_when: false
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Verify | Assert the latest and exactly one previous image
+      ansible.builtin.assert:
+        that:
+          - __verify_tags | sort == ['localhost/sogo:latest', 'localhost/sogo:previous']
+          - __verify_sogo_images.stdout | from_json | length == 2
+          - __verify_dangling.stdout | trim | length == 0
+        fail_msg: 'images: {{ __verify_sogo_images.stdout }} untagged: {{ __verify_dangling.stdout }}'
+      vars:
+        __verify_tags: >-
+          {{ __verify_sogo_images.stdout | from_json | map(attribute='Names', default=[]) | flatten | list }}
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    # '&' would end up in the replacement of a sed expression of the build
+    - name: Verify | Run the role with a mirror URL sed cannot take
+      block:
+        - name: Verify | Include sogo role with an '&' in the mirror URL  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            sogo_container_debian_mirror: 'http://mirror.example.com/debian?a=1&b=2'
+
+        - name: Verify | Fail when the mirror URL was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a mirror URL with an ampersand'
+      rescue:
+        - name: Verify | Assert the role rejected the mirror URL
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg | default('') is search('sogo_container_debian_mirror')
+            fail_msg: '{{ ansible_failed_result.msg | default("") }}'
+
+    # A quote or a dollar sign in the memcached host would reach a shell
+    - name: Verify | Run the role with a memcached host a shell could misread
+      block:
+        - name: Verify | Include sogo role with a quote in the memcached host  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            sogo_memcached_host: "mc.example.com'$(id)"
+
+        - name: Verify | Fail when the memcached host was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a memcached host with a quote'
+      rescue:
+        - name: Verify | Assert the role rejected the memcached host
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg | default('') is search('sogo_memcached_host')
+            fail_msg: '{{ ansible_failed_result.msg | default("") }}'
+
+    # sogo_backup_dir reaches shell commands (the backup script): a quote or
+    # a dollar sign is refused
+    - name: Verify | Run the role with backup directories a shell could misread
+      block:
+        - name: Verify | Include sogo role with a quote in the backup directory  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            sogo_backup_dir: "/var/lib/sogo/it's"
+
+        - name: Verify | Fail when the backup directory with a quote was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a backup directory with a quote'
+      rescue:
+        - name: Verify | Assert the role rejected the backup directory with a quote
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg | default('') is search('sogo_backup_dir must be')
+            fail_msg: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Run the role with a dollar sign in the backup directory
+      block:
+        - name: Verify | Include sogo role with a dollar sign in the backup directory  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            sogo_backup_dir: '/var/lib/sogo/$(id)'
+
+        - name: Verify | Fail when the backup directory with a dollar sign was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a backup directory with a dollar sign'
+      rescue:
+        - name: Verify | Assert the role rejected the backup directory with a dollar sign
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg | default('') is search('sogo_backup_dir must be')
+            fail_msg: '{{ ansible_failed_result.msg | default("") }}'
+
+    # '$' in a validation would match before a trailing newline; '\Z' does not
+    - name: Verify | Run the role with a newline after the memcached host
+      block:
+        - name: Verify | Include sogo role with a newline after the memcached host  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            sogo_memcached_host: "127.0.0.1\n"
+
+        - name: Verify | Fail when the memcached host with a newline was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a memcached host with a trailing newline'
+      rescue:
+        - name: Verify | Assert the role rejected the memcached host with a newline
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg | default('') is search('sogo_memcached_host')
+            fail_msg: '{{ ansible_failed_result.msg | default("") }}'
+
+    # '.' and '..' segments would make the role own a parent directory (the
+    # web resources directory also reaches a shell)
+    - name: Verify | Run the role with a '..' segment in the backup directory
+      block:
+        - name: Verify | Include sogo role with a '..' segment in the backup directory  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            sogo_backup_dir: '/var/lib/..'
+
+        - name: Verify | Fail when a '..' segment in the backup directory was accepted
+          ansible.builtin.fail:
+            msg: "The role accepted a '..' segment in the backup directory"
+      rescue:
+        - name: Verify | Assert the role rejected a '..' segment in the backup directory
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg | default('') is search('sogo_backup_dir must be')
+            fail_msg: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Run the role with a quote in the web resources directory
+      block:
+        - name: Verify | Include sogo role with a quote in the web resources directory  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            sogo_web_resources_dir: "/usr/local/share/it's"
+
+        - name: Verify | Fail when a quote in the web resources directory was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a quote in the web resources directory'
+      rescue:
+        - name: Verify | Assert the role rejected a quote in the web resources directory
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg | default('') is search('sogo_web_resources_dir must be')
+            fail_msg: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Run the role with a dollar sign in the web resources directory
+      block:
+        - name: Verify | Include sogo role with a dollar sign in the web resources directory  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            sogo_web_resources_dir: '/usr/local/share/$(id)'
+
+        - name: Verify | Fail when a dollar sign in the web resources directory was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a dollar sign in the web resources directory'
+      rescue:
+        - name: Verify | Assert the role rejected a dollar sign in the web resources directory
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg | default('') is search('sogo_web_resources_dir must be')
+            fail_msg: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Run the role with a '.' segment in the web resources directory
+      block:
+        - name: Verify | Include sogo role with a '.' segment in the web resources directory  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            sogo_web_resources_dir: '/usr/local/share/./sogo'
+
+        - name: Verify | Fail when a '.' segment in the web resources directory was accepted
+          ansible.builtin.fail:
+            msg: "The role accepted a '.' segment in the web resources directory"
+      rescue:
+        - name: Verify | Assert the role rejected a '.' segment in the web resources directory
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg | default('') is search('sogo_web_resources_dir must be')
+            fail_msg: '{{ ansible_failed_result.msg | default("") }}'
+
+    # One level deep: only the depth rule rejects these (a path that does not
+    # exist for the backup directory, so a regression creates it instead of
+    # taking over /var; /usr has no stamp file, the web resources copy would
+    # stop there)
+    - name: Verify | Run the role with a backup directory one level deep
+      block:
+        - name: Verify | Include sogo role with a backup directory one level deep  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            sogo_backup_dir: '/molecule-sogo-backups'
+
+        - name: Verify | Fail when a backup directory one level deep was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a backup directory one level deep'
+      rescue:
+        - name: Verify | Assert the role rejected a backup directory one level deep
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg | default('') is search('sogo_backup_dir must be')
+            fail_msg: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Run the role with a web resources directory one level deep
+      block:
+        - name: Verify | Include sogo role with a web resources directory one level deep  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            sogo_web_resources_dir: '/usr'
+
+        - name: Verify | Fail when a web resources directory one level deep was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a web resources directory one level deep'
+      rescue:
+        - name: Verify | Assert the role rejected a web resources directory one level deep
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg | default('') is search('sogo_web_resources_dir must be')
+            fail_msg: '{{ ansible_failed_result.msg | default("") }}'
+
+    # An existing directory of another user is not taken over (also two
+    # levels deep, with allowed characters)
+    - name: Verify | Create a directory of root
+      ansible.builtin.file:
+        path: /srv/molecule-foreign
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Verify | Run the role with a backup directory of root
+      block:
+        - name: Verify | Include sogo role with a backup directory of root  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            sogo_backup_enabled: true
+            sogo_backup_dir: /srv/molecule-foreign
+
+        - name: Verify | Fail when the backup directory of root was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a backup directory of root'
+      rescue:
+        - name: Verify | Read the directory of root
+          ansible.builtin.stat:
+            path: /srv/molecule-foreign
+          register: __verify_foreign
+
+        - name: Verify | Assert the role refused the directory and left it alone
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg | default('') is search('is not a directory of\\s+the sogo user')
+              - ansible_failed_result.msg is search('/srv/molecule-foreign/sogo')
+              - __verify_foreign.stat.pw_name == 'root'
+              - __verify_foreign.stat.gr_name == 'root'
+              - __verify_foreign.stat.mode == '0755'
+            fail_msg: '{{ ansible_failed_result.msg | default("") }} {{ __verify_foreign.stat | to_json }}'
+
+    # A symlink is refused with its own message (also one to a directory)
+    - name: Verify | Create a symlink to the directory of root
+      ansible.builtin.file:
+        src: /srv/molecule-foreign
+        path: /srv/molecule-link
+        state: link
+        owner: root
+        group: root
+
+    - name: Verify | Run the role with a symlink as backup directory
+      block:
+        - name: Verify | Include sogo role with a symlink as backup directory  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            sogo_backup_enabled: true
+            sogo_backup_dir: /srv/molecule-link
+
+        - name: Verify | Fail when the symlink was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a symlink as backup directory'
+      rescue:
+        - name: Verify | Assert the role refused the symlink
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg | default('') is search('is a symlink; point sogo_backup_dir at the real')
+            fail_msg: '{{ ansible_failed_result.msg | default("") }}'
+      always:
+        - name: Verify | Remove the symlink and the directory of root
+          ansible.builtin.file:
+            path: '{{ item }}'
+            state: absent
+          loop:
+            - /srv/molecule-link
+            - /srv/molecule-foreign
+
+    - name: Verify | Read the state of the backup timer
+      ansible.builtin.command:
+        argv: [systemctl, is-active, sogo-backup.timer]
+      register: __verify_backup_timer
+      changed_when: false
+      failed_when: __verify_backup_timer.stdout != 'active'
+      when:
+        - sogo_backup_enabled | default(false) | bool
+        - sogo_backup_timer_enabled | default(true) | bool
+
+    # The directory the role created and owns
+    - name: Verify | Read the backup directory
+      ansible.builtin.stat:
+        path: '{{ sogo_backup_dir }}'
+      register: __verify_backup_dir
+      when: sogo_backup_enabled | default(false) | bool
+
+    - name: Verify | Assert owner and mode of the backup directory
+      ansible.builtin.assert:
+        that:
+          - __verify_backup_dir.stat.isdir
+          - __verify_backup_dir.stat.pw_name == 'sogo'
+          - __verify_backup_dir.stat.gr_name == 'sogo'
+          - __verify_backup_dir.stat.mode == '0700'
+        fail_msg: '{{ __verify_backup_dir.stat | to_json }}'
+      when: sogo_backup_enabled | default(false) | bool

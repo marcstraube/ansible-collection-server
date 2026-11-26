@@ -1,0 +1,55 @@
+---
+# The role's own policy-rc.d is left behind, as an interrupted first run
+# does; runs with a single sub-tag (rspamd:dkim, rspamd:configure,
+# rspamd:service, rspamd:dns) must pass without the install tasks, and the
+# next full run removes the leftover. verify.yml checks that.
+- name: Side Effect — Leftover policy-rc.d
+  hosts: filter
+  gather_facts: false
+
+  tasks:
+    - name: Side Effect | Leave the role's policy-rc.d behind
+      ansible.builtin.copy:
+        content: |
+          #!/bin/sh
+          # Managed by Ansible (marcstraube.server.rspamd): keeps the first
+          # install of rspamd from starting it, removed right after
+          exit 101
+        dest: /usr/sbin/policy-rc.d
+        owner: root
+        group: root
+        mode: '0755'
+
+# A run with a single sub-tag skips the install tasks, which set the facts
+# of a pending first install in check mode; the later phases must not
+# depend on them
+- name: Side Effect — Single sub-tags
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Side Effect | Run the role with a single sub-tag
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python | dirname }}/ansible-playbook"
+          - '--inventory'
+          - '{{ ansible_inventory_sources | first }}'
+          - '--tags'
+          - '{{ item }}'
+          - '{{ playbook_dir }}/converge_tagged.yml'
+      environment:
+        ANSIBLE_FORCE_COLOR: 'false'
+        ANSIBLE_NOCOLOR: 'true'
+      loop:
+        - 'rspamd:dkim'
+        - 'rspamd:configure'
+        - 'rspamd:service'
+        - 'rspamd:dns'
+      register: __side_effect_tagged
+      changed_when: false
+      failed_when: >-
+        __side_effect_tagged.rc != 0
+        or __side_effect_tagged.stdout is not search('rspamd-split-filter +: ok=[1-9][0-9]* .*failed=0')
+
+- name: Side Effect — Run the role again
+  ansible.builtin.import_playbook: converge.yml

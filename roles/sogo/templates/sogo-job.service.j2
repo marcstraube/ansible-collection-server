@@ -1,0 +1,28 @@
+{{ ansible_managed | comment }}
+# Periodic job of SOGo, started by {{ __sogo_job.name }}.timer
+# (marcstraube.server.sogo)
+
+[Unit]
+Description={{ __sogo_job.description }}
+Documentation=https://www.sogo.nu/support/documentation.html
+After=network.target {{ __sogo_service_name }}
+{% if __sogo_job.name == 'sogo-vacation-messages' %}
+ConditionPathExists={{ __sogo_sieve_creds_file }}
+{% endif %}
+
+[Service]
+Type=oneshot
+User={{ __sogo_user }}
+Group={{ __sogo_group }}
+{% if __sogo_install_method == 'container' %}
+Environment="XDG_RUNTIME_DIR={{ __sogo_runtime_dir }}"
+{% else %}
+{% for name, value in __sogo_db_environment.items() %}
+Environment="{{ name }}={{ value }}"
+{% endfor %}
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+{% endif %}
+ExecStart={{ (__sogo_command_prefix + [__sogo_job.command]) | join(' ') }}

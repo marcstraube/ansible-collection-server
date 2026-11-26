@@ -1,0 +1,45 @@
+---
+# Dovecot CE 2.4 repository of upstream (AppStream ships 2.3). Its packages
+# depend on libunwind from EPEL. Address and signing key are public defaults
+# (dovecot_repo_baseurl, dovecot_repo_gpgkey).
+__dovecot_repo_name: 'dovecot-ce-2.4'
+__dovecot_repo_description: 'Dovecot CE 2.4 for EL $releasever - $basearch'
+__dovecot_repo_file: '/etc/yum.repos.d/{{ __dovecot_repo_name }}.repo'
+
+__dovecot_packages:
+  - dovecot
+  - dovecot-imapd
+  - dovecot-lmtpd
+  - dovecot-sieve
+__dovecot_db_packages:
+  postgresql:
+    - dovecot-pgsql
+  mariadb:
+    - dovecot-mysql
+__dovecot_pop3_packages:
+  - dovecot-pop3d
+__dovecot_managesieve_packages:
+  - dovecot-managesieved
+# curl or curl-minimal provides it; naming either package conflicts with the
+# other one when it is installed
+__dovecot_curl_packages:
+  - '/usr/bin/curl'
+
+# Package whose version the role reports and checks
+__dovecot_version_package: 'dovecot'
+
+# Installed packages a targeted update moves along
+__dovecot_update_pattern: '^dovecot(-.+)?$'
+
+__dovecot_service_name: 'dovecot'
+
+# Group of the Dovecot service user (default_internal_group), created by the
+# package
+__dovecot_internal_group: 'dovecot'
+
+# Shell of the virtual mail user
+__dovecot_nologin_shell: '/sbin/nologin'
+
+# semanage and the Python bindings community.general.seport needs
+__dovecot_selinux_packages:
+  - policycoreutils-python-utils

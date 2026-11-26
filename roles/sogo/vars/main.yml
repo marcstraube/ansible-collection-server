@@ -1,0 +1,257 @@
+---
+#
+# SOGo — Shared Variables
+#
+
+# User and group of SOGo (created by the packages on Debian and Arch Linux,
+# by the role on Rocky Linux)
+__sogo_user: 'sogo'
+__sogo_group: 'sogo'
+
+# Configuration; /etc/sogo is readable by the sogo group only
+__sogo_config_dir: '/etc/sogo'
+__sogo_config_file: '/etc/sogo/sogo.conf'
+
+# Credentials of the Sieve administrator (username:password) for
+# sogo-tool update-autoreply
+__sogo_sieve_creds_file: '/etc/sogo/sieve.creds'
+
+# Mail spool of SOGo (SOGoMailSpoolPath, the default of the packages)
+__sogo_spool_dir: '/var/spool/sogo'
+
+# Drop-in with the environment of the database client (PostgreSQL TLS)
+__sogo_dropin_dir: '/etc/systemd/system/sogo.service.d'
+
+# Backup script and its units
+__sogo_backup_script: '/usr/local/bin/sogo-backup'
+__sogo_backup_service_name: 'sogo-backup.service'
+__sogo_backup_timer_name: 'sogo-backup.timer'
+
+# Periodic jobs as oneshot services with a timer each. The names are the
+# ones of the AUR package, whose units in /usr/lib/systemd/system the units
+# of the role in /etc/systemd/system replace.
+__sogo_jobs:
+  - name: 'sogo-expire-sessions'
+    description: 'Expire SOGo sessions without activity'
+    on_calendar: '*:*:00'
+    enabled: '{{ sogo_expire_sessions_timer_enabled | bool }}'
+    command: '{{ __sogo_tool }} expire-sessions {{ sogo_session_timeout }}'
+  - name: 'sogo-ealarms-notify'
+    description: 'Send the e-mail alarms of SOGo events and tasks'
+    on_calendar: '*:*:00'
+    enabled: '{{ sogo_ealarms_timer_enabled | bool }}'
+    command: '{{ __sogo_ealarms_notify }}'
+  - name: 'sogo-vacation-messages'
+    description: 'Activate and end the out-of-office replies of SOGo'
+    on_calendar: '*:0/5'
+    enabled: '{{ sogo_autoreply_timer_enabled | bool and __sogo_sieve_admin_set | bool }}'
+    command: '{{ __sogo_tool }} update-autoreply -p {{ __sogo_sieve_creds_file }}'
+
+# Both Sieve administrator credentials are set
+__sogo_sieve_admin_set: >-
+  {{ sogo_sieve_admin_username | length > 0 and sogo_sieve_admin_password | length > 0 }}
+
+#
+# Rocky Linux Container
+#
+
+# Local image and container of the service
+__sogo_container_image: 'localhost/sogo:latest'
+__sogo_container_previous_image: 'localhost/sogo:previous'
+__sogo_container_name: 'sogo'
+
+# Shell command that points the APT sources of the base image (deb822,
+# /etc/apt/sources.list.d/debian.sources) at sogo_container_debian_mirror
+# and sogo_container_debian_security_mirror; 'true' without mirrors
+__sogo_container_apt_mirrors: >-
+  {{ ('sed -i'
+      ~ ((" -e 's#^URIs: http://deb.debian.org/debian$#URIs: " ~ sogo_container_debian_mirror ~ "#'")
+         if sogo_container_debian_mirror | length > 0 else '')
+      ~ ((" -e 's#^URIs: http://deb.debian.org/debian-security$#URIs: " ~ sogo_container_debian_security_mirror
+          ~ "#'") if sogo_container_debian_security_mirror | length > 0 else '')
+      ~ ' /etc/apt/sources.list.d/debian.sources')
+     if (sogo_container_debian_mirror ~ sogo_container_debian_security_mirror) | length > 0 else 'true' }}
+
+# Build script of the image
+__sogo_container_build_dir: '/usr/local/share/sogo-container'
+__sogo_container_build_script: '/usr/local/share/sogo-container/sogo-image.sh'
+
+# Label of the image with the checksum of the build script it was built
+# from; a changed script rebuilds the image
+__sogo_container_label: 'io.github.marcstraube.sogo.containerfile'
+
+# UID and GID of the sogo user in the image; the host user maps onto them
+# (podman --userns=keep-id), so files of the host user stay its own
+__sogo_container_uid: 999
+__sogo_container_gid: 999
+
+# sogod in the foreground, logging to stdout (the journal of the service);
+# the configuration is /etc/sogo/sogo.conf
+__sogo_container_entrypoint:
+  - '/usr/sbin/sogod'
+  - '-WONoDetach'
+  - 'YES'
+  - '-WOLogFile'
+  - '-'
+  - '-WOPidFile'
+  - '/tmp/sogo.pid'
+
+# Mounts of the service container and of the containers of the periodic
+# jobs; :z gives them a label every container may share. The jobs also
+# mount the backup directory (the backup runs as such a job).
+__sogo_container_volumes:
+  - '{{ __sogo_config_dir }}:{{ __sogo_config_dir }}:ro,z'
+  - '{{ __sogo_container_ca_bundle }}:/etc/ssl/certs/ca-certificates.crt:ro'
+  - '{{ __sogo_spool_dir }}:{{ __sogo_spool_dir }}:z'
+__sogo_container_job_volumes: >-
+  {{ __sogo_container_volumes
+     + ([sogo_backup_dir ~ ':' ~ sogo_backup_dir ~ ':z'] if sogo_backup_enabled | bool else []) }}
+
+# Command line that runs a program of the image in a container of its own,
+# as the sogo user with the mounts and the environment of the service: the
+# periodic jobs and the backup. A job cannot join the container of the
+# service (podman exec): its process would have to enter the cgroup that
+# systemd delegated to sogo.service.
+__sogo_container_job_prefix: >-
+  {{ ['/usr/bin/podman', 'run', '--rm', '--cgroups=disabled', '--log-driver=passthrough', '--network=host',
+      '--userns=keep-id:uid=' ~ __sogo_container_uid ~ ',gid=' ~ __sogo_container_gid,
+      '--cap-drop=all', '--security-opt=no-new-privileges']
+     + (__sogo_db_environment.items() | map('join', '=') | map('regex_replace', '^', '--env=') | list)
+     + (__sogo_container_job_volumes | map('regex_replace', '^', '--volume=') | list)
+     + ['--entrypoint=/usr/bin/env', __sogo_container_image] }}
+
+# Home of the host user: the podman storage of the image
+__sogo_home: '/var/lib/sogo'
+
+# Runtime state of the rootless podman instance; the service unit creates
+# it as its RuntimeDirectory
+__sogo_runtime_dir: '/run/sogo'
+
+# WebServerResources in the image (sogo-common)
+__sogo_container_web_resources: '/usr/share/GNUstep/SOGo/WebServerResources'
+
+# Staging directory of the copy of the web resources (sogo user) and the
+# file with the ID of the image the copy came from
+__sogo_web_resources_staging: '/var/lib/sogo/web-resources'
+__sogo_web_resources_stamp: '.sogo-image-id'
+
+# CA bundles of the host the container trusts: the system trust store for
+# Dovecot and Postfix, and the CA of the database server, copied into the
+# configuration directory the container mounts
+__sogo_container_ca_bundle: '/etc/sogo/ca-bundle.pem'
+__sogo_container_db_ca_file: '/etc/sogo/db-ca.pem'
+__sogo_host_ca_bundle: '/etc/pki/tls/certs/ca-bundle.crt'
+
+#
+# Database
+#
+
+# Scheme of the database URLs per sogo_db_type
+__sogo_db_url_schemes:
+  postgresql: 'postgresql'
+  mariadb: 'mysql'
+
+# Characters of a password SOGo can take in a database URL
+__sogo_db_password_regex: "^[A-Za-z0-9._~!$&'()*+,;=-]+\\Z"
+
+# Addresses of a database or memcached server on the host itself
+__sogo_loopback_hosts:
+  - 'localhost'
+  - '127.0.0.1'
+  - '::1'
+
+# The database server runs on this host
+__sogo_db_local: '{{ sogo_db_host in __sogo_loopback_hosts }}'
+
+# Output of sogo-tool restore for a user the user source does not know, and
+# for errors that make such an answer a real failure
+__sogo_restore_unknown_user: "user '[^']*' not found"
+__sogo_restore_error: 'error|exception|could not'
+
+# Host and port of a memcached over TCP: 'host', 'host:port', '[v6]',
+# '[v6]:port' or a bare IPv6 address (several colons, no port)
+__sogo_memcached_tcp_host: >-
+  {{ sogo_memcached_host | regex_replace('^\[([^]]+)\](:[0-9]+)?$', '\1')
+     if sogo_memcached_host is match('^\[')
+     else (sogo_memcached_host if sogo_memcached_host.count(':') > 1
+           else sogo_memcached_host | regex_replace(':[0-9]+$', '')) }}
+__sogo_memcached_tcp_port: >-
+  {{ sogo_memcached_host | regex_replace('^.*:([0-9]+)$', '\1')
+     if sogo_memcached_host is match('^(\[[^]]+\]|[^:]+):[0-9]+$') else '11211' }}
+
+# memcached runs on this host: a socket path or a loopback address. The
+# role installs and enables it, and the restore restarts it.
+__sogo_memcached_local: >-
+  {{ sogo_memcached_host is match('/') or __sogo_memcached_tcp_host in __sogo_loopback_hosts }}
+
+# CA file of the database server as SOGo sees it (the copy in the
+# configuration directory in the container)
+__sogo_db_ca_path: >-
+  {{ __sogo_container_db_ca_file if __sogo_install_method == 'container' else sogo_db_tls_ca_file }}
+
+# Environment of the database client: libpq takes sslmode and the CA from
+# it, SOGo has no setting for PostgreSQL TLS
+__sogo_db_environment: >-
+  {{ {'PGSSLMODE': 'verify-full', 'PGSSLROOTCERT': __sogo_db_ca_path}
+     if sogo_db_tls | bool and sogo_db_type == 'postgresql' else {} }}
+
+# Database URL without the table (the table is appended per key)
+__sogo_db_url: >-
+  {{ __sogo_db_url_schemes[sogo_db_type] }}://{{ sogo_db_user }}:{{ sogo_db_password
+  }}@{{ sogo_db_host }}:{{ sogo_db_port }}/{{ sogo_db_name }}
+
+# Default user source: the SOGo view of the PostfixAdmin database
+__sogo_default_user_sources:
+  - id: 'postfixadmin'
+    type: 'sql'
+    viewURL: >-
+      {{ __sogo_db_url_schemes[sogo_db_type] }}://{{ sogo_postfixadmin_db_user }}:{{
+      sogo_postfixadmin_db_password }}@{{ sogo_postfixadmin_db_host }}:{{ sogo_postfixadmin_db_port
+      }}/{{ sogo_postfixadmin_db_name }}/{{ sogo_postfixadmin_view }}
+    canAuthenticate: true
+    isAddressBook: true
+    displayName: 'Users'
+    userPasswordAlgorithm: '{{ sogo_password_scheme }}'
+    prependPasswordScheme: true
+
+# Schemes the role accepts, the ones PostfixAdmin writes
+__sogo_password_schemes:
+  - 'ARGON2ID'
+  - 'BLF-CRYPT'
+  - 'SHA512-CRYPT'
+
+# sogo.conf keys the role writes from its variables (key => the variable to
+# set instead); sogo_extra_config must not override them
+__sogo_managed_config:
+  WOPort: 'sogo_bind'
+  WOWorkersCount: 'sogo_workers'
+  SOGoMemcachedHost: 'sogo_memcached_host'
+  SOGoProfileURL: 'the sogo_db_* variables'
+  OCSFolderInfoURL: 'the sogo_db_* variables'
+  OCSSessionsFolderURL: 'the sogo_db_* variables'
+  OCSEMailAlarmsFolderURL: 'the sogo_db_* variables'
+  OCSStoreURL: 'the sogo_db_* variables'
+  OCSAclURL: 'the sogo_db_* variables'
+  OCSCacheFolderURL: 'the sogo_db_* variables'
+  OCSAdminURL: 'the sogo_db_* variables'
+  MySQL4SSLEnabled: 'sogo_db_tls'
+  MySQL4SSLCaPath: 'sogo_db_tls_ca_file'
+  SOGoUserSources: 'sogo_user_sources'
+  SOGoPasswordChangeEnabled: 'sogo_password_change_enabled'
+  SOGoMailDomain: 'sogo_mail_domain'
+  SOGoIMAPServer: 'sogo_imap_server'
+  SOGoSMTPServer: 'sogo_smtp_server'
+  SOGoSMTPAuthenticationType: '(always PLAIN, set by the role)'
+  SOGoMailingMechanism: '(always smtp, set by the role)'
+  SOGoSieveServer: 'sogo_sieve_server'
+  SOGoSieveScriptsEnabled: 'sogo_sieve_scripts_enabled'
+  SOGoForwardEnabled: 'sogo_forward_enabled'
+  SOGoVacationEnabled: 'sogo_vacation_enabled'
+  SOGoTimeZone: 'sogo_timezone'
+  SOGoLanguage: 'sogo_language'
+  SOGoEnableEMailAlarms: 'sogo_ealarms_timer_enabled'
+  SOGoMailSpoolPath: '(fixed, set by the role)'
+  SOGoMaximumFailedLoginCount: 'sogo_failed_login_count'
+  SOGoMaximumFailedLoginInterval: 'sogo_failed_login_interval'
+  SOGoFailedLoginBlockInterval: 'sogo_failed_login_block_interval'
+  SOGoCacheCleanupInterval: 'sogo_failed_login_interval and sogo_failed_login_block_interval'

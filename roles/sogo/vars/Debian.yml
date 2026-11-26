@@ -1,0 +1,37 @@
+---
+# SOGo from the distribution (5.12 with Debian security updates)
+__sogo_install_method: 'package'
+__sogo_packages:
+  - 'sogo'
+__sogo_activesync_packages:
+  - 'sogo-activesync'
+
+# Installed packages of the SOGo family that move together in an update
+__sogo_update_pattern: '^(sogo|sogo-common|sogo-activesync|libsope[0-9a-z.-]*)$'
+
+# Programs of the package
+__sogo_tool: '/usr/sbin/sogo-tool'
+__sogo_ealarms_notify: '/usr/sbin/sogo-ealarms-notify'
+__sogo_command_prefix: []
+
+# Unit and PID file of the package (sogod -WOPidFile)
+__sogo_service_name: 'sogo.service'
+__sogo_pid_file: '/run/sogo/sogo.pid'
+
+# The unit of the package passes -WOWorkersCount ${PREFORK} from this file,
+# which takes precedence over sogo.conf
+__sogo_defaults_file: '/etc/default/sogo'
+
+# WebServerResources of the package (sogo-common)
+__sogo_web_resources_path: '/usr/share/GNUstep/SOGo/WebServerResources'
+
+# Validates sogo.conf (gnustep-base-runtime, a dependency of the package)
+__sogo_config_validate: 'plparse %s'
+
+# memcached on this host (a dependency of the Debian package)
+__sogo_memcached_packages:
+  - 'memcached'
+__sogo_memcached_service_name: 'memcached.service'
+
+# Socket of a local MariaDB server (sogo_db_create)
+__sogo_mariadb_socket: '/run/mysqld/mysqld.sock'

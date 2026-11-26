@@ -1,0 +1,13 @@
+---
+- name: Converge
+  hosts: all
+  gather_facts: true
+
+  # Unset counts as true; verify.yml checks the early failure without it
+  vars:
+    mta_enabled: false
+
+  tasks:
+    - name: Converge | Include postfix role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'

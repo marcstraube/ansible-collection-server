@@ -1,0 +1,81 @@
+---
+# Rocky Linux: the unit of the container; Debian and Arch Linux use the
+# unit of the package
+- name: Service | Deploy the SOGo container unit (RedHat)
+  ansible.builtin.template:
+    src: sogo-container.service.j2
+    dest: '/etc/systemd/system/{{ __sogo_service_name }}'
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - Reload SOGo systemd units
+    - Restart SOGo
+  register: __sogo_unit_result
+  when: __sogo_install_method == 'container'
+
+# The units of the AUR package with the same names are replaced by these
+- name: Service | Deploy the units of the periodic jobs
+  ansible.builtin.template:
+    src: 'sogo-job.{{ item.1 }}.j2'
+    dest: '/etc/systemd/system/{{ item.0.name }}.{{ item.1 }}'
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ __sogo_jobs | product(['service', 'timer']) | list }}"
+  loop_control:
+    label: '{{ item.0.name }}.{{ item.1 }}'
+  vars:
+    __sogo_job: '{{ item.0 }}'
+  notify: Reload SOGo systemd units
+  register: __sogo_job_units
+
+- name: Service | Apply pending unit changes and restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Service | Manage memcached service
+  ansible.builtin.systemd_service:
+    name: '{{ __sogo_memcached_service_name }}'
+    enabled: true
+    state: started
+  when:
+    - __sogo_memcached_local | bool
+    - not (ansible_check_mode and (__sogo_memcached_result | default({})) is changed)
+
+# Check mode writes no unit: a unit it would create (a new host, the first
+# run of the container unit) is not known to systemd yet
+- name: Service | Manage SOGo service
+  ansible.builtin.systemd_service:
+    name: '{{ __sogo_service_name }}'
+    enabled: "{{ sogo_service_enabled | bool }}"
+    state: "{{ sogo_service_enabled | bool | ternary('started', 'stopped') }}"
+    daemon_reload: true
+  when:
+    - not __sogo_check_mode_install | default(false) | bool
+    - not (ansible_check_mode and (__sogo_unit_result | default({})) is changed)
+
+# sogod forks its workers before it listens; on Rocky Linux the first start
+# of a new image copies its layers first
+- name: Service | Wait for sogod
+  ansible.builtin.wait_for:
+    host: "{{ sogo_bind | regex_replace(':[0-9]+$', '') | regex_replace('^\\[(.*)\\]$', '\\1') }}"
+    port: "{{ sogo_bind | regex_replace('^.*:', '') | int }}"
+    timeout: '{{ sogo_service_start_timeout | int }}'
+  when:
+    - sogo_service_enabled | bool
+    - not ansible_check_mode
+
+- name: Service | Manage the timers of the periodic jobs
+  ansible.builtin.systemd_service:
+    name: '{{ item.name }}.timer'
+    enabled: '{{ item.enabled | bool }}'
+    state: "{{ item.enabled | bool | ternary('started', 'stopped') }}"
+  loop: '{{ __sogo_jobs }}'
+  loop_control:
+    label: '{{ item.name }}.timer'
+  when: >-
+    not (ansible_check_mode
+         and (__sogo_check_mode_install | default(false) | bool
+              or item.name in (__sogo_job_units.results | default([]) | selectattr('changed')
+                               | map(attribute='item') | selectattr('1', 'eq', 'timer')
+                               | map(attribute='0.name') | list)))

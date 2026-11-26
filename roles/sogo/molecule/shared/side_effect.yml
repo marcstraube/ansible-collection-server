@@ -1,0 +1,365 @@
+---
+# Package update and minimum checks. A minimum the repository does not
+# offer, and a mapping without a key for the host, fail before any change.
+# Then the targeted update: Debian started with the oldest SOGo release of
+# the repositories (prepare) and the policy-rc.d of the image keeps the
+# maintainer scripts from restarting SOGo, so only the role can; Rocky Linux
+# rebuilds the image from a freshly pulled base image and restarts the
+# container with it; Arch Linux has nothing to update (the AUR build updates
+# with the system upgrade) and must not restart. verify.yml checks the
+# outcome from /root/sogo-update. With the backup enabled, alice gets an
+# event and a contact, the backup runs twice (rotation), the contact is
+# deleted and the newest set restored with sogo_restore. A copy of the set
+# with an extra user the view does not know is then restored onto an
+# emptied SOGo database. verify checks the contact and the sets from
+# /root/sogo-restore.
+
+- name: Side Effect — Minimum
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - vars/main.yml
+
+  tasks:
+    - name: Side Effect | Read the state before the unmet minimum
+      ansible.builtin.include_tasks: tasks/sogo_state.yml
+
+    - name: Side Effect | Record the state before the unmet minimum
+      ansible.builtin.set_fact:
+        __side_effect_state_before: '{{ __molecule_sogo_state }}'
+
+    - name: Side Effect | Run with a minimum the repository does not offer
+      block:
+        - name: Side Effect | Include sogo role with an unmet minimum  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            sogo_packages_state: 'latest'
+            sogo_packages_minimum: "{{ {ansible_facts['os_family']: '99.0'} }}"
+      rescue:
+        - name: Side Effect | Record the minimum check failure
+          ansible.builtin.set_fact:
+            __side_effect_minimum_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Read the state after the unmet minimum
+      ansible.builtin.include_tasks: tasks/sogo_state.yml
+
+    - name: Side Effect | Assert the unmet minimum failed without a change
+      ansible.builtin.assert:
+        that:
+          - __side_effect_minimum_error is defined
+          - "'requires 99.0' in __side_effect_minimum_error"
+          - "'nothing was changed' in __side_effect_minimum_error"
+          - __molecule_sogo_state == __side_effect_state_before
+        fail_msg: >-
+          A minimum of 99.0 did not fail before the update (error:
+          {{ __side_effect_minimum_error | default('none') }}, state
+          {{ __side_effect_state_before }} -> {{ __molecule_sogo_state }})
+        success_msg: 'The pre-check rejects a minimum the repository does not offer'
+
+    - name: Side Effect | Run with a mapping without a key for the host
+      block:
+        - name: Side Effect | Include sogo role with a mapping for another platform  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            sogo_packages_state: 'latest'
+            sogo_packages_minimum:
+              Solaris: '1.0'
+      rescue:
+        - name: Side Effect | Record the mapping failure
+          ansible.builtin.set_fact:
+            __side_effect_mapping_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Assert the mapping without a key failed
+      ansible.builtin.assert:
+        that:
+          - __side_effect_mapping_error is defined
+          - "'has no key for this host' in __side_effect_mapping_error"
+        fail_msg: 'A mapping without a key for the host did not fail the run'
+        success_msg: 'A mapping without a key for the host fails the run'
+
+- name: Side Effect — Update
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - vars/main.yml
+
+  tasks:
+    - name: Side Effect | Read the state before the update
+      ansible.builtin.include_tasks: tasks/sogo_state.yml
+
+    - name: Side Effect | Record the state before the update
+      ansible.builtin.set_fact:
+        __side_effect_state_before: '{{ __molecule_sogo_state }}'
+
+    # The full distribution version of the candidate on Debian, the upstream
+    # version elsewhere
+    - name: Side Effect | Query the candidate (Debian)
+      ansible.builtin.command:
+        argv: ['apt-cache', 'policy', 'sogo']
+      environment:
+        LC_ALL: C
+      register: __side_effect_policy
+      changed_when: false
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Side Effect | Record the start of the update
+      ansible.builtin.command:
+        argv: ['date', '+%s']
+      register: __side_effect_start
+      changed_when: false
+
+    - name: Side Effect | Include sogo role with the update  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        sogo_packages_state: 'latest'
+        sogo_packages_minimum: >-
+          {{ (__side_effect_policy.stdout | regex_findall('(?m)^ *Candidate: *([^ ]+)$') | first)
+             if ansible_facts['os_family'] == 'Debian' else '5.12.1' }}
+
+    - name: Side Effect | Read the state after the update
+      ansible.builtin.include_tasks: tasks/sogo_state.yml
+
+    # Counted here: the restore of the next play restarts SOGo once more
+    - name: Side Effect | Count the starts of SOGo since the update
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          journalctl --unit=sogo.service --since=@{{ __side_effect_start.stdout }} --output=cat --no-pager
+          | grep -c '^Started ' || true
+        executable: /bin/bash
+      register: __side_effect_starts
+      changed_when: false
+
+    # verify.yml runs as a separate playbook; the outcome reaches it through
+    # this file
+    - name: Side Effect | Record the update
+      ansible.builtin.copy:
+        content: >-
+          {{ {'before': __side_effect_state_before, 'after': __molecule_sogo_state,
+              'start': __side_effect_start.stdout | int,
+              'starts': __side_effect_starts.stdout | int,
+              'candidate': (__side_effect_policy.stdout | default('')
+                            | regex_findall('(?m)^ *Candidate: *([^ ]+)$') + ['']) | first} | to_json }}
+        dest: /root/sogo-update
+        owner: root
+        group: root
+        mode: '0600'
+
+- name: Side Effect — Backup and Restore
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - vars/main.yml
+
+  vars:
+    __side_effect_client: >-
+      /usr/local/bin/molecule-sogo-client --base https://{{ __molecule_mail_host }} --ca /etc/molecule-tls/ca.pem
+    __side_effect_credentials: "{{ {'password': __molecule_passwords['alice@example.com']} | to_json }}"
+    # Set of the restore onto an empty database (a copy of the first one)
+    __side_effect_fresh_set: 'sogo-20000101-000000'
+    # Set with a user the view does not know only
+    __side_effect_ghost_set: 'sogo-20000102-000000'
+    # Set with an unknown user named errors@example.com
+    __side_effect_errors_set: 'sogo-20000103-000000'
+    # Set without any user file
+    __side_effect_empty_set: 'sogo-20000104-000000'
+    # Set with the unknown errors@example.com only
+    __side_effect_unknown_set: 'sogo-20000105-000000'
+
+  tasks:
+    - name: Side Effect | Back up and restore
+      when: sogo_backup_enabled | default(false) | bool
+      block:
+        # sogo-tool backup ALL takes the users from the folder table: alice
+        # needs folders first
+        - name: Side Effect | Store an event and a contact of alice
+          ansible.builtin.command:
+            argv: "{{ __side_effect_client | split + ['dav', '--kind', item, '--user', 'alice@example.com'] }}"
+            stdin: '{{ __side_effect_credentials }}'
+          loop:
+            - calendar
+            - contact
+          changed_when: true
+          no_log: true
+
+        - name: Side Effect | Run the backup twice
+          ansible.builtin.systemd_service:
+            name: sogo-backup.service
+            state: started
+          loop: [1, 2]
+          loop_control:
+            pause: 2
+
+        - name: Side Effect | Find the backup sets
+          ansible.builtin.find:
+            paths: '{{ sogo_backup_dir }}'
+            file_type: directory
+            patterns: 'sogo-*'
+            excludes: '*.partial'
+          register: __side_effect_sets
+
+        - name: Side Effect | Delete the contact of alice
+          ansible.builtin.command:
+            argv: "{{ __side_effect_client | split + ['delete', '--kind', 'contact', '--user', 'alice@example.com'] }}"
+            stdin: '{{ __side_effect_credentials }}'
+          register: __side_effect_deleted
+          changed_when: true
+          no_log: true
+
+        - name: Side Effect | Assert the contact is gone
+          ansible.builtin.assert:
+            that:
+              - __side_effect_sets.files | length == 1
+              - (__side_effect_deleted.stdout | from_json).fetched == 404
+            fail_msg: >-
+              {{ __side_effect_sets.files | map(attribute='path') | list }} {{ __side_effect_deleted.stdout }}
+
+        - name: Side Effect | Include sogo role with the restore  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            sogo_restore: "{{ __side_effect_sets.files | map(attribute='path') | map('basename') | first }}"
+
+
+        # A restore after a disaster: an empty SOGo database (nobody has
+        # logged in, nothing to back up first) and a set that also holds a
+        # user the view no longer shows (ghost@example.com)
+        - name: Side Effect | Copy the restored set with a user the view does not know
+          ansible.builtin.shell:
+            cmd: |
+              set -eu
+              src='{{ __side_effect_sets.files | map(attribute="path") | first }}'
+              dst='{{ sogo_backup_dir }}/{{ __side_effect_fresh_set }}'
+              rm -rf "$dst"
+              cp -a "$src" "$dst"
+              cp -a "$dst/alice@example.com" "$dst/ghost@example.com"
+          changed_when: true
+
+        - name: Side Effect | Stop SOGo
+          ansible.builtin.systemd_service:
+            name: sogo.service
+            state: stopped
+
+        - name: Side Effect | Empty the SOGo database
+          ansible.builtin.command:
+            argv:
+              - mariadb
+              - --execute
+              - >-
+                DROP DATABASE {{ sogo_db_name | default('sogo') }};
+                CREATE DATABASE {{ sogo_db_name | default('sogo') }}
+                CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+          changed_when: true
+
+        - name: Side Effect | Start SOGo on the empty database
+          ansible.builtin.systemd_service:
+            name: sogo.service
+            state: started
+
+        - name: Side Effect | Wait for sogod
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: 20000
+            timeout: 900
+
+        - name: Side Effect | Include sogo role with the restore onto the empty database  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            sogo_restore: '{{ __side_effect_fresh_set }}'
+
+        - name: Side Effect | Assert the restore saved nothing first and skipped the unknown user
+          ansible.builtin.assert:
+            that:
+              - __sogo_restore_backup.stdout is search('nothing to back up')
+              - __sogo_restore_skipped == ['ghost@example.com']
+              - __sogo_restored_users == ['alice@example.com']
+            fail_msg: >-
+              {{ __sogo_restore_backup.stdout | default('') }} skipped: {{ __sogo_restore_skipped | default([]) }}
+              restored: {{ __sogo_restored_users | default([]) }}
+
+        # A set with only users the view does not know: nothing can be
+        # restored, the run fails (as with an unreachable user source)
+        - name: Side Effect | Create a set with an unknown user only
+          ansible.builtin.shell:
+            cmd: |
+              set -eu
+              dst='{{ sogo_backup_dir }}/{{ __side_effect_ghost_set }}'
+              rm -rf "$dst"
+              mkdir "$dst"
+              cp -a '{{ sogo_backup_dir }}/{{ __side_effect_fresh_set }}/ghost@example.com' "$dst/"
+              chown -R sogo:sogo "$dst"
+          changed_when: true
+
+        - name: Side Effect | Restore a set with an unknown user only
+          block:
+            - name: Side Effect | Include sogo role with the set of the unknown user  # noqa: role-name[path]
+              ansible.builtin.include_role:
+                name: '{{ playbook_dir }}/../..'
+              vars:
+                sogo_restore: '{{ __side_effect_ghost_set }}'
+
+            - name: Side Effect | Fail when the restore of nobody passed
+              ansible.builtin.fail:
+                msg: 'A restore that restored no user passed'
+          rescue:
+            - name: Side Effect | Assert the restore of nobody failed
+              ansible.builtin.assert:
+                that:
+                  - ansible_failed_result.msg | default('') is search('No user of ' ~ __side_effect_ghost_set)
+                  - __sogo_restore_skipped == ['ghost@example.com']
+                fail_msg: '{{ ansible_failed_result.msg | default("") }}'
+
+        # A backup that fails for a real reason (SOGo cannot reach its
+        # database: sogo-tool reports the user 'ALL' unknown) aborts the
+        # restore before anything is restored
+        - name: Side Effect | Lock the database account of SOGo
+          ansible.builtin.command:
+            argv: ['mariadb', '--execute', "ALTER USER 'sogo'@'127.0.0.1' ACCOUNT LOCK"]
+          changed_when: true
+
+        - name: Side Effect | Restore while the backup fails
+          block:
+            - name: Side Effect | Include sogo role with a failing backup  # noqa: role-name[path]
+              ansible.builtin.include_role:
+                name: '{{ playbook_dir }}/../..'
+              vars:
+                # The set the last restore protected; the copy of the first
+                # set left with that restore's rotation
+                sogo_restore: '{{ __side_effect_ghost_set }}'
+
+            - name: Side Effect | Fail when the restore with a failing backup passed
+              ansible.builtin.fail:
+                msg: 'The restore went on after the backup failed'
+          rescue:
+            - name: Side Effect | Assert the restore stopped at the backup
+              ansible.builtin.assert:
+                that:
+                  - __sogo_restore_backup is failed
+                  - not (__sogo_restore_ran | bool)
+                fail_msg: '{{ ansible_failed_result | default({}) | to_json }}'
+          always:
+            - name: Side Effect | Unlock the database account of SOGo
+              ansible.builtin.command:
+                argv: ['mariadb', '--execute', "ALTER USER 'sogo'@'127.0.0.1' ACCOUNT UNLOCK"]
+              changed_when: true
+
+        - name: Side Effect | Run the further restore cases
+          ansible.builtin.include_tasks: tasks/restore_cases.yml
+
+        # The last restore that took a backup was the one of the set with
+        # errors@example.com only: its fresh backup and the protected set
+        # remain
+        - name: Side Effect | Record the protected set of the last restore
+          ansible.builtin.copy:
+            content: "{{ __side_effect_unknown_set }}\n"
+            dest: /root/sogo-restore
+            owner: root
+            group: root
+            mode: '0600'

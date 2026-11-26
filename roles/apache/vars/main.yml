@@ -16,6 +16,12 @@ __apache_modules_base:
   - 'reqtimeout'
   - 'unixd'
 
+# HTTP/2 is in use when the server default or any SSL vhost enables it
+__apache_http2_used: >-
+  {{ apache_http2_enabled | bool
+     or apache_vhosts_ssl | selectattr('http2', 'defined')
+        | map(attribute='http2') | map('bool') | select | list | length > 0 }}
+
 # Modules that follow from the configured features: switching a feature on
 # loads its module, switching it off drops it. Anything an application needs
 # on top (rewrite in .htaccess, Basic Auth, ...) goes into
@@ -27,7 +33,7 @@ __apache_modules_features: >-
     + (['deflate', 'filter', 'setenvif'] if apache_compression_enabled | bool else [])
     + (['expires'] if apache_caching_enabled | bool else [])
     + (['alias'] if apache_acme_challenge_enabled | bool else [])
-    + (['http2'] if apache_http2_enabled | bool else [])
+    + (['http2'] if __apache_http2_used | bool else [])
     + (['status'] if apache_status_enabled | bool else [])
     + (['remoteip'] if apache_remoteip_header | length > 0 else [])
     + (['rewrite'] if (apache_vhosts | selectattr('redirect_to_https', 'defined')
@@ -105,3 +111,11 @@ __apache_php_fpm_handler: >-
 __apache_mpm_prefork_module: 'modules/mod_mpm_prefork.so'
 __apache_mpm_worker_module: 'modules/mod_mpm_worker.so'
 __apache_mpm_event_module: 'modules/mod_mpm_event.so'
+
+# SELinux types an entry of apache_writable_paths may carry: content httpd
+# reads and writes, append-only content, log files and the mod_cache store.
+__apache_writable_path_types:
+  - 'httpd_sys_rw_content_t'
+  - 'httpd_sys_ra_content_t'
+  - 'httpd_log_t'
+  - 'httpd_cache_t'
