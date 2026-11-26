@@ -227,6 +227,67 @@
   tags:
     - always
 
+# PHP and its extensions come from marcstraube.common.php; the role only
+# checks what PostfixAdmin needs. The command line binary loads the same
+# extension packages as PHP-FPM. Read-only, before any change; it carries
+# the tags of the tasks that need PHP instead of always.
+- name: Main | Read the PHP environment
+  ansible.builtin.command:
+    argv:
+      - '{{ postfixadmin_php_cli }}'
+      - '-r'
+      - >-
+        echo json_encode([
+        'version' => PHP_VERSION, 'version_id' => PHP_VERSION_ID,
+        'argon2id' => defined('PASSWORD_ARGON2ID'),
+        'pdo' => class_exists('PDO') ? PDO::getAvailableDrivers() : [],
+        'iconv' => extension_loaded('iconv'),
+        'mbstring' => extension_loaded('mbstring'),
+        'gd' => extension_loaded('gd')]);
+  register: __postfixadmin_php_result
+  changed_when: false
+  check_mode: false
+  when: postfixadmin_enabled | bool
+  tags:
+    - postfixadmin
+    - postfixadmin:install
+    - postfixadmin:configure
+
+- name: Main | Assert the PHP requirements of PostfixAdmin
+  ansible.builtin.assert:
+    that:
+      - __postfixadmin_php.version_id >= __postfixadmin_php_minimum_id
+      - __postfixadmin_pdo_drivers[postfixadmin_db_type] in __postfixadmin_php.pdo
+      - __postfixadmin_php.iconv
+      - __postfixadmin_php.mbstring
+      # The QR code of the TOTP page
+      - not (postfixadmin_totp | bool) or __postfixadmin_php.gd
+      - postfixadmin_password_scheme != 'ARGON2ID' or __postfixadmin_php.argon2id
+    fail_msg: |
+      PHP {{ __postfixadmin_php.version }} ({{ postfixadmin_php_cli }}) does not meet the
+      requirements of PostfixAdmin with these settings:
+      - PHP 8.1 or newer: {{ __postfixadmin_php.version_id >= __postfixadmin_php_minimum_id }}
+      - PDO driver '{{ __postfixadmin_pdo_drivers[postfixadmin_db_type] }}' for
+        {{ postfixadmin_db_type }}: {{ __postfixadmin_pdo_drivers[postfixadmin_db_type] in __postfixadmin_php.pdo }}
+      - iconv extension: {{ __postfixadmin_php.iconv }}
+      - mbstring extension: {{ __postfixadmin_php.mbstring }}
+      {% if postfixadmin_totp | bool %}
+      - gd extension for the QR code of postfixadmin_totp: {{ __postfixadmin_php.gd }}
+      {% endif %}
+      {% if postfixadmin_password_scheme == 'ARGON2ID' %}
+      - Argon2 (PASSWORD_ARGON2ID) for the ARGON2ID scheme: {{ __postfixadmin_php.argon2id }}
+        EL 9 has it from the php:8.3 module stream on (php_versions version '8.3'),
+        or choose postfixadmin_password_scheme 'BLF-CRYPT' or 'SHA512-CRYPT'.
+      {% endif %}
+      Install the missing parts with marcstraube.common.php (see README).
+  vars:
+    __postfixadmin_php: '{{ __postfixadmin_php_result.stdout | from_json }}'
+  when: postfixadmin_enabled | bool
+  tags:
+    - postfixadmin
+    - postfixadmin:install
+    - postfixadmin:configure
+
 - name: Main | Import install tasks
   ansible.builtin.import_tasks: install.yml
   when: postfixadmin_enabled | bool

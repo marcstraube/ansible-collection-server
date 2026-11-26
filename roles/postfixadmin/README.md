@@ -16,9 +16,10 @@ database users for the mail services and a view for the SOGo user source.
 ## Requirements
 
 - ansible-core >= 2.19
-- PHP with PHP-FPM, the PDO driver of the database, `iconv` and `mbstring`
-  (`marcstraube.common.php`, see [PHP](#php)); PHP 8.1 or newer, with
-  Argon2 for the default password scheme. A PHP-FPM pool of its own is
+- PHP with PHP-FPM, the PDO driver of the database, `iconv`, `mbstring` and,
+  with `postfixadmin_totp`, `gd` (`marcstraube.common.php`, see
+  [PHP](#php)); PHP 8.1 or newer, with Argon2 for the default password
+  scheme. A PHP-FPM pool of its own is
   recommended (see [PHP-FPM Pool](#php-fpm-pool))
 - A web server that serves `postfixadmin_install_dir/public` through
   PHP-FPM (`marcstraube.server.nginx` or `marcstraube.server.apache`, see
@@ -456,6 +457,9 @@ Accounts without a secret keep logging in with the password only, and the
 role does not set secrets. Exceptions (addresses of software that does its
 own checking) are managed in the same menu.
 
+PostfixAdmin draws the QR code with the PHP extension `gd`; the role fails
+without it when `postfixadmin_totp` is on (see [PHP](#php)).
+
 ### SOGo View
 
 `postfixadmin_sogo_view_enabled` creates the view `postfixadmin_sogo_view_name`
@@ -503,9 +507,13 @@ role sets up.
 | `postfixadmin`           | All PostfixAdmin tasks                                                  |
 | `postfixadmin:install`   | PHP checks, release, pre-update dump, SELinux labels and schema upgrade |
 | `postfixadmin:database`  | Database, owner and read-only users                                     |
-| `postfixadmin:configure` | `config.local.php`                                                      |
+| `postfixadmin:configure` | PHP checks, `config.local.php`                                          |
 | `postfixadmin:schema`    | Schema upgrade and SOGo view                                            |
 | `postfixadmin:accounts`  | Admins, domains, mailboxes, aliases and alias domains                   |
+
+The PHP checks (including `gd` for TOTP) run with `postfixadmin`,
+`postfixadmin:install` and `postfixadmin:configure`; `--skip-tags` with one
+of them skips the checks as well.
 
 `postfixadmin:install` includes the schema upgrade, so a release change
 under `--tags postfixadmin:install` leaves the schema of the new release in
@@ -592,7 +600,8 @@ read-only grants, the SOGo view, the password rules and `totp` in
 that the role fails before any change for a mailbox without password,
 managed keys in `postfixadmin_extra_config` (`config.local.php` stays as it
 is), `ARGON2ID` on PHP without Argon2 (a stub PHP binary, since every test
-platform has Argon2), `postfixadmin_db_create` with a remote server and TLS
+platform has Argon2), `postfixadmin_totp` on PHP without `gd` (a stub as
+well), `postfixadmin_db_create` with a remote server and TLS
 through a unix socket, and that an entry PostfixAdmin rejects (a mailbox of
 an unknown domain, a password shorter than 12 characters) fails the run
 without its password in the output.
@@ -622,11 +631,11 @@ certificate does not name is refused.
 `marcstraube.common.php` installs PHP-FPM and the extensions PostfixAdmin
 needs; the extension names differ per platform:
 
-| Platform   | PostgreSQL              | MariaDB                 |
-| ---------- | ----------------------- | ----------------------- |
-| Arch Linux | `pdo_pgsql`, `iconv`    | `pdo_mysql`, `iconv`    |
-| Debian     | `pdo_pgsql`, `mbstring` | `pdo_mysql`, `mbstring` |
-| EL         | `pdo_pgsql`, `mbstring` | `pdo_mysql`, `mbstring` |
+| Platform   | PostgreSQL              | MariaDB                 | `postfixadmin_totp` |
+| ---------- | ----------------------- | ----------------------- | ------------------- |
+| Arch Linux | `pdo_pgsql`, `iconv`    | `pdo_mysql`, `iconv`    | `gd`                |
+| Debian     | `pdo_pgsql`, `mbstring` | `pdo_mysql`, `mbstring` | `gd`                |
+| EL         | `pdo_pgsql`, `mbstring` | `pdo_mysql`, `mbstring` | `gd`                |
 
 - PostfixAdmin talks to the database through PDO only (also with its
   database type `mysqli`), so the PDO driver is the extension it needs.
@@ -640,9 +649,9 @@ needs; the extension names differ per platform:
 - An Argon2 hash needs about 64 MB of memory (PHP's defaults); the default
   `memory_limit` of 128 MB is enough.
 
-The role checks PHP 8.1, the PDO driver, `iconv`, `mbstring` and, for
-`ARGON2ID`, `PASSWORD_ARGON2ID` with `postfixadmin_php_cli` before it changes
-anything.
+The role checks PHP 8.1, the PDO driver, `iconv`, `mbstring`, `gd` with
+`postfixadmin_totp` and, for `ARGON2ID`, `PASSWORD_ARGON2ID` with
+`postfixadmin_php_cli` before it changes anything.
 
 ### PHP-FPM Pool
 

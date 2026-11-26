@@ -23,7 +23,8 @@
         - procps-ng
         - glibc-langpack-en
     # PHP extensions PostfixAdmin needs besides the PDO driver: Debian and
-    # EL compile iconv in, Arch Linux builds mbstring in
+    # EL compile iconv in, Arch Linux builds mbstring in. TOTP (mariadb
+    # scenario) needs gd; the scenarios without it run without gd.
     __prepare_php_extensions:
       postgresql:
         Archlinux: ['pdo_pgsql', 'iconv']
@@ -33,6 +34,7 @@
         Archlinux: ['pdo_mysql', 'iconv']
         Debian: ['pdo_mysql', 'mbstring']
         RedHat: ['pdo_mysql', 'mbstring']
+    __prepare_totp_extensions: "{{ ['gd'] if postfixadmin_totp | default(false) | bool else [] }}"
     # EL 9: the php:8.3 module stream, the first with Argon2
     __prepare_php_version: >-
       {{ '8.3' if ansible_facts['os_family'] == 'RedHat'
@@ -167,7 +169,9 @@
       vars:
         php_versions:
           - version: '{{ __prepare_php_version }}'
-            extensions: '{{ __prepare_php_extensions[postfixadmin_db_type][ansible_facts["os_family"]] }}'
+            extensions: >-
+              {{ __prepare_php_extensions[postfixadmin_db_type][ansible_facts['os_family']]
+                 + __prepare_totp_extensions }}
             fpm: true
             fpm_pools: '{{ __prepare_fpm_pools if __prepare_fpm_pool_enabled | bool else [] }}'
         php_default_version: '{{ __prepare_php_version }}'

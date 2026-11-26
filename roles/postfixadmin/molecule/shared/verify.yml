@@ -626,7 +626,8 @@
           #!/bin/sh
           exec php -r 'echo json_encode(["version" => PHP_VERSION, "version_id" => PHP_VERSION_ID,
             "argon2id" => false, "pdo" => PDO::getAvailableDrivers(),
-            "iconv" => extension_loaded("iconv"), "mbstring" => extension_loaded("mbstring")]);'
+            "iconv" => extension_loaded("iconv"), "mbstring" => extension_loaded("mbstring"),
+            "gd" => extension_loaded("gd")]);'
         dest: /usr/local/bin/php-without-argon2
         owner: root
         group: root
@@ -648,6 +649,40 @@
           ansible.builtin.assert:
             that:
               - __verify_failure is search('PASSWORD_ARGON2ID')
+            fail_msg: '{{ __verify_failure }}'
+
+    # A PHP binary without gd; the mariadb scenario has TOTP on and gd
+    # installed
+    - name: Verify | Create a PHP stub without gd
+      ansible.builtin.copy:
+        content: |
+          #!/bin/sh
+          exec php -r 'echo json_encode(["version" => PHP_VERSION, "version_id" => PHP_VERSION_ID,
+            "argon2id" => defined("PASSWORD_ARGON2ID"), "pdo" => PDO::getAvailableDrivers(),
+            "iconv" => extension_loaded("iconv"), "mbstring" => extension_loaded("mbstring"),
+            "gd" => false]);'
+        dest: /usr/local/bin/php-without-gd
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Verify | Run the role with TOTP on PHP without gd
+      block:
+        - name: Verify | Include postfixadmin role  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            postfixadmin_totp: true
+            postfixadmin_php_cli: /usr/local/bin/php-without-gd
+
+        - name: Verify | Fail when TOTP was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted postfixadmin_totp without gd'
+      rescue:
+        - name: Verify | Assert the missing gd extension was reported
+          ansible.builtin.assert:
+            that:
+              - "__verify_failure is search('gd extension for the QR code of postfixadmin_totp: False')"
             fail_msg: '{{ __verify_failure }}'
 
     - name: Verify | Run the role with a database to create on another host
