@@ -59,6 +59,9 @@ provisioner:
         # Shared by prepare, converge and verify; the test data is in
         # ../shared/vars/main.yml
         __molecule_db_type: 'mariadb'
+        # AppArmor with the php-fpm profile on Arch Linux and Debian; the
+        # postgresql scenario has neither
+        __molecule_apparmor: true
         # MariaDB through its socket
         dovecot_db_host: 'localhost'
         roundcube_password_db_host: 'localhost'

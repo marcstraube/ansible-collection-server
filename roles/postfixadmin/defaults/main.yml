@@ -41,6 +41,12 @@ postfixadmin_php_cli: 'php'
 postfixadmin_php_fpm_user: ''
 postfixadmin_php_fpm_group: ''
 
+# Grant PHP-FPM the files of PostfixAdmin in the packaged php-fpm AppArmor
+# profile (/etc/apparmor.d/php-fpm.d/postfixadmin). Only where AppArmor is
+# active and the profile exists: Arch Linux enforces it, and PostfixAdmin
+# does not work there without the rules. false removes them.
+postfixadmin_apparmor_enabled: true
+
 #
 # Database
 #
@@ -160,7 +166,8 @@ postfixadmin_password_validation:
 
 # Offer TOTP (two-factor login) in PostfixAdmin ($CONF['totp']): admins and
 # mailbox users can then add a TOTP secret to their account; logins of
-# accounts with a secret ask for the code
+# accounts with a secret ask for the code. Needs the PHP extension gd (the
+# QR code of the secret).
 postfixadmin_totp: false
 
 # Sender address of the mails PostfixAdmin sends (welcome mail, broadcast,

@@ -37,6 +37,22 @@
     __verify_failure: >-
       {{ ansible_failed_result.msg | default('') }}
       {{ ansible_failed_result.results | default([]) | map(attribute='msg', default='') | join(' ') }}
+    # A host with AppArmor (molecule/shared/tasks/apparmor_host.yml); EL
+    # has none, whatever is in place there
+    __verify_apparmor: >-
+      {{ __molecule_apparmor | default(false) | bool and ansible_facts['os_family'] != 'RedHat' }}
+    __verify_apparmor_rules: '/etc/apparmor.d/php-fpm.d/postfixadmin'
+    __verify_apparmor_pending: '/etc/apparmor.d/php-fpm.d/.postfixadmin.reload-pending'
+    __verify_apparmor_broken: '/etc/apparmor.d/php-fpm.d/molecule-broken'
+    __verify_apparmor_log: '/root/molecule-apparmor-parser.log'
+    __verify_apparmor_reload: '-r /etc/apparmor.d/php-fpm'
+    __verify_apparmor_expected:
+      - '"/var/www/postfixadmin/" r,'
+      - '"/var/www/postfixadmin/**" r,'
+      - '"/var/www/postfixadmin/templates_c/" rw,'
+      - '"/var/www/postfixadmin/templates_c/**" rwk,'
+      - '"/etc/postfixadmin/config.local.php" r,'
+      - '"/run/mysqld/mysqld.sock" rw,'
 
   tasks:
     - name: Verify | Load role defaults
@@ -626,7 +642,8 @@
           #!/bin/sh
           exec php -r 'echo json_encode(["version" => PHP_VERSION, "version_id" => PHP_VERSION_ID,
             "argon2id" => false, "pdo" => PDO::getAvailableDrivers(),
-            "iconv" => extension_loaded("iconv"), "mbstring" => extension_loaded("mbstring")]);'
+            "iconv" => extension_loaded("iconv"), "mbstring" => extension_loaded("mbstring"),
+            "gd" => extension_loaded("gd")]);'
         dest: /usr/local/bin/php-without-argon2
         owner: root
         group: root
@@ -648,6 +665,40 @@
           ansible.builtin.assert:
             that:
               - __verify_failure is search('PASSWORD_ARGON2ID')
+            fail_msg: '{{ __verify_failure }}'
+
+    # A PHP binary without gd; the mariadb scenario has TOTP on and gd
+    # installed
+    - name: Verify | Create a PHP stub without gd
+      ansible.builtin.copy:
+        content: |
+          #!/bin/sh
+          exec php -r 'echo json_encode(["version" => PHP_VERSION, "version_id" => PHP_VERSION_ID,
+            "argon2id" => defined("PASSWORD_ARGON2ID"), "pdo" => PDO::getAvailableDrivers(),
+            "iconv" => extension_loaded("iconv"), "mbstring" => extension_loaded("mbstring"),
+            "gd" => false]);'
+        dest: /usr/local/bin/php-without-gd
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Verify | Run the role with TOTP on PHP without gd
+      block:
+        - name: Verify | Include postfixadmin role  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            postfixadmin_totp: true
+            postfixadmin_php_cli: /usr/local/bin/php-without-gd
+
+        - name: Verify | Fail when TOTP was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted postfixadmin_totp without gd'
+      rescue:
+        - name: Verify | Assert the missing gd extension was reported
+          ansible.builtin.assert:
+            that:
+              - "__verify_failure is search('gd extension for the QR code of postfixadmin_totp: False')"
             fail_msg: '{{ __verify_failure }}'
 
     - name: Verify | Run the role with a database to create on another host
@@ -861,3 +912,25 @@
         fail_msg: >-
           {{ __verify_fake.results | map(attribute='stdout') | list }}
           {{ __verify_fake.results | map(attribute='stderr') | list }}
+
+    #
+    # AppArmor
+    #
+
+    # The whole role ran on EL with AppArmor and a profile in place (the
+    # mariadb scenario) and everywhere else without both (postgresql)
+    - name: Verify | Stat the AppArmor rules directory
+      ansible.builtin.stat:
+        path: '{{ __verify_apparmor_rules | dirname }}'
+      register: __verify_apparmor_dir
+      when: not __verify_apparmor | bool
+
+    - name: Verify | Assert the role wrote no AppArmor rules
+      ansible.builtin.assert:
+        that:
+          - not __verify_apparmor_dir.stat.exists
+      when: not __verify_apparmor | bool
+
+    - name: Verify | Check the AppArmor rules
+      ansible.builtin.include_tasks: tasks/apparmor_verify.yml
+      when: __verify_apparmor | bool

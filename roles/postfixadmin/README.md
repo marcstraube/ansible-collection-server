@@ -16,9 +16,10 @@ database users for the mail services and a view for the SOGo user source.
 ## Requirements
 
 - ansible-core >= 2.19
-- PHP with PHP-FPM, the PDO driver of the database, `iconv` and `mbstring`
-  (`marcstraube.common.php`, see [PHP](#php)); PHP 8.1 or newer, with
-  Argon2 for the default password scheme. A PHP-FPM pool of its own is
+- PHP with PHP-FPM, the PDO driver of the database, `iconv`, `mbstring` and,
+  with `postfixadmin_totp`, `gd` (`marcstraube.common.php`, see
+  [PHP](#php)); PHP 8.1 or newer, with Argon2 for the default password
+  scheme. A PHP-FPM pool of its own is
   recommended (see [PHP-FPM Pool](#php-fpm-pool))
 - A web server that serves `postfixadmin_install_dir/public` through
   PHP-FPM (`marcstraube.server.nginx` or `marcstraube.server.apache`, see
@@ -71,6 +72,7 @@ See [defaults/main.yml](defaults/main.yml) for all available variables.
 | `postfixadmin_account_mode`        | `'managed'`               | `managed`, `initial` or `disabled`            |
 | `postfixadmin_password_validation` | 12 characters, …          | Password rules (see below)                    |
 | `postfixadmin_totp`                | `false`                   | Offer TOTP two-factor login                   |
+| `postfixadmin_apparmor_enabled`    | `true`                    | Rules for the php-fpm AppArmor profile        |
 | `postfixadmin_sogo_view_enabled`   | `false`                   | View for the SOGo user source                 |
 
 ### Version Pinning
@@ -456,6 +458,9 @@ Accounts without a secret keep logging in with the password only, and the
 role does not set secrets. Exceptions (addresses of software that does its
 own checking) are managed in the same menu.
 
+PostfixAdmin draws the QR code with the PHP extension `gd`; the role fails
+without it when `postfixadmin_totp` is on (see [PHP](#php)).
+
 ### SOGo View
 
 `postfixadmin_sogo_view_enabled` creates the view `postfixadmin_sogo_view_name`
@@ -503,9 +508,14 @@ role sets up.
 | `postfixadmin`           | All PostfixAdmin tasks                                                  |
 | `postfixadmin:install`   | PHP checks, release, pre-update dump, SELinux labels and schema upgrade |
 | `postfixadmin:database`  | Database, owner and read-only users                                     |
-| `postfixadmin:configure` | `config.local.php`                                                      |
+| `postfixadmin:apparmor`  | AppArmor rules of the php-fpm profile                                   |
+| `postfixadmin:configure` | PHP checks, `config.local.php`                                          |
 | `postfixadmin:schema`    | Schema upgrade and SOGo view                                            |
 | `postfixadmin:accounts`  | Admins, domains, mailboxes, aliases and alias domains                   |
+
+The PHP checks (including `gd` for TOTP) run with `postfixadmin`,
+`postfixadmin:install` and `postfixadmin:configure`; `--skip-tags` with one
+of them skips the checks as well.
 
 `postfixadmin:install` includes the schema upgrade, so a release change
 under `--tags postfixadmin:install` leaves the schema of the new release in
@@ -592,10 +602,25 @@ read-only grants, the SOGo view, the password rules and `totp` in
 that the role fails before any change for a mailbox without password,
 managed keys in `postfixadmin_extra_config` (`config.local.php` stays as it
 is), `ARGON2ID` on PHP without Argon2 (a stub PHP binary, since every test
-platform has Argon2), `postfixadmin_db_create` with a remote server and TLS
+platform has Argon2), `postfixadmin_totp` on PHP without `gd` (a stub as
+well), `postfixadmin_db_create` with a remote server and TLS
 through a unix socket, and that an entry PostfixAdmin rejects (a mailbox of
 an unknown domain, a password shorter than 12 characters) fails the run
 without its password in the output.
+
+Where the test host has AppArmor (the `mariadb` scenario on Arch Linux and
+Debian: the packaged profile, a stand-in for the directory that marks
+AppArmor as active, and an `apparmor_parser` that compiles without loading),
+verify checks the rules of converge, that the profile compiles with them, the
+single reload, a profile that does not load (the run fails, the rules before
+the run stay, a new rules file is removed) with new rules and with the toggle
+off (the whole role), the reload the next run repeats in both cases, a host
+without AppArmor or without the profile, a disabled profile (no reload), a
+profile in force-complain (`-C`), check mode, and paths with spaces, special
+characters and a symlink.
+The `postgresql` scenario and EL (with a stand-in profile in `mariadb`) get no
+rules. AppArmor does not enforce anything in the containers: whether the
+rules are sufficient is not part of the scenarios.
 
 The `update` scenario installs the previous release with accounts and
 updates it: the database is dumped first (with the rotation), a replaced
@@ -622,11 +647,11 @@ certificate does not name is refused.
 `marcstraube.common.php` installs PHP-FPM and the extensions PostfixAdmin
 needs; the extension names differ per platform:
 
-| Platform   | PostgreSQL              | MariaDB                 |
-| ---------- | ----------------------- | ----------------------- |
-| Arch Linux | `pdo_pgsql`, `iconv`    | `pdo_mysql`, `iconv`    |
-| Debian     | `pdo_pgsql`, `mbstring` | `pdo_mysql`, `mbstring` |
-| EL         | `pdo_pgsql`, `mbstring` | `pdo_mysql`, `mbstring` |
+| Platform   | PostgreSQL              | MariaDB                 | `postfixadmin_totp` |
+| ---------- | ----------------------- | ----------------------- | ------------------- |
+| Arch Linux | `pdo_pgsql`, `iconv`    | `pdo_mysql`, `iconv`    | `gd`                |
+| Debian     | `pdo_pgsql`, `mbstring` | `pdo_mysql`, `mbstring` | `gd`                |
+| EL         | `pdo_pgsql`, `mbstring` | `pdo_mysql`, `mbstring` | `gd`                |
 
 - PostfixAdmin talks to the database through PDO only (also with its
   database type `mysqli`), so the PDO driver is the extension it needs.
@@ -640,9 +665,9 @@ needs; the extension names differ per platform:
 - An Argon2 hash needs about 64 MB of memory (PHP's defaults); the default
   `memory_limit` of 128 MB is enough.
 
-The role checks PHP 8.1, the PDO driver, `iconv`, `mbstring` and, for
-`ARGON2ID`, `PASSWORD_ARGON2ID` with `postfixadmin_php_cli` before it changes
-anything.
+The role checks PHP 8.1, the PDO driver, `iconv`, `mbstring`, `gd` with
+`postfixadmin_totp` and, for `ARGON2ID`, `PASSWORD_ARGON2ID` with
+`postfixadmin_php_cli` before it changes anything.
 
 ### PHP-FPM Pool
 
@@ -768,6 +793,53 @@ address) does it. `basic_auth` on the `php` site is the simpler option.
 On EL with SELinux the role labels the release for PHP-FPM
 (`httpd_sys_content_t`, `templates_c` `httpd_sys_rw_content_t`) and turns on
 `httpd_can_network_connect_db` for a TCP database connection.
+
+### AppArmor
+
+The `apparmor` package of Arch Linux ships the profile `php-fpm`
+(`/etc/apparmor.d/php-fpm`) in enforce mode. It grants PHP-FPM no files of
+an application: without rules of its own PostfixAdmin answers with HTTP 403
+(`Unable to open primary script`). Debian ships the same profile in complain
+mode with the optional package `apparmor-profiles`. Where AppArmor is active
+and the profile exists, the role writes the rules of PostfixAdmin to
+`/etc/apparmor.d/php-fpm.d/postfixadmin`, which the profile includes, and reloads
+the profile (`apparmor_parser -r`); running workers get the new rules at
+once. EL uses SELinux and gets no rules.
+
+| Path                                                       | Access            |
+| ---------------------------------------------------------- | ----------------- |
+| `postfixadmin_install_dir`                                 | read              |
+| `postfixadmin_install_dir/templates_c`                     | read, write, lock |
+| `/etc/postfixadmin/config.local.php`                       | read              |
+| `postfixadmin_db_tls_ca_file` (with `postfixadmin_db_tls`) | read              |
+| Unix socket of the database (`postfixadmin_db_host`)       | read, write       |
+
+PHP connects to a database on the same host through its unix socket, which
+AppArmor treats as a file: kernels that mediate unix sockets deny the
+connection without the rule.
+
+- `postfixadmin_apparmor_enabled: false` (default `true`) removes the file and
+  reloads the profile; on Arch Linux PostfixAdmin then needs rules of your own.
+- When the profile does not load (e.g. a broken file of another
+  application in `/etc/apparmor.d/php-fpm.d`), the run fails and the file
+  goes back to its state before the run: the rules that loaded before stay,
+  new ones are removed, so the next boot still loads the profile. A marker
+  (`/etc/apparmor.d/php-fpm.d/.postfixadmin.reload-pending`) makes the next run
+  repeat the reload, also when the rules did not change in between or were
+  removed.
+- A disabled profile (`/etc/apparmor.d/disable/php-fpm`) is not reloaded:
+  the role writes or removes the file and reports that the rules apply once
+  the profile is enabled. A profile in `/etc/apparmor.d/force-complain` is
+  reloaded in complain mode (`apparmor_parser -r -C`).
+- The rules name the real paths: the role resolves symlinks (a CA file, a
+  directory above the installation) when it runs.
+- All PHP-FPM pools of the host share the profile, so the rules apply to
+  every pool. The pool of its own separates the applications: its user
+  alone may write `templates_c` and read `config.local.php` (see [PHP-FPM Pool](#php-fpm-pool)).
+- Session files, uploads and the socket of the pool belong to PHP-FPM
+  itself (`marcstraube.common.php`).
+- Other paths (e.g. in `postfixadmin_extra_config`) need a file of your own in
+  `/etc/apparmor.d/php-fpm.d`.
 
 ### Backup
 

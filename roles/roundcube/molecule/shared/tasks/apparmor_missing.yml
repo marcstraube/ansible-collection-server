@@ -1,0 +1,28 @@
+---
+# The AppArmor tasks while __verify_apparmor_missing does not exist: they
+# write no rules.
+- name: Verify | Move the path away
+  ansible.builtin.command:
+    argv: [mv, '{{ __verify_apparmor_missing }}', '{{ __verify_apparmor_missing }}.molecule']
+  changed_when: true
+
+- name: Verify | Include the AppArmor tasks without the path  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: apparmor.yml
+
+- name: Verify | Stat the AppArmor rules without the path
+  ansible.builtin.stat:
+    path: '{{ __verify_apparmor_rules }}'
+  register: __verify_apparmor_unwritten
+
+- name: Verify | Move the path back
+  ansible.builtin.command:
+    argv: [mv, '{{ __verify_apparmor_missing }}.molecule', '{{ __verify_apparmor_missing }}']
+  changed_when: true
+
+- name: Verify | Assert no rules were written without the path
+  ansible.builtin.assert:
+    that:
+      - not __verify_apparmor_unwritten.stat.exists
+      - __roundcube_apparmor_deployed is skipped
