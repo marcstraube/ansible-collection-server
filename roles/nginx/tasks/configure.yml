@@ -139,7 +139,14 @@
     owner: root
     group: root
     mode: '0644'
-    validate: 'nginx -t -c %s'
+    # nginx resolves relative includes (include fastcgi_params;) against the
+    # directory of the tested file, so the check runs on a copy next to
+    # nginx.conf instead of the temporary file Ansible writes elsewhere.
+    # Errors name that copy (.nginx.conf.XXXXXX) instead of nginx.conf.
+    validate: >-
+      /bin/sh -c 't=$(mktemp "$2.XXXXXX") || exit 1;
+      cp -- "$1" "$t" && nginx -t -q -c "$t"; rc=$?; rm -f -- "$t"; exit $rc'
+      validate '%s' {{ __nginx_config_dir }}/.nginx.conf
   notify: Reload Nginx
 
 - name: Configure | Create htpasswd files
