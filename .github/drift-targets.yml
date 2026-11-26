@@ -1,8 +1,10 @@
 ---
-# Drift-detection targets: packages a role currently blocks or leaves out
-# on a platform because they cannot be installed there. The drift-detection
-# workflow probes each entry weekly and opens an issue when the package
-# becomes installable again, so the block can be lifted.
+# Drift-detection targets, checked weekly by the drift-detection workflow.
+# Two kinds, each optional:
+#
+# targets — packages a role currently blocks or leaves out on a platform
+# because they cannot be installed there. The workflow opens an issue when
+# the package becomes installable again, so the block can be lifted.
 #
 # Schema (per entry):
 #   role:       role directory under roles/
@@ -24,3 +26,86 @@ targets:
     platform: rocky-10
     package: certbot
     vars_file: vars/RedHat.yml
+
+# profiles — AppArmor profiles of Arch Linux packages that a role extends
+# with local overrides. The workflow installs the package in the Arch Linux
+# container and compares the SHA-256 of each file; a changed or missing
+# file opens one issue per role. Resolve it by checking the overrides of
+# the role against the new file, then updating sha256 and version here.
+# Only the Arch Linux package is watched: Debian's apparmor-profiles ships
+# php-fpm in complain mode and is out of scope.
+#
+# Schema (per entry):
+#   role:     role directory under roles/
+#   package:  Arch Linux package that ships the file (apparmor)
+#   profile:  absolute path of a regular file under /etc/apparmor.d/ (a
+#             profile or an abstraction, e.g. abstractions/php)
+#   sha256:   SHA-256 of that file when the overrides were last checked
+#             (quote it if it happens to be all digits; mark the line
+#             with "# pragma: allowlist secret" for detect-secrets)
+#   version:  package version the sha256 was recorded from (optional, but
+#             fill it in; quoted string, shown in the drift issue)
+#
+# One entry per role and file: every file the overrides of a role rely on
+# gets its own entry — the profile and each abstraction it includes whose
+# rules the overrides rely on (also nested ones, e.g. nameservice-strict
+# through nameservice). A file several roles rely on gets an entry for each
+# of them. Get hash and version from a fresh Arch Linux container:
+#   pacman -Syu --noconfirm apparmor && pacman -Q apparmor
+#   sha256sum /etc/apparmor.d/<file>
+
+profiles:
+  # php-fpm and the abstractions the overrides rely on: php (most PHP
+  # rules), nameservice + nameservice-strict (DNS for database, IMAP and
+  # SMTP hosts), ssl_certs (system CAs for TLS). The roles add their rules
+  # in /etc/apparmor.d/php-fpm.d/<role>.
+  - role: postfixadmin
+    package: apparmor
+    profile: /etc/apparmor.d/php-fpm
+    sha256: babbdef828f7004fa2f0ec2e4555d8e3edf64c6ea2727c6edb029c919fce65a4  # pragma: allowlist secret
+    version: '4.1.8-2'
+  - role: postfixadmin
+    package: apparmor
+    profile: /etc/apparmor.d/abstractions/php
+    sha256: 9b9e5348a43ba71ff8e3a4a408252c8278bb711f7028c2de6944ee66f7a1aa8d  # pragma: allowlist secret
+    version: '4.1.8-2'
+  - role: postfixadmin
+    package: apparmor
+    profile: /etc/apparmor.d/abstractions/nameservice
+    sha256: 55ff156e74ea3134316c1b5ae59cd41a928fc6a718802d1f32490cf5e53ae4d9  # pragma: allowlist secret
+    version: '4.1.8-2'
+  - role: postfixadmin
+    package: apparmor
+    profile: /etc/apparmor.d/abstractions/nameservice-strict
+    sha256: e08d3bbe0cc38aeb84e334d7499495b6b1c5cfede37afef7e5d7723c41493ce7  # pragma: allowlist secret
+    version: '4.1.8-2'
+  - role: postfixadmin
+    package: apparmor
+    profile: /etc/apparmor.d/abstractions/ssl_certs
+    sha256: 719005856dd42c37fbcd4305962d44e9a4f0dc4fcf55ba806d45023ec50f583f  # pragma: allowlist secret
+    version: '4.1.8-2'
+  - role: roundcube
+    package: apparmor
+    profile: /etc/apparmor.d/php-fpm
+    sha256: babbdef828f7004fa2f0ec2e4555d8e3edf64c6ea2727c6edb029c919fce65a4  # pragma: allowlist secret
+    version: '4.1.8-2'
+  - role: roundcube
+    package: apparmor
+    profile: /etc/apparmor.d/abstractions/php
+    sha256: 9b9e5348a43ba71ff8e3a4a408252c8278bb711f7028c2de6944ee66f7a1aa8d  # pragma: allowlist secret
+    version: '4.1.8-2'
+  - role: roundcube
+    package: apparmor
+    profile: /etc/apparmor.d/abstractions/nameservice
+    sha256: 55ff156e74ea3134316c1b5ae59cd41a928fc6a718802d1f32490cf5e53ae4d9  # pragma: allowlist secret
+    version: '4.1.8-2'
+  - role: roundcube
+    package: apparmor
+    profile: /etc/apparmor.d/abstractions/nameservice-strict
+    sha256: e08d3bbe0cc38aeb84e334d7499495b6b1c5cfede37afef7e5d7723c41493ce7  # pragma: allowlist secret
+    version: '4.1.8-2'
+  - role: roundcube
+    package: apparmor
+    profile: /etc/apparmor.d/abstractions/ssl_certs
+    sha256: 719005856dd42c37fbcd4305962d44e9a4f0dc4fcf55ba806d45023ec50f583f  # pragma: allowlist secret
+    version: '4.1.8-2'
