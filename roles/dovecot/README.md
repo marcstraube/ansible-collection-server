@@ -854,8 +854,10 @@ header file, `dovecot_rspamd_controller_ca_file` and the system trust
 store, but no mail; imap may stop them with `SIGTERM` or `SIGKILL`. curl
 ignores proxy variables (`--noproxy '*'`). `sendmail` runs in the child
 profile `dovecot-lmtp//sendmail`, the Postfix part of the sendmail profile
-of `usr.lib.dovecot.dovecot-lda`: the Postfix configuration, `postdrop`
-(run in the same profile), the maildrop queue and the pickup trigger. The
+of `usr.lib.dovecot.dovecot-lda`: the Postfix configuration with its map
+module definitions (`dynamicmaps.cf.d`), `postdrop` (run in the same
+profile), the maildrop queue and the pickup trigger, which AppArmor sees as
+a disconnected path (`attach_disconnected`). The
 rules for the mail root and the TLS files are always written, also where
 the packaged tunables and abstractions already allow the path. A database
 over TCP, the TCP listeners and the `dovecot_submission_host` connection
