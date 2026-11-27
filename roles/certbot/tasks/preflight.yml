@@ -1,10 +1,13 @@
 ---
 #
-# Post Hook of the Renewal Unit (EL)
+# Post Hook and cli.ini of the Renewal Unit (EL)
 #
 # The role owns POST_HOOK in the packaged environment file only while it holds
-# the role's value or nothing. A value of another owner would be replaced by
-# the reload script, so the run fails before any change.
+# the role's value or nothing, and a CERTBOT_ARGS line only while the role's
+# marker comment (__certbot_args_marker) stands directly above it. With
+# another certbot_config_dir every other CERTBOT_ARGS line must be empty, as
+# a value of another owner would be replaced, so the run fails before any
+# change.
 #
 
 - name: Preflight | Check the environment file of the renewal unit (EL)
@@ -13,7 +16,7 @@
   register: __certbot_sysconfig_stat
   when:
     - __certbot_sysconfig_file | default('') | length > 0
-    - __certbot_reload_services | length > 0
+    - __certbot_reload_services | length > 0 or __certbot_config_arg | length > 0
 
 - name: Preflight | Read the environment file of the renewal unit (EL)
   ansible.builtin.slurp:
@@ -46,7 +49,38 @@
          | map('trim')
          | reject('in', ['', __certbot_post_hook_arg])
          | list }}
-  when: __certbot_sysconfig_content is not skipped
+  when:
+    - __certbot_sysconfig_content is not skipped
+    - __certbot_reload_services | length > 0
+
+- name: Preflight | Assert CERTBOT_ARGS holds no value of another owner (EL)
+  ansible.builtin.assert:
+    that:
+      - __certbot_args_foreign | length == 0
+    fail_msg: >-
+      CERTBOT_ARGS in {{ __certbot_sysconfig_file }} is set to
+      {{ __certbot_args_foreign | join(', ') }}, which {{ __certbot_config_arg }}
+      for certbot_config_dir would replace. Move renew options to
+      certbot_custom_config (cli.ini, which certbot reads on renewal as well)
+      or remove them, and leave a single CERTBOT_ARGS="" there.
+    quiet: true
+  vars:
+    # Lines under the marker of the role are its own
+    __certbot_args_foreign: >-
+      {{ (__certbot_sysconfig_content.content | b64decode
+          | regex_replace('(?m)^' ~ (__certbot_args_marker | regex_escape) ~ '\nCERTBOT_ARGS=.*$', ''))
+         .splitlines()
+         | select('match', '^CERTBOT_ARGS=')
+         | map('regex_replace', '^CERTBOT_ARGS=', '')
+         | map('trim')
+         | map('regex_replace', '^"(.*)"$', '\1')
+         | map('regex_replace', "^'(.*)'$", '\1')
+         | map('trim')
+         | reject('in', [''])
+         | list }}
+  when:
+    - __certbot_sysconfig_content is not skipped
+    - __certbot_config_arg | length > 0
 
 #
 # Post Hooks Saved for Certificates

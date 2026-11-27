@@ -25,6 +25,9 @@
   ansible.builtin.command:
     cmd: >-
       certbot certonly
+      {% if __certbot_config_arg | length > 0 %}
+      {{ __certbot_config_arg }}
+      {% endif %}
       --non-interactive
       --agree-tos
       {% if certbot_email | length > 0 %}
@@ -48,6 +51,9 @@
       --dns-cloudflare-propagation-seconds {{ certbot_dns_propagation_seconds }}
       {% endif %}
       --key-type {{ certbot_key_type }}
+      {% if certbot_key_type == 'rsa' %}
+      --rsa-key-size {{ certbot_rsa_key_size }}
+      {% endif %}
       {% if certbot_key_type == 'ecdsa' %}
       --elliptic-curve {{ certbot_elliptic_curve }}
       {% endif %}
@@ -74,6 +80,9 @@
   ansible.builtin.command:
     cmd: >-
       certbot certonly
+      {% if __certbot_config_arg | length > 0 %}
+      {{ __certbot_config_arg }}
+      {% endif %}
       --non-interactive
       --agree-tos
       {% if certbot_email | length > 0 %}
@@ -139,7 +148,12 @@
 
 - name: Certificates | Remove orphaned certificates
   ansible.builtin.command:
-    cmd: "certbot delete --non-interactive --cert-name {{ item }}"
+    cmd: >-
+      certbot delete
+      {% if __certbot_config_arg | length > 0 %}
+      {{ __certbot_config_arg }}
+      {% endif %}
+      --non-interactive --cert-name {{ item }}
   loop: "{{ certbot_remove_certificates }}"
   register: __certbot_delete
   changed_when: "'Deleted all files' in __certbot_delete.stdout | default('')"

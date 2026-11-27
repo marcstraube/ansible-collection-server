@@ -65,6 +65,98 @@ See [defaults/main.yml](defaults/main.yml) for all available variables.
 | `certbot_rsa_key_size`    | `4096`        | Key size for RSA keys                    |
 | `certbot_preferred_chain` | `''`          | Preferred CA chain (e.g. `ISRG Root X1`) |
 
+The role passes `certbot_key_type` and, for that type, `certbot_rsa_key_size`
+(`rsa`) or `certbot_elliptic_curve` (`ecdsa`) on the command line when it
+requests the mail certificate, and uses them as the defaults of `key_type`,
+`rsa_key_size` and `elliptic_curve` in `certbot_certificates`.
+`certbot_preferred_chain` goes on the command line of the entries in
+`certbot_certificates` only; the mail certificate gets it from `cli.ini`.
+
+The role also writes these settings to `cli.ini` in `certbot_config_dir`:
+`key-type`, `rsa-key-size` (with `rsa`) or `elliptic-curve` (with `ecdsa`),
+`preferred-chain` (when set), next to `email`, `agree-tos`, `server`
+(`certbot_staging`, `certbot_server`), `quiet`, `keep-until-expiring`,
+`max-log-backups`, `config-dir`, `work-dir`, `logs-dir` and
+`certbot_custom_config`. certbot reads that file on every run: the role's
+commands, the renewal unit, the cron job and certbot run by hand (with
+another `certbot_config_dir` only with `--config`, see
+[Directories](#directories)).
+
+Settings in `cli.ini` take precedence over the settings certbot saved for a
+certificate in `renewal/<name>.conf`. Changing the key options therefore does
+not replace the key of an existing certificate right away, but its next
+renewal creates a key of the new type, size or curve. This includes entries of
+`certbot_certificates` with their own `key_type`, `rsa_key_size` or
+`elliptic_curve`: those apply when the role requests the certificate, and its
+renewals use the key options of `cli.ini`. A setting that `cli.ini` does not
+contain, such as the RSA key size of an `ecdsa` configuration, keeps the value
+certbot saved for the certificate.
+
+The role requests the mail certificate only while
+`<certbot_config_dir>/live/mail.<certbot_mail_domain>/fullchain.pem` is
+missing. To give it a new key before its next renewal, renew it by hand (with
+another `certbot_config_dir`, add `--config=<certbot_config_dir>/cli.ini`):
+
+```bash
+certbot renew --force-renewal --cert-name mail.example.com --key-type rsa --rsa-key-size 4096
+/usr/local/sbin/certbot-reload-services  # with reload services, see below
+```
+
+With `certbot_quiet: true` the `cli.ini` of the role sets `quiet`, and the
+command prints nothing; check the result with `certbot certificates`. A
+certificate requested with `--reuse-key` keeps its key on renewal; add
+`--new-key` to replace it.
+
+Alternatively remove the certificate with
+`certbot delete --cert-name mail.example.com` and run the role again, which
+requests it with the current key options; a service that starts or reloads
+in between finds no certificate.
+
+### Directories
+
+| Variable                           | Default                  | Description                                |
+| ---------------------------------- | ------------------------ | ------------------------------------------ |
+| `certbot_config_dir`               | `'/etc/letsencrypt'`     | certbot configuration directory            |
+| `certbot_work_dir`                 | `'/var/lib/letsencrypt'` | certbot working directory                  |
+| `certbot_log_dir`                  | `'/var/log/letsencrypt'` | certbot log directory                      |
+| `certbot_default_dir_leftovers_ok` | `false`                  | Allow leftovers in the default dir (below) |
+
+The role writes `cli.ini` with `config-dir`, `work-dir` and `logs-dir` to
+`certbot_config_dir` and keeps the renewal hooks there. certbot reads
+`/etc/letsencrypt/cli.ini` by default. With another `certbot_config_dir` the
+role passes `--config=<certbot_config_dir>/cli.ini` to every certbot command it
+runs (`certonly`, `delete`) and to the renew command: in the drop-in of the
+renewal unit (Debian, Arch Linux; the drop-in then exists without reload
+services too), as `CERTBOT_ARGS` in `/etc/sysconfig/certbot` (EL) and in the
+cron job. With the default directory (also written with a trailing slash) the
+commands stay as before. Pass the option when running certbot by hand:
+
+```bash
+certbot --config=/srv/letsencrypt/cli.ini certificates
+```
+
+- certbot still reads `/etc/letsencrypt/cli.ini` when it exists, and every
+  setting there that the role's `cli.ini` does not contain applies as well.
+  Remove that file after moving away from the default directory.
+- The role moves no certificates. certbot renews only the certificates in
+  `certbot_config_dir`, so with another directory the role fails before any
+  change while `/etc/letsencrypt/renewal` holds renewal configurations; this
+  check runs with every tag. See the collection's
+  [MIGRATION.md](../../MIGRATION.md) for moving them. When another tool
+  manages the certificates there, set `certbot_default_dir_leftovers_ok: true`.
+  The monitoring script checks only `certbot_config_dir`.
+- `certbot_config_dir` must be an absolute path of letters, digits and
+  `. _ / @ + -`: the renew command carries it unquoted in systemd `ExecStart`
+  (where `%` starts a specifier), in the EL environment file (split at
+  whitespace) and in the cron job. The role fails on any other path.
+- On EL the role writes its `CERTBOT_ARGS` line with the comment
+  `# Managed by Ansible (marcstraube.server.certbot): CERTBOT_ARGS` directly
+  above it and owns only a line under that comment. With another directory it
+  fails before any change when another `CERTBOT_ARGS` line holds a value (move
+  extra renew options to `certbot_custom_config`, which certbot reads on
+  renewal as well); with the default directory it resets only its own line to
+  `CERTBOT_ARGS=""`, removes the comment and leaves every other line alone.
+
 ### Authenticator
 
 | Variable                 | Default                  | Description                        |
@@ -149,6 +241,9 @@ reloads each service once, and `certonly` never runs it.
 | Arch Linux                                | `certbot-renew.service` | Drop-in `post-hook.conf`                       |
 | cron (`certbot_use_systemd_timer: false`) | —                       | Cron job `certbot renew --quiet --post-hook=…` |
 
+With another `certbot_config_dir` the renew command also carries `--config`
+(see [Directories](#directories)).
+
 On EL the role changes only the `POST_HOOK` line of the packaged file. The
 unit expands `$POST_HOOK` unquoted and splits it at whitespace, so the value is
 the single word `--post-hook=/usr/local/sbin/certbot-reload-services`. The role
@@ -159,7 +254,8 @@ it resets only its own value to `POST_HOOK=""`.
 
 On Debian and Arch Linux the drop-in clears `ExecStart` and sets the packaged
 renew command, taken from `__certbot_renew_command` in `vars/Debian.yml` and
-`vars/Archlinux.yml`, plus the post hook. When a package update changes the
+`vars/Archlinux.yml`, plus the post hook (and `--config` with another
+`certbot_config_dir`). When a package update changes the
 packaged command, the role warns and the variable has to follow; Molecule
 verify compares both as well. The role fails when the effective unit does not
 run exactly one renew command with the post hook, i.e. another drop-in adds or
@@ -353,7 +449,12 @@ marker, and the retry unit that reloads and clears the marker and does nothing
 without it. `side_effect` covers the refused per-certificate post hook and
 foreign `POST_HOOK` (EL), the read-only check of saved post hooks, the cron
 jobs, a configured unit that does not exist, and the removal without reload
-services, which keeps a foreign `POST_HOOK`.
+services, which keeps a foreign `POST_HOOK`. A certbot stub records the command
+lines of the certificate tasks: the key options of the mail certificate, and
+`--config` only with another `certbot_config_dir`. With that directory the
+renewal unit (drop-in or `CERTBOT_ARGS` on EL, which refuses a foreign value)
+and the cron job carry `--config`, and lose it again with the default
+directory.
 
 ## Notes
 

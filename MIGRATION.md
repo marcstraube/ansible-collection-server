@@ -135,6 +135,57 @@ apache_modules_enabled:
 The server-wide `Protocols` line the role then writes follows
 `apache_http2_enabled`, so set `Protocols` in your own vhosts.
 
+### `certbot` — a non-default `certbot_config_dir` now reaches certbot
+
+Only hosts with a `certbot_config_dir` other than `/etc/letsencrypt` are
+affected. Up to v1.1.4 the role wrote `cli.ini` and the renewal hooks to that
+directory, but certbot never read it: it kept its account, certificates and
+renewal configurations in `/etc/letsencrypt`, and the services use
+`/etc/letsencrypt/live/<name>/`. The role now passes
+`--config=<certbot_config_dir>/cli.ini` to every certbot command and to the
+renew command of the renewal unit (drop-in on Debian and Arch Linux,
+`CERTBOT_ARGS` in `/etc/sysconfig/certbot` on EL) and of the cron job.
+
+With it certbot switches to `certbot_config_dir`. Without preparation:
+
+- The role would find no certificate there and request every certificate of
+  `certbot_certificates` and the mail certificate again, with a new ACME
+  account, into `<certbot_config_dir>/live/<name>/`.
+- The certificates in `/etc/letsencrypt` would no longer be renewed and
+  expire; services that still read `/etc/letsencrypt/live/<name>/` serve them
+  until then.
+
+To prevent this, the role fails before any change while
+`/etc/letsencrypt/renewal` holds renewal configurations and
+`certbot_config_dir` is another directory. The check runs with every tag.
+
+#### Required action
+
+Before the upgrade, choose one:
+
+- Move the existing state into `certbot_config_dir`: move `accounts/`,
+  `archive/`, `live/` and `renewal/` from `/etc/letsencrypt` there, and replace
+  `/etc/letsencrypt/` with `<certbot_config_dir>/` in the paths of every
+  `renewal/<name>.conf` (`archive_dir`, `cert`, `privkey`, `chain`,
+  `fullchain`, and any other option that names the directory). The links in
+  `live/` are relative and keep working. Check the result with
+  `certbot --config=<certbot_config_dir>/cli.ini certificates`, then point the
+  services at `<certbot_config_dir>/live/<name>/`.
+- Or let the role request the certificates again in `certbot_config_dir`,
+  point the services at the new `live/` paths, and remove the certificates in
+  `/etc/letsencrypt` with `certbot delete --cert-name <name>` once nothing reads
+  them.
+- Or set `certbot_config_dir: '/etc/letsencrypt'`, the directory certbot used
+  so far.
+- Or, when another tool manages the certificates in `/etc/letsencrypt`, set
+  `certbot_default_dir_leftovers_ok: true`.
+
+Remove a `/etc/letsencrypt/cli.ini` after the move: certbot still reads it,
+and its settings apply wherever the `cli.ini` of the role does not set them.
+`certbot_config_dir` must now be an absolute path of letters, digits and
+`. _ / @ + -`, and on EL the role fails while a `CERTBOT_ARGS` line it did not
+write holds a value; move such options to `certbot_custom_config`.
+
 ## v1.1.4 - 2026-11-19
 
 ### `certbot` — services reload once per renewal run, without a restart

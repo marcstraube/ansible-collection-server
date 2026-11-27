@@ -4,7 +4,9 @@
 # hooks, the cron job with post hook and retry, and a configured unit that
 # does not exist, at a renewal and at an issuance. The second play removes all reload services, the third
 # checks that the role removed the script and every reference to it, and the
-# last one that a foreign POST_HOOK survives the removal (EL).
+# fourth one that a foreign POST_HOOK survives the removal (EL). The last two
+# check the command lines of the certificate tasks and the renewal with
+# another certbot_config_dir.
 - name: Side Effect — Post hook guard and cron job
   hosts: all
   gather_facts: true
@@ -590,3 +592,545 @@
             path: /etc/sysconfig/certbot
             regexp: '^POST_HOOK='
             line: 'POST_HOOK=""'
+
+# The command lines of the certificate tasks, recorded by a certbot stub that
+# comes first in PATH and reports every call as an issuance (the scenario
+# requests no certificate): the key options of the mail certificate, and
+# --config only with a certbot_config_dir other than the default
+- name: Side Effect — Command lines of the certificate tasks
+  hosts: all
+  gather_facts: false
+
+  environment:
+    PATH: '/root/certbot-stub:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+
+  vars:
+    certbot_enabled: true
+    certbot_email: 'test@example.com'
+    certbot_staging: true
+    certbot_mail_certificate_enabled: true
+    certbot_mail_domain: 'example.net'
+    certbot_mail_hostnames: ['mail']
+    certbot_mail_autodiscover: false
+    certbot_certificates:
+      - domains:
+          - 'www.example.net'
+    __side_effect_config_dir: '/srv/certbot-molecule'
+
+  tasks:
+    - name: Side Effect | Record the certbot calls of the certificate tasks
+      block:
+        # A stub left behind by an aborted run would keep its old calls
+        - name: Side Effect | Remove a leftover certbot stub
+          ansible.builtin.file:
+            path: /root/certbot-stub
+            state: absent
+
+        - name: Side Effect | Create the certbot stub directory
+          ansible.builtin.file:
+            path: /root/certbot-stub
+            state: directory
+            owner: root
+            group: root
+            mode: '0700'
+
+        - name: Side Effect | Deploy the certbot stub
+          ansible.builtin.copy:
+            content: |
+              #!/bin/sh
+              # Records the arguments of every call on one line
+              printf '%s\n' "$*" >> /root/certbot-stub/calls
+              echo 'Successfully received certificate.'
+            dest: /root/certbot-stub/certbot
+            owner: root
+            group: root
+            mode: '0755'
+
+        - name: Side Effect | Request the certificates with an RSA key  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+            tasks_from: certificates.yml
+          vars:
+            certbot_key_type: 'rsa'
+            certbot_rsa_key_size: 3072
+
+        - name: Side Effect | Request the certificates with the default ECDSA key  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+            tasks_from: certificates.yml
+
+        # A trailing slash still names the default directory
+        - name: Side Effect | Request the certificates with a trailing slash  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+            tasks_from: certificates.yml
+          vars:
+            certbot_config_dir: '/etc/letsencrypt/'
+
+        # No certificate exists in the other directory either, and the role
+        # removes one there
+        - name: Side Effect | Request the certificates in another configuration directory  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+            tasks_from: certificates.yml
+          vars:
+            certbot_config_dir: '{{ __side_effect_config_dir }}'
+            certbot_remove_certificates:
+              - 'gone.example.net'
+
+        - name: Side Effect | Read the recorded command lines
+          ansible.builtin.slurp:
+            src: /root/certbot-stub/calls
+          register: __side_effect_calls
+
+        - name: Side Effect | Assert the key options and --config on the command lines
+          ansible.builtin.assert:
+            that:
+              - __side_effect_lines | length == 9
+              # Default directory: mail and www certificate, three times (the
+              # last with a trailing slash), no --config
+              - __side_effect_lines[:6] | select('search', '--config') | list | length == 0
+              - __side_effect_lines[4] is search(' --cert-name mail\.example\.net ')
+              - __side_effect_lines[0] is search('^certonly --non-interactive .* --cert-name mail\.example\.net ')
+              - __side_effect_lines[0] is search(' --key-type rsa --rsa-key-size 3072$')
+              - __side_effect_lines[1] is search(' --cert-name www\.example\.net ')
+              - __side_effect_lines[1] is search(' --key-type rsa --rsa-key-size 3072$')
+              - __side_effect_lines[2] is search(' --cert-name mail\.example\.net ')
+              - __side_effect_lines[2] is search(' --key-type ecdsa --elliptic-curve secp384r1$')
+              - __side_effect_lines[2] is not search('--rsa-key-size')
+              # Other directory: every call points certbot at its cli.ini
+              - __side_effect_lines[6] is search(__side_effect_certonly ~ 'mail\.example\.net ')
+              - __side_effect_lines[7] is search(__side_effect_certonly ~ 'www\.example\.net ')
+              - >-
+                __side_effect_lines[8]
+                == 'delete --config=' ~ __side_effect_config_dir ~ '/cli.ini'
+                ~ ' --non-interactive --cert-name gone.example.net'
+            fail_msg: '{{ __side_effect_lines }}'
+            quiet: true
+          vars:
+            __side_effect_lines: '{{ (__side_effect_calls.content | b64decode).splitlines() }}'
+            __side_effect_config_re: '{{ __side_effect_config_dir | regex_escape }}/cli\.ini'
+            __side_effect_certonly: '^certonly --config={{ __side_effect_config_re }} --non-interactive .*--cert-name '
+
+      always:
+        - name: Side Effect | Remove the certbot stub and the other configuration directory
+          ansible.builtin.file:
+            path: '{{ item }}'
+            state: absent
+          loop:
+            - /root/certbot-stub
+            - '{{ __side_effect_config_dir }}'
+
+# The renewal unit and the cron job with another certbot_config_dir, and back
+# to the default directory: the state the plays above left (systemd timer, no
+# reload services), so kept instances stay ready for another converge
+- name: Side Effect — Renewal with another configuration directory
+  hosts: all
+  gather_facts: true
+
+  vars:
+    certbot_enabled: true
+    certbot_email: 'test@example.com'
+    certbot_staging: true
+    __side_effect_config_dir: '/srv/certbot-molecule'
+    __side_effect_config_arg: '--config=/srv/certbot-molecule/cli.ini'
+
+  tasks:
+    - name: Side Effect | Load the OS variables of the role
+      ansible.builtin.include_vars:
+        file: '{{ playbook_dir }}/../../vars/{{ ansible_facts["os_family"] }}.yml'
+
+    - name: Side Effect | Refuse a certbot_config_dir with a character outside the allow-list
+      block:
+        - name: Side Effect | Include certbot role with a % in certbot_config_dir  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            certbot_config_dir: '/srv/cert%bot'
+
+        - name: Side Effect | Fail when the certbot_config_dir was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted /srv/cert%bot as certbot_config_dir'
+
+      rescue:
+        - name: Side Effect | Assert the role refused the certbot_config_dir
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search("certbot_config_dir '/srv/cert%bot' must be an absolute path")
+            fail_msg: '{{ ansible_failed_result.msg | default(ansible_failed_result) }}'
+            quiet: true
+
+    # $ in the pattern would accept a trailing newline, as a block scalar or a
+    # file lookup leaves it
+    - name: Side Effect | Refuse a certbot_config_dir with a trailing newline
+      block:
+        - name: Side Effect | Include certbot role with a newline in certbot_config_dir  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            certbot_config_dir: "/srv/certbot\n"
+
+        - name: Side Effect | Fail when the certbot_config_dir with a newline was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a certbot_config_dir with a trailing newline'
+
+      rescue:
+        - name: Side Effect | Assert the role refused the certbot_config_dir with a newline
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search("must be an absolute path")
+            fail_msg: '{{ ansible_failed_result.msg | default(ansible_failed_result) }}'
+            quiet: true
+
+    # With the default directory the role leaves CERTBOT_ARGS lines without
+    # its marker alone, whatever they hold
+    - name: Side Effect | Keep hand-set CERTBOT_ARGS with the default directory (EL)
+      when: ansible_facts['os_family'] == 'RedHat'
+      block:
+        - name: Side Effect | Set hand-set CERTBOT_ARGS lines (EL)
+          ansible.builtin.blockinfile:
+            path: /etc/sysconfig/certbot
+            marker: '# {mark} MOLECULE CERTBOT_ARGS'
+            insertbefore: '^CERTBOT_ARGS='
+            block: "CERTBOT_ARGS=\"--no-autorenew\"\nCERTBOT_ARGS=\"--config=/etc/certbot-alt/cli.ini\""
+
+        - name: Side Effect | Read the environment file before the default run (EL)
+          ansible.builtin.slurp:
+            src: /etc/sysconfig/certbot
+          register: __side_effect_handset_before
+
+        - name: Side Effect | Include certbot role with hand-set CERTBOT_ARGS (EL)  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+
+        - name: Side Effect | Read the environment file after the default run (EL)
+          ansible.builtin.slurp:
+            src: /etc/sysconfig/certbot
+          register: __side_effect_handset_after
+
+        - name: Side Effect | Assert the hand-set CERTBOT_ARGS lines are unchanged (EL)
+          ansible.builtin.assert:
+            that:
+              - __side_effect_handset_after.content == __side_effect_handset_before.content
+              - >-
+                'CERTBOT_ARGS="--config=/etc/certbot-alt/cli.ini"'
+                in (__side_effect_handset_after.content | b64decode).splitlines()
+            fail_msg: '{{ __side_effect_handset_after.content | b64decode }}'
+            quiet: true
+
+      always:
+        - name: Side Effect | Remove the hand-set CERTBOT_ARGS lines (EL)
+          ansible.builtin.blockinfile:
+            path: /etc/sysconfig/certbot
+            marker: '# {mark} MOLECULE CERTBOT_ARGS'
+            state: absent
+
+    - name: Side Effect | Renew with another configuration directory
+      block:
+        # On EL the role owns only a CERTBOT_ARGS line under its marker
+        - name: Side Effect | Refuse a foreign CERTBOT_ARGS (EL)
+          when: ansible_facts['os_family'] == 'RedHat'
+          block:
+            - name: Side Effect | Set a foreign CERTBOT_ARGS (EL)
+              ansible.builtin.lineinfile:
+                path: /etc/sysconfig/certbot
+                regexp: '^CERTBOT_ARGS='
+                line: 'CERTBOT_ARGS="--no-autorenew"'
+
+            - name: Side Effect | Include certbot role with a foreign CERTBOT_ARGS (EL)  # noqa: role-name[path]
+              ansible.builtin.include_role:
+                name: '{{ playbook_dir }}/../..'
+              vars:
+                certbot_config_dir: '{{ __side_effect_config_dir }}'
+
+            - name: Side Effect | Fail when the foreign CERTBOT_ARGS was accepted (EL)
+              ansible.builtin.fail:
+                msg: 'The role accepted a foreign CERTBOT_ARGS'
+
+          rescue:
+            - name: Side Effect | Read the environment file after the refusal (EL)
+              ansible.builtin.slurp:
+                src: /etc/sysconfig/certbot
+              register: __side_effect_sysconfig_args_foreign
+
+            - name: Side Effect | Assert the role refused the foreign CERTBOT_ARGS and kept it (EL)
+              ansible.builtin.assert:
+                that:
+                  - ansible_failed_result.msg is search('CERTBOT_ARGS in \S+ is set to --no-autorenew,')
+                  - >-
+                    'CERTBOT_ARGS="--no-autorenew"'
+                    in (__side_effect_sysconfig_args_foreign.content | b64decode).splitlines()
+                fail_msg: '{{ ansible_failed_result.msg | default(ansible_failed_result) }}'
+                quiet: true
+
+            - name: Side Effect | Reset the foreign CERTBOT_ARGS (EL)
+              ansible.builtin.lineinfile:
+                path: /etc/sysconfig/certbot
+                regexp: '^CERTBOT_ARGS='
+                line: 'CERTBOT_ARGS=""'
+
+        # A certificate left in the default directory would expire unnoticed
+        - name: Side Effect | Plant a renewal configuration in the default directory
+          ansible.builtin.copy:
+            content: "# leftover\n"
+            dest: /etc/letsencrypt/renewal/leftover.example.com.conf
+            mode: '0644'
+
+        - name: Side Effect | Refuse another directory with a leftover renewal configuration
+          block:
+            - name: Side Effect | Include certbot role with a leftover renewal configuration  # noqa: role-name[path]
+              ansible.builtin.include_role:
+                name: '{{ playbook_dir }}/../..'
+              vars:
+                certbot_config_dir: '{{ __side_effect_config_dir }}'
+
+            - name: Side Effect | Fail when the leftover renewal configuration was accepted
+              ansible.builtin.fail:
+                msg: 'The role accepted another directory with a leftover renewal configuration'
+
+          rescue:
+            - name: Side Effect | Check the other directory after the refusal
+              ansible.builtin.stat:
+                path: '{{ __side_effect_config_dir }}'
+              register: __side_effect_leftover_dir
+
+            - name: Side Effect | Assert the role refused the leftover before any change
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    ansible_failed_result.msg
+                    is search('/etc/letsencrypt/renewal holds renewal configurations \(leftover\.example\.com\.conf\)')
+                  - not __side_effect_leftover_dir.stat.exists
+                fail_msg: '{{ ansible_failed_result.msg | default(ansible_failed_result) }}'
+                quiet: true
+
+        # With reload services, so the renew command carries both options; the
+        # leftover stays, as certbot_default_dir_leftovers_ok allows it
+        - name: Side Effect | Include certbot role with another configuration directory  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            certbot_config_dir: '{{ __side_effect_config_dir }}'
+            certbot_nginx_enabled: true
+            certbot_default_dir_leftovers_ok: true
+
+        - name: Side Effect | Remove the leftover renewal configuration
+          ansible.builtin.file:
+            path: /etc/letsencrypt/renewal/leftover.example.com.conf
+            state: absent
+
+        - name: Side Effect | Read the cli.ini in the other directory
+          ansible.builtin.slurp:
+            src: '{{ __side_effect_config_dir }}/cli.ini'
+          register: __side_effect_custom_cli_ini
+
+        - name: Side Effect | Read the renewal unit with another directory
+          ansible.builtin.systemd_service:
+            name: '{{ __certbot_service_name }}'
+          register: __side_effect_custom_unit
+
+        - name: Side Effect | Assert the drop-in passes --config and the post hook
+          ansible.builtin.assert:
+            that:
+              - >-
+                'config-dir = /srv/certbot-molecule'
+                in (__side_effect_custom_cli_ini.content | b64decode).splitlines()
+              - __side_effect_custom_unit.status.ExecStart.count('argv[]=') == 1
+              - >-
+                ('argv[]=' ~ __certbot_renew_command ~ ' ' ~ __side_effect_config_arg
+                ~ ' --post-hook=/usr/local/sbin/certbot-reload-services ;')
+                in __side_effect_custom_unit.status.ExecStart
+            fail_msg: 'ExecStart: {{ __side_effect_custom_unit.status.ExecStart }}'
+            quiet: true
+          when: ansible_facts['os_family'] in ['Archlinux', 'Debian']
+
+        - name: Side Effect | Read the environment file with another directory (EL)
+          ansible.builtin.slurp:
+            src: /etc/sysconfig/certbot
+          register: __side_effect_custom_sysconfig
+          when: ansible_facts['os_family'] == 'RedHat'
+
+        - name: Side Effect | Assert CERTBOT_ARGS passes --config next to the post hook (EL)
+          ansible.builtin.assert:
+            that:
+              - "'$CERTBOT_ARGS' in __side_effect_custom_unit.status.ExecStart"
+              - ('CERTBOT_ARGS="' ~ __side_effect_config_arg ~ '"') in __side_effect_lines
+              - __side_effect_lines | select('match', '^CERTBOT_ARGS=') | list | length == 1
+              # The marker of the role directly above its line
+              - >-
+                __side_effect_lines[__side_effect_lines.index('CERTBOT_ARGS="' ~ __side_effect_config_arg ~ '"') - 1]
+                == '# Managed by Ansible (marcstraube.server.certbot): CERTBOT_ARGS'
+              - "'POST_HOOK=\"--post-hook=/usr/local/sbin/certbot-reload-services\"' in __side_effect_lines"
+            fail_msg: '/etc/sysconfig/certbot: {{ __side_effect_lines }}'
+            quiet: true
+          vars:
+            __side_effect_lines: '{{ (__side_effect_custom_sysconfig.content | b64decode).splitlines() }}'
+          when: ansible_facts['os_family'] == 'RedHat'
+
+        # certbot renews nothing, as the directory holds no certificate. Not
+        # on Debian, where certbot cannot start in the test image (see
+        # verify.yml).
+        - name: Side Effect | Run the renewal unit with another directory
+          ansible.builtin.systemd_service:
+            name: '{{ __certbot_service_name }}'
+            state: started
+          changed_when: false
+          when: ansible_facts['os_family'] != 'Debian'
+
+        - name: Side Effect | Read the result of the renewal unit with another directory
+          ansible.builtin.systemd_service:
+            name: '{{ __certbot_service_name }}'
+          register: __side_effect_custom_renew_result
+          when: ansible_facts['os_family'] != 'Debian'
+
+        - name: Side Effect | Read the arguments certbot received with another directory
+          ansible.builtin.command:
+            cmd: grep -m1 'Arguments:' /var/log/letsencrypt/letsencrypt.log
+          register: __side_effect_custom_renew_args
+          changed_when: false
+          when: ansible_facts['os_family'] != 'Debian'
+
+        # systemd's argv as certbot logs it (a Python list): --config is one
+        # element, also from the unquoted $CERTBOT_ARGS on EL
+        - name: Side Effect | Assert the renewal unit passed --config as one argument
+          ansible.builtin.assert:
+            that:
+              - __side_effect_custom_renew_result.status.Result == 'success'
+              - >-
+                __side_effect_custom_renew_args.stdout
+                is search("[\\[ ]'" ~ (__side_effect_config_arg | regex_escape) ~ "'[,\\]]")
+            fail_msg: >-
+              Result {{ __side_effect_custom_renew_result.status.Result }},
+              {{ __side_effect_custom_renew_args.stdout }}
+            quiet: true
+          when: ansible_facts['os_family'] != 'Debian'
+
+        # Without reload services the drop-in stays for --config alone
+        - name: Side Effect | Include certbot role with another directory and the cron job  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            certbot_config_dir: '{{ __side_effect_config_dir }}'
+            certbot_use_systemd_timer: false
+
+        - name: Side Effect | Read the crontab of root with another directory
+          ansible.builtin.command:
+            cmd: crontab -l -u root
+          register: __side_effect_custom_crontab
+          changed_when: false
+
+        - name: Side Effect | Read the renewal unit with another directory and no reload services
+          ansible.builtin.systemd_service:
+            name: '{{ __certbot_service_name }}'
+          register: __side_effect_custom_unit_noreload
+
+        - name: Side Effect | Assert the cron job passes only --config
+          ansible.builtin.assert:
+            that:
+              - >-
+                ('0 3 * * * certbot renew --quiet ' ~ __side_effect_config_arg)
+                in __side_effect_custom_crontab.stdout_lines
+              - "'post-hook' not in __side_effect_custom_crontab.stdout"
+            fail_msg: '{{ __side_effect_custom_crontab.stdout_lines }}'
+            quiet: true
+
+        - name: Side Effect | Assert the drop-in stays for --config alone
+          ansible.builtin.assert:
+            that:
+              - __side_effect_custom_unit_noreload.status.ExecStart.count('argv[]=') == 1
+              - >-
+                ('argv[]=' ~ __certbot_renew_command ~ ' ' ~ __side_effect_config_arg ~ ' ;')
+                in __side_effect_custom_unit_noreload.status.ExecStart
+            fail_msg: 'ExecStart: {{ __side_effect_custom_unit_noreload.status.ExecStart }}'
+            quiet: true
+          when: ansible_facts['os_family'] in ['Archlinux', 'Debian']
+
+        - name: Side Effect | Include certbot role with the default directory and the cron job  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            certbot_use_systemd_timer: false
+
+        - name: Side Effect | Read the crontab of root with the default directory and cron
+          ansible.builtin.command:
+            cmd: crontab -l -u root
+          register: __side_effect_default_cron_crontab
+          changed_when: false
+
+        - name: Side Effect | Assert the cron job drops --config with the default directory
+          ansible.builtin.assert:
+            that:
+              - "'0 3 * * * certbot renew --quiet' in __side_effect_default_cron_crontab.stdout_lines"
+              - "'--config' not in __side_effect_default_cron_crontab.stdout"
+            fail_msg: '{{ __side_effect_default_cron_crontab.stdout_lines }}'
+            quiet: true
+
+        - name: Side Effect | Include certbot role with the default directory again  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+
+        - name: Side Effect | Check the drop-in with the default directory
+          ansible.builtin.stat:
+            path: '/etc/systemd/system/{{ __certbot_service_name }}.d/post-hook.conf'
+          register: __side_effect_default_dropin
+
+        - name: Side Effect | Read the renewal unit with the default directory
+          ansible.builtin.systemd_service:
+            name: '{{ __certbot_service_name }}'
+          register: __side_effect_default_unit
+
+        - name: Side Effect | Read the crontab of root with the default directory
+          ansible.builtin.command:
+            cmd: crontab -l -u root
+          register: __side_effect_default_crontab
+          changed_when: false
+          # crontab -l exits with 1 when root has no crontab left
+          failed_when: __side_effect_default_crontab.rc > 1
+
+        - name: Side Effect | Assert the default directory drops --config again
+          ansible.builtin.assert:
+            that:
+              - "'certbot renew' not in __side_effect_default_crontab.stdout"
+              - "'--config' not in __side_effect_default_unit.status.ExecStart"
+            fail_msg: >-
+              {{ __side_effect_default_crontab.stdout_lines }},
+              ExecStart: {{ __side_effect_default_unit.status.ExecStart }}
+            quiet: true
+
+        - name: Side Effect | Assert the drop-in is gone with the default directory
+          ansible.builtin.assert:
+            that:
+              - not __side_effect_default_dropin.stat.exists
+              - __side_effect_default_unit.status.ExecStart.count('argv[]=') == 1
+              - ('argv[]=' ~ __certbot_renew_command ~ ' ;') in __side_effect_default_unit.status.ExecStart
+            fail_msg: 'ExecStart: {{ __side_effect_default_unit.status.ExecStart }}'
+            quiet: true
+          when: ansible_facts['os_family'] in ['Archlinux', 'Debian']
+
+        - name: Side Effect | Read the environment file with the default directory (EL)
+          ansible.builtin.slurp:
+            src: /etc/sysconfig/certbot
+          register: __side_effect_default_sysconfig
+          when: ansible_facts['os_family'] == 'RedHat'
+
+        - name: Side Effect | Assert CERTBOT_ARGS and POST_HOOK are empty again (EL)
+          ansible.builtin.assert:
+            that:
+              - "'CERTBOT_ARGS=\"\"' in __side_effect_lines"
+              - "'POST_HOOK=\"\"' in __side_effect_lines"
+              - __side_effect_lines | select('match', '^(CERTBOT_ARGS|POST_HOOK)=') | list | length == 2
+              - __side_effect_lines | select('search', 'marcstraube\.server\.certbot') | list | length == 0
+            fail_msg: '/etc/sysconfig/certbot: {{ __side_effect_lines }}'
+            quiet: true
+          vars:
+            __side_effect_lines: '{{ (__side_effect_default_sysconfig.content | b64decode).splitlines() }}'
+          when: ansible_facts['os_family'] == 'RedHat'
+
+      always:
+        - name: Side Effect | Remove the other configuration directory and the leftover
+          ansible.builtin.file:
+            path: '{{ item }}'
+            state: absent
+          loop:
+            - '{{ __side_effect_config_dir }}'
+            - /etc/letsencrypt/renewal/leftover.example.com.conf
