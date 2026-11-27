@@ -298,7 +298,7 @@
   tags:
     - always
 
-- name: Main | Validate the antivirus and DMARC report settings
+- name: Main | Validate the antivirus and DMARC settings
   ansible.builtin.assert:
     that:
       - __rspamd_errors | length == 0
@@ -319,6 +319,14 @@
              if rspamd_antivirus_action not in __rspamd_antivirus_actions else '',
            ("rspamd_antivirus_max_size must be a number of bytes (got '" ~ rspamd_antivirus_max_size ~ "').")
              if rspamd_antivirus_max_size | string is not match('^[0-9]+$') else '',
+           ("rspamd_dmarc_actions must be a mapping of " ~ __rspamd_dmarc_dispositions | join(', ')
+            ~ " to one of " ~ __rspamd_dmarc_action_names | map('to_json') | join(', ')
+            ~ " ('_' for ' ' works too) (got '" ~ rspamd_dmarc_actions | to_json ~ "').")
+             if rspamd_dmarc_actions is not mapping
+                or rspamd_dmarc_actions.keys() | reject('in', __rspamd_dmarc_dispositions) | list | length > 0
+                or rspamd_dmarc_actions.values() | map('string') | map('replace', '_', ' ')
+                   | reject('in', __rspamd_dmarc_action_names) | list | length > 0
+             else '',
            ('rspamd_dmarc_reporting_enabled needs rspamd_dmarc_reporting_email, rspamd_dmarc_reporting_domain'
             ~ ' and rspamd_dmarc_reporting_org_name, each on one line.')
              if rspamd_dmarc_reporting_enabled | bool

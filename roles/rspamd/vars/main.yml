@@ -96,6 +96,24 @@ __rspamd_antivirus_actions:
   - 'add header'
   - 'rewrite subject'
   - 'soft reject'
+# DMARC dispositions of the dmarc module and the actions it may force
+# (task:set_pre_result, '_' written as ' '). Not allowed: a forced action
+# without a threshold replaces every action the score earns except reject,
+# so 'no action' would deliver spam below the reject threshold unmarked and
+# 'rewrite subject' would replace 'add header', and the milter passes
+# 'greylist' as accepted while greylisting is off.
+__rspamd_dmarc_dispositions:
+  - 'reject'
+  - 'quarantine'
+  - 'softfail'
+__rspamd_dmarc_action_names:
+  - 'reject'
+  - 'soft reject'
+  - 'add header'
+# rspamd_dmarc_actions with '_' in the action names written as ' '
+__rspamd_dmarc_actions: >-
+  {{ dict(rspamd_dmarc_actions.keys()
+          | zip(rspamd_dmarc_actions.values() | map('string') | map('replace', '_', ' '))) }}
 __rspamd_bind_regex: '^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.*_-]+):[0-9]{1,5}$'
 __rspamd_hostname_regex: '^([A-Za-z0-9_]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?[.])+[A-Za-z]{2,63}$'
 __rspamd_selector_regex: '^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$'

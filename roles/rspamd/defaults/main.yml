@@ -176,7 +176,10 @@ rspamd_dkim_domains: []
 #     selector: '2026'
 #     key_size: 2048
 
-# Client networks whose mail is signed without authentication (sign_networks)
+# Client networks whose mail is signed without authentication (sign_networks).
+# Mail from an address outside the local networks (loopback, private
+# ranges) is also checked for DMARC: rspamd_dmarc_actions rejects it
+# under p=reject unless the address is in the SPF record of the domain.
 rspamd_signing_networks:
   - '127.0.0.0/8'
   - '::1'
@@ -206,6 +209,26 @@ rspamd_antivirus_action: 'reject'
 
 # Largest part sent to clamd in bytes; larger parts are not scanned
 rspamd_antivirus_max_size: 20000000
+
+#
+# DMARC Policy
+#
+# A failed DMARC check adds DMARC_POLICY_REJECT or DMARC_POLICY_QUARANTINE,
+# a few points that rarely reach the reject threshold. An action mapped to
+# the disposition enforces the policy the sender domain publishes.
+
+# Action per DMARC disposition: 'reject' and 'quarantine' follow the
+# published policy; with pct= sampling an exempted failure of p=reject
+# counts as 'quarantine', one of p=quarantine as 'softfail'. A failure of
+# p=none never takes an action. Actions: 'reject', 'soft reject',
+# 'add header' ('soft_reject', 'add_header' work too); a score above the
+# reject threshold still rejects. Empty: the symbols only. Also rejected
+# under p=reject: forwarded mail that fails DKIM (an ARC seal does not
+# help) and mail of this server from rspamd_signing_networks outside the
+# local networks (see README).
+rspamd_dmarc_actions:
+  reject: 'reject'
+  quarantine: 'add header'
 
 #
 # DMARC Reports

@@ -1,4 +1,8 @@
 {{ ansible_managed | comment }}
+{% if rspamd_dmarc_actions | length > 0 %}
+# Action per disposition of a failed DMARC check (at least this action)
+actions = {{ __rspamd_dmarc_actions | to_json }};
+{% endif %}
 {% if rspamd_dmarc_reporting_enabled | bool %}
 # Aggregate reports: rspamd collects the data in Valkey,
 # rspamd-dmarc-report.timer sends them

@@ -31,7 +31,9 @@ by name, never by pattern, so it never loads these copies.
   never replaces; mail from authenticated users and from the signing
   networks is signed.
 - Virus scanning through clamd (`marcstraube.common.clamav`).
-- Optional DMARC aggregate reports, sent by a systemd timer.
+- The DMARC policy of the sender domain enforced (`p=reject` rejected,
+  `p=quarantine` marked as spam), optional DMARC aggregate reports sent by
+  a systemd timer.
 - The role prints the DKIM and DMARC records and checks whether they are
   set.
 
@@ -294,7 +296,8 @@ rspamd_ratelimits:
 | ------------------------ | ------- | ---------------------------------------------- |
 | `rspamd_dns_nameservers` | `[]`    | Resolvers of rspamd; empty: `/etc/resolv.conf` |
 
-SPF, DKIM, DMARC and ARC checks run with the upstream defaults. DNS
+SPF, DKIM, DMARC and ARC checks run with the upstream defaults; DMARC
+failures take the actions of [DMARC Policy](#dmarc-policy). DNS
 blocklists refuse queries from public resolvers (Google, Cloudflare, Quad9
 and most providers' resolvers): run a local recursive resolver such as
 `marcstraube.common.unbound` and point `rspamd_dns_nameservers` (or the
@@ -332,7 +335,9 @@ Mail from authenticated users and from `rspamd_signing_networks` is signed
 with the key of the domain of its `From` header (subdomains with the key of
 their registered domain); the loopback interface covers mail that Postfix
 receives from local programs. The upstream default would also sign mail from
-every private network (`sign_local`), which the role turns off. Forwarded
+every private network (`sign_local`), which the role turns off. Mail from
+a signing network outside the local networks is also checked for DMARC
+(see [DMARC Policy](#dmarc-policy)). Forwarded
 mail to the mail domains gets an ARC seal with the key of the recipient
 domain (upstream rules of the arc module).
 
@@ -361,6 +366,63 @@ answer, rspamd adds `CLAM_VIRUS_FAIL` (score 0) and the mail is delivered
 unscanned. Monitor for it, e.g. `CLAM_VIRUS_FAIL` in
 `/var/log/rspamd/rspamd.log` or in the symbol statistics of the web
 interface, and the clamd service itself. See [clamd](#clamd).
+
+### DMARC Policy
+
+| Variable               | Default                                        | Description                     |
+| ---------------------- | ---------------------------------------------- | ------------------------------- |
+| `rspamd_dmarc_actions` | `{reject: 'reject', quarantine: 'add header'}` | Action per DMARC disposition    |
+
+A message that fails DMARC gets `DMARC_POLICY_REJECT` (score 2.0) or
+`DMARC_POLICY_QUARANTINE` (1.5), which alone rarely reaches a threshold of
+`rspamd_actions`. `rspamd_dmarc_actions` enforces the policy that the domain
+of the `From` header publishes: by default mail failing `p=reject` is
+rejected and mail failing `p=quarantine` gets `X-Spam: Yes` (Junk).
+
+- Keys: `reject` and `quarantine` follow the published policy. With `pct=`
+  sampling an exempted failure of `p=reject` counts as `quarantine`, one of
+  `p=quarantine` as `softfail`. A failure of `p=none` never takes an
+  action.
+- Actions: `reject`, `soft reject` and `add header` (also written
+  `soft_reject`, `add_header`). A score above the reject threshold still
+  rejects. rspamd also accepts `no action`, `rewrite subject` and
+  `greylist`, the role does not: a forced action without a threshold
+  replaces every action the score earns except reject, so `no action`
+  would deliver spam below the reject threshold unmarked and `rewrite
+  subject` would replace `add header`, and the milter passes `greylist` as
+  accepted while greylisting is off. `rspamadm configtest` does not check
+  the names, the role does.
+
+Mail from authenticated users and from clients in local networks (the
+loopback interface and the private ranges of the upstream `local_addrs`)
+is not checked. Mail that rspamd checks and that `reject` may hit:
+
+- Forwarded mail: a forwarder that keeps the envelope sender breaks SPF,
+  and DMARC fails when it also changes the message (a mailing list adding
+  a footer or a subject tag), which breaks DKIM. An ARC seal of the
+  forwarder does not prevent the reject: rspamd lowers only the score of
+  the DMARC symbol for forwarders trusted in the arc module, the action
+  stays.
+- Mail of this server from `rspamd_signing_networks` outside the local
+  networks: rspamd signs it in the same scan but does not verify that
+  signature, so DMARC passes only through SPF. Put the address into the
+  SPF record of the domain, or submit with login.
+- Mail behind a front MX or mail gateway with a public address: rspamd
+  sees the gateway as the client and SPF fails for every sender. Configure
+  the external_relay module through `rspamd_local_config`
+  (`'external_relay.conf'`), or set `rspamd_dmarc_actions: {}` while the
+  gateway is in front.
+
+To only score DMARC failures, set `rspamd_dmarc_actions: {}`, or map
+`reject` to `'add header'`.
+
+A message that an action of `rspamd_dmarc_actions` rejected or marked
+shows two lines with its Message-ID in `/var/log/rspamd/rspamd.log`: the
+dmarc module logs `set pre-result to '<action>' ... 'Action set by DMARC'
+from dmarc`, and the result line of the message carries
+`DMARC_POLICY_REJECT` or `DMARC_POLICY_QUARANTINE`, often with a score far
+below the thresholds of `rspamd_actions`. `rspamd_dmarc_actions: {}` takes
+the actions back on the next run.
 
 ### DMARC Reports
 
@@ -491,6 +553,9 @@ idempotence and checks `rspamadm configtest`, owner and mode of the files
 and keys, GTUBE and EICAR rejected through Postfix and the milter (EICAR as
 attachment, found by clamd), a clean message from an outside client
 delivered with `X-Spam-Status: No` and an SPF pass and without signature, a
+message failing DMARC of a domain with `p=quarantine` rejected by
+`rspamd_dmarc_actions` (`rspamadm configdump dmarc` shows the actions, one
+written with `_`; the default passes the validation), a
 message from the signing network delivered with a DKIM signature that rspamd
 verifies against the published key, spam training through the controller
 with the enable password (Bayes tokens in Valkey), requests refused without
@@ -498,8 +563,9 @@ a password, with a wrong one and with the read password for learning, the
 password hashes and the DKIM keys unchanged by another run, a public DKIM
 record rebuilt from its key, the DMARC report service run once, the DNS
 report (present, a DKIM record without `v=DKIM1`, missing, different; a
-broken resolver), a run without the controller passwords (fails before any
-change), a `local.d` file that `rspamadm configtest` rejects (the active
+broken resolver), a run without the controller passwords and runs with an
+unknown DMARC disposition and with the action `no action` (each fails
+before any change), a `local.d` file that `rspamadm configtest` rejects (the active
 file and the process stay), and the removal of a file that left
 `rspamd_local_config` (reported by a check run first, then deleted). Side
 effect runs the targeted update with a minimum the repository does not
@@ -513,10 +579,11 @@ has a single version, so no real rollback is possible.
 `split` runs rspamd on one container and Valkey (TLS only, certificate of a
 test CA), clamd (TCP) and Postfix on the other: Postfix uses the milter on
 the address of the rspamd container, GTUBE and EICAR are rejected, the
-signed message arrives, and Bayes learns into the Valkey of the other
-container. The rspamd container has no `policy-rc.d` of the image, like a
-Debian host; side effect leaves the role's own `policy-rc.d` behind, runs the
-role with only `rspamd:dkim`, `rspamd:configure`, `rspamd:service` and
+signed message arrives, Bayes learns into the Valkey of the other
+container, and the DMARC module runs without actions and reports. The
+rspamd container has no `policy-rc.d` of the image, like a Debian host;
+side effect leaves the role's own `policy-rc.d` behind, runs the role with
+only `rspamd:dkim`, `rspamd:configure`, `rspamd:service` and
 `rspamd:dns`, and runs it again in full, which removes the leftover.
 
 ## Notes

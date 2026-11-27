@@ -68,6 +68,8 @@ provisioner:
             selector: 'split'
         # The DNS report is tested in the default scenario
         rspamd_dns_check_enabled: false
+        # DMARC adds its symbols only, without reports
+        rspamd_dmarc_actions: {}
       backend:
         # Valkey offers TLS only to the network
         valkey_enabled: true
