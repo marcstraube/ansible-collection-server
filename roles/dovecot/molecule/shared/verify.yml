@@ -64,6 +64,7 @@
       - '  /etc/postfix/dynamicmaps.cf.d/* r,'
       - '  /var/spool/postfix/maildrop/* rwl,'
       - '  /var/spool/postfix/public/pickup w,'
+      - '  deny "/var/vmail/**" rwkl,'
       - '}'
     # Spam training without and with dovecot_rspamd_controller_ca_file
     # (the last two lines)

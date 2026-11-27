@@ -896,11 +896,18 @@ profile `dovecot-lmtp//sendmail`, the Postfix part of the sendmail profile
 of `usr.lib.dovecot.dovecot-lda`: the Postfix configuration with its map
 module definitions (`dynamicmaps.cf.d`), `postdrop` (run in the same
 profile), the maildrop queue and the pickup trigger, which AppArmor sees as
-a disconnected path (`attach_disconnected`). The
-rules for the mail root and the TLS files are always written, also where
-the packaged tunables and abstractions already allow the path. A database
-over TCP, the TCP listeners and the `dovecot_submission_host` connection
-need no rules (the profiles allow TCP).
+a disconnected path (`attach_disconnected`). The files LMTP keeps open in
+the mail root stay closed for `sendmail`. A deny rule for the mail root
+keeps them out of the audit log, which otherwise shows a `file_inherit`
+DENIED line for each of them at every redirect and vacation reply; it also
+silences any other access of `sendmail` and `postdrop` to the mail root,
+which stays denied. The mail root must therefore not contain the Postfix
+queue or configuration (`/var/spool/postfix`, `/etc/postfix`): the deny
+rule would block them for `sendmail` without a log line. The rules for the
+mail root and the TLS files are always written, also where the packaged
+tunables and abstractions already allow the path. A database over TCP, the
+TCP listeners and the `dovecot_submission_host` connection need no rules
+(the profiles allow TCP).
 
 - The role owns the files it writes; each starts with
   `# Managed by Ansible (marcstraube.server.dovecot)`. It writes those with
