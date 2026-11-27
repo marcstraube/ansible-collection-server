@@ -367,7 +367,15 @@
                    | reject('match', __postfix_address_regex) | list | length > 0
              else '',
            "postfix_dns_spf must be on one line without double quotes."
-             if postfix_dns_spf is not match('^[^\r\n"]*$') else ''
+             if postfix_dns_spf is not match('^[^\r\n"]*$') else '',
+           ("postfix_dns_tlsa_enabled must be true or false (got '" ~ postfix_dns_tlsa_enabled ~ "').")
+             if postfix_dns_tlsa_enabled | string | lower not in ['true', 'false', 'yes', 'no', '1', '0'] else '',
+           "postfix_dns_tlsa_enabled needs postfix_tls_cert_file, the certificate the TLSA record pins."
+             if postfix_dns_tlsa_enabled | string | lower in ['true', 'yes', '1']
+                and postfix_tls_cert_file | default('', true) | length == 0 else '',
+           ("postfix_dns_tlsa_certbot_dir must be an absolute path (got '" ~ postfix_dns_tlsa_certbot_dir ~ "').")
+             if postfix_dns_tlsa_certbot_dir is not string
+                or postfix_dns_tlsa_certbot_dir is not match('^/[^\r\n]*$') else ''
          ] | select | list }}
   when: postfix_enabled | bool
   tags:

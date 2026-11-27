@@ -2,9 +2,11 @@
 # Runs after verify.yml. The first play checks the refusal of a certificate
 # post hook and of a foreign POST_HOOK (EL), the read-only check of saved post
 # hooks, the cron job with post hook and retry, and a configured unit that
-# does not exist, at a renewal and at an issuance. The second play removes all reload services, the third
+# does not exist, at a renewal and at an issuance. The second play checks the
+# key options of the certonly command lines, the third the key reuse of
+# existing certificates, the fourth removes all reload services, the fifth
 # checks that the role removed the script and every reference to it, and the
-# fourth one that a foreign POST_HOOK survives the removal (EL). The last two
+# sixth that a foreign POST_HOOK survives the removal (EL). The last two
 # check the command lines of the certificate tasks and the renewal with
 # another certbot_config_dir.
 - name: Side Effect — Post hook guard and cron job
@@ -395,6 +397,401 @@
           {{ __side_effect_retry_timer_off.status.UnitFileState }}
         quiet: true
 
+# The certonly command lines of the role, recorded by a certbot stub that
+# comes first in PATH and reports every call as an issuance (the scenario
+# requests no certificate): with certbot_reuse_key for every certificate,
+# for the mail certificate and turned off for one entry, and with the role
+# defaults, where --reuse-key is missing.
+- name: Side Effect — Key options on the certonly command
+  hosts: all
+  gather_facts: false
+
+  environment:
+    PATH: '/root/certbot-stub:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+
+  vars:
+    certbot_enabled: true
+    certbot_email: 'test@example.com'
+    certbot_staging: true
+    certbot_mail_domain: 'example.net'
+    certbot_mail_hostnames: ['mail']
+    certbot_mail_autodiscover: false
+
+  tasks:
+    # A kept instance may hold the stub of an aborted run
+    - name: Side Effect | Record the key options of the certonly command lines
+      block:
+        - name: Side Effect | Remove a leftover certbot stub
+          ansible.builtin.file:
+            path: /root/certbot-stub
+            state: absent
+
+        - name: Side Effect | Create the certbot stub directory
+          ansible.builtin.file:
+            path: /root/certbot-stub
+            state: directory
+            owner: root
+            group: root
+            mode: '0700'
+
+        - name: Side Effect | Deploy the certbot stub
+          ansible.builtin.copy:
+            content: |
+              #!/bin/sh
+              # Records the arguments of every call on one line
+              printf '%s\n' "$*" >> /root/certbot-stub/calls
+              echo 'Successfully received certificate.'
+            dest: /root/certbot-stub/certbot
+            owner: root
+            group: root
+            mode: '0755'
+
+        # certificates.yml alone: main.yml would refuse the RSA entry with key
+        # reuse next to the role-wide ECDSA, as cli.ini breaks its renewal
+        - name: Side Effect | Run the certificate tasks with key reuse for every certificate  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+            tasks_from: certificates.yml
+          vars:
+            certbot_reuse_key: true
+            certbot_mail_certificate_enabled: true
+            certbot_certificates:
+              - domains: ['all.example.com']
+              - domains: ['rsa.example.com']
+                key_type: 'rsa'
+              - domains: ['off.example.com']
+                reuse_key: false
+
+        - name: Side Effect | Read the command lines with key reuse
+          ansible.builtin.slurp:
+            src: /root/certbot-stub/calls
+          register: __side_effect_calls_reuse
+
+        - name: Side Effect | Remove the recorded command lines
+          ansible.builtin.file:
+            path: /root/certbot-stub/calls
+            state: absent
+
+        - name: Side Effect | Run the certificate tasks with the role defaults  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+            tasks_from: certificates.yml
+          vars:
+            certbot_mail_certificate_enabled: true
+            certbot_certificates:
+              - domains: ['default.example.com']
+              - domains: ['reuse.example.com']
+                reuse_key: true
+
+        - name: Side Effect | Read the command lines with the role defaults
+          ansible.builtin.slurp:
+            src: /root/certbot-stub/calls
+          register: __side_effect_calls_default
+
+        - name: Side Effect | Assert the key options of the certonly command lines
+          ansible.builtin.assert:
+            that:
+              - __side_effect_reuse == [
+                  __side_effect_mail ~ ' --key-type ecdsa --elliptic-curve secp384r1 --reuse-key',
+                  __side_effect_cert ~ 'all.example.com -d all.example.com' ~ __side_effect_auth
+                    ~ ' --key-type ecdsa --elliptic-curve secp384r1 --reuse-key',
+                  __side_effect_cert ~ 'rsa.example.com -d rsa.example.com' ~ __side_effect_auth
+                    ~ ' --key-type rsa --rsa-key-size 4096 --reuse-key',
+                  __side_effect_cert ~ 'off.example.com -d off.example.com' ~ __side_effect_auth
+                    ~ ' --key-type ecdsa --elliptic-curve secp384r1']
+              - __side_effect_default == [
+                  __side_effect_mail ~ ' --key-type ecdsa --elliptic-curve secp384r1',
+                  __side_effect_cert ~ 'default.example.com -d default.example.com' ~ __side_effect_auth
+                    ~ ' --key-type ecdsa --elliptic-curve secp384r1',
+                  __side_effect_cert ~ 'reuse.example.com -d reuse.example.com' ~ __side_effect_auth
+                    ~ ' --key-type ecdsa --elliptic-curve secp384r1 --reuse-key']
+            fail_msg: '{{ __side_effect_reuse }} {{ __side_effect_default }}'
+            quiet: true
+          vars:
+            __side_effect_reuse: '{{ (__side_effect_calls_reuse.content | b64decode).splitlines() }}'
+            __side_effect_default: '{{ (__side_effect_calls_default.content | b64decode).splitlines() }}'
+            __side_effect_cert: 'certonly --non-interactive --agree-tos --email test@example.com --staging --cert-name '
+            __side_effect_auth: ' --authenticator webroot --webroot-path /var/www/letsencrypt'
+            __side_effect_mail: >-
+              {{ __side_effect_cert }}mail.example.net -d mail.example.net{{ __side_effect_auth }}
+
+      always:
+        - name: Side Effect | Remove the certbot stub
+          ansible.builtin.file:
+            path: /root/certbot-stub
+            state: absent
+
+# Key reuse of certificates that exist already: the renewal configurations
+# are fixtures in the form certbot writes them, one of them a symlink, and
+# the certificate tasks skip the request because the certificate exists.
+# reuse_key on the entry sets or removes reuse_key in [renewalparams];
+# without it (role-wide default false) a setting made by hand stays; the
+# mail certificate gets it with certbot_reuse_key. Check mode changes
+# nothing, a second run neither. A certificate without renewal
+# configuration fails the run.
+- name: Side Effect — Key reuse of existing certificates
+  hosts: all
+  gather_facts: false
+
+  vars:
+    certbot_enabled: true
+    certbot_email: 'test@example.com'
+    certbot_staging: true
+    certbot_mail_domain: 'example.net'
+    __side_effect_lineages:
+      - name: 'reuse.example.com'
+        reuse_key_line: ''
+      - name: 'new-key.example.com'
+        reuse_key_line: 'reuse_key = True'
+      - name: 'manual.example.com'
+        reuse_key_line: 'reuse_key = True'
+      - name: 'link.example.com'
+        reuse_key_line: ''
+      - name: 'mail.example.net'
+        reuse_key_line: ''
+    # The role runs: the certificate entries with the role-wide default, and
+    # the mail certificate with certbot_reuse_key
+    __side_effect_reuse_runs:
+      - reuse_key: false
+        mail: false
+        certificates:
+          - domains: ['reuse.example.com']
+            reuse_key: true
+          - domains: ['new-key.example.com']
+            reuse_key: false
+          - domains: ['manual.example.com']
+          - domains: ['link.example.com']
+            reuse_key: true
+      - reuse_key: true
+        mail: true
+        certificates: []
+    __side_effect_reuse_files: >-
+      {{ __side_effect_lineages | map(attribute='name')
+         | map('regex_replace', '^(.*)$', '/etc/letsencrypt/renewal/\1.conf') | list }}
+
+  tasks:
+    - name: Side Effect | Create the certificate directories
+      ansible.builtin.file:
+        path: '/etc/letsencrypt/live/{{ item }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+      loop: "{{ __side_effect_lineages | map(attribute='name') | list + ['orphan.example.com'] }}"
+
+    - name: Side Effect | Plant the certificates
+      ansible.builtin.copy:
+        content: ''
+        dest: '/etc/letsencrypt/live/{{ item }}/fullchain.pem'
+        owner: root
+        group: root
+        mode: '0644'
+      loop: "{{ __side_effect_lineages | map(attribute='name') | list + ['orphan.example.com'] }}"
+
+    - name: Side Effect | Create the renewal configuration directories for the key reuse
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - /etc/letsencrypt/renewal
+        - /etc/letsencrypt/renewal-linked
+
+    # link.example.com lives in another directory, linked from renewal/
+    - name: Side Effect | Plant the renewal configurations of the certificates
+      ansible.builtin.copy:
+        content: |
+          # renew_before_expiry = 30 days
+          version = 3.1.0
+          archive_dir = /etc/letsencrypt/archive/{{ item.name }}
+          cert = /etc/letsencrypt/live/{{ item.name }}/cert.pem
+          privkey = /etc/letsencrypt/live/{{ item.name }}/privkey.pem
+          chain = /etc/letsencrypt/live/{{ item.name }}/chain.pem
+          fullchain = /etc/letsencrypt/live/{{ item.name }}/fullchain.pem
+
+          # Options used in the renewal process
+          [renewalparams]
+          account = 0123456789abcdef0123456789abcdef
+          authenticator = webroot
+          webroot_path = /var/www/letsencrypt,
+          server = https://acme-staging-v02.api.letsencrypt.org/directory
+          key_type = ecdsa
+          {{ item.reuse_key_line }}
+          [[webroot_map]]
+          {{ item.name }} = /var/www/letsencrypt
+        dest: >-
+          /etc/letsencrypt/{{ 'renewal-linked' if item.name == 'link.example.com' else 'renewal' }}/{{ item.name }}.conf
+        owner: root
+        group: root
+        mode: '0644'
+      loop: '{{ __side_effect_lineages }}'
+      loop_control:
+        label: '{{ item.name }}'
+
+    - name: Side Effect | Link the renewal configuration of link.example.com
+      ansible.builtin.file:
+        src: /etc/letsencrypt/renewal-linked/link.example.com.conf
+        dest: /etc/letsencrypt/renewal/link.example.com.conf
+        state: link
+        owner: root
+        group: root
+
+    - name: Side Effect | Read the renewal configurations before the runs
+      ansible.builtin.stat:
+        path: '{{ item }}'
+        follow: true
+      loop: '{{ __side_effect_reuse_files }}'
+      register: __side_effect_reuse_before
+
+    - name: Side Effect | Run the certificate tasks in check mode  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: certificates.yml
+        apply:
+          check_mode: true
+      vars:
+        certbot_certificates: '{{ __side_effect_run.certificates }}'
+        certbot_reuse_key: '{{ __side_effect_run.reuse_key }}'
+        certbot_mail_certificate_enabled: '{{ __side_effect_run.mail }}'
+      loop: '{{ __side_effect_reuse_runs }}'
+      loop_control:
+        loop_var: __side_effect_run
+
+    - name: Side Effect | Read the renewal configurations after check mode
+      ansible.builtin.stat:
+        path: '{{ item }}'
+        follow: true
+      loop: '{{ __side_effect_reuse_files }}'
+      register: __side_effect_reuse_check
+
+    - name: Side Effect | Run the certificate tasks  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: certificates.yml
+      vars:
+        certbot_certificates: '{{ __side_effect_run.certificates }}'
+        certbot_reuse_key: '{{ __side_effect_run.reuse_key }}'
+        certbot_mail_certificate_enabled: '{{ __side_effect_run.mail }}'
+      loop: '{{ __side_effect_reuse_runs }}'
+      loop_control:
+        loop_var: __side_effect_run
+
+    - name: Side Effect | Read the renewal configurations after the run
+      ansible.builtin.stat:
+        path: '{{ item }}'
+        follow: true
+      loop: '{{ __side_effect_reuse_files }}'
+      register: __side_effect_reuse_after
+
+    - name: Side Effect | Run the certificate tasks again  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: certificates.yml
+      vars:
+        certbot_certificates: '{{ __side_effect_run.certificates }}'
+        certbot_reuse_key: '{{ __side_effect_run.reuse_key }}'
+        certbot_mail_certificate_enabled: '{{ __side_effect_run.mail }}'
+      loop: '{{ __side_effect_reuse_runs }}'
+      loop_control:
+        loop_var: __side_effect_run
+
+    - name: Side Effect | Read the renewal configurations after the second run
+      ansible.builtin.stat:
+        path: '{{ item }}'
+        follow: true
+      loop: '{{ __side_effect_reuse_files }}'
+      register: __side_effect_reuse_again
+
+    - name: Side Effect | Check the link of the linked renewal configuration
+      ansible.builtin.stat:
+        path: /etc/letsencrypt/renewal/link.example.com.conf
+      register: __side_effect_reuse_link
+
+    # Parsed with configobj, as certbot reads the files: reuse_key belongs to
+    # [renewalparams], not to its subsection [[webroot_map]]
+    - name: Side Effect | Read the renewal parameters with configobj
+      ansible.builtin.command:
+        argv: >-
+          {{ [ansible_python_interpreter | default('/usr/bin/python3'), '-c', __side_effect_script]
+             + __side_effect_reuse_files }}
+      register: __side_effect_reuse_params
+      changed_when: false
+      vars:
+        __side_effect_script: |
+          import json, sys, configobj
+          out = {}
+          for path in sys.argv[1:]:
+              params = configobj.ConfigObj(path)['renewalparams']
+              out[path.split('/')[-1][:-5]] = {
+                  'reuse_key': params.as_bool('reuse_key') if 'reuse_key' in params else None,
+                  'webroot_map': sorted(params['webroot_map'].keys()),
+              }
+          print(json.dumps(out))
+
+    - name: Side Effect | Assert the key reuse of the existing certificates
+      ansible.builtin.assert:
+        that:
+          # Check mode changes nothing
+          - >-
+            __side_effect_reuse_check.results | map(attribute='stat.checksum') | list
+            == __side_effect_reuse_before.results | map(attribute='stat.checksum') | list
+          # Set for reuse_key: true (also through the link and for the mail
+          # certificate), removed for reuse_key: false, a setting made by
+          # hand kept without reuse_key on the entry
+          - >-
+            __side_effect_params | dict2items | map(attribute='value.reuse_key') | list
+            == [true, none, true, true, true]
+          - >-
+            __side_effect_params | dict2items | map(attribute='value.webroot_map') | list
+            == __side_effect_lineages | map(attribute='name') | map('split') | list
+          # The file of the setting made by hand is untouched, the link stays
+          - __side_effect_reuse_after.results[2].stat.checksum == __side_effect_reuse_before.results[2].stat.checksum
+          - __side_effect_reuse_link.stat.islnk
+          # The second run changes nothing
+          - >-
+            __side_effect_reuse_again.results | map(attribute='stat.checksum') | list
+            == __side_effect_reuse_after.results | map(attribute='stat.checksum') | list
+        fail_msg: '{{ __side_effect_reuse_params.stdout }}'
+        quiet: true
+      vars:
+        __side_effect_params: '{{ __side_effect_reuse_params.stdout | from_json }}'
+
+    - name: Side Effect | Refuse key reuse for a certificate without renewal configuration
+      block:
+        - name: Side Effect | Run the certificate tasks without renewal configuration  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+            tasks_from: certificates.yml
+          vars:
+            certbot_certificates:
+              - domains: ['orphan.example.com']
+                reuse_key: true
+
+        - name: Side Effect | Fail when the missing renewal configuration was accepted
+          ansible.builtin.fail:
+            msg: 'The role set key reuse for a certificate without renewal configuration'
+
+      rescue:
+        - name: Side Effect | Assert the role named the missing renewal configuration
+          ansible.builtin.assert:
+            that:
+              - >-
+                ansible_failed_result.msg is search('renewal configuration of these certificates is missing:
+                /etc/letsencrypt/renewal/orphan.example.com.conf')
+            fail_msg: '{{ ansible_failed_result.msg | default(ansible_failed_result) }}'
+            quiet: true
+
+    - name: Side Effect | Remove the certificate fixtures
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: absent
+      loop: >-
+        {{ (__side_effect_lineages | map(attribute='name') | list + ['orphan.example.com'])
+           | map('regex_replace', '^(.*)$', '/etc/letsencrypt/live/\1') | list
+           + __side_effect_reuse_files + ['/etc/letsencrypt/renewal-linked'] }}
+
 - name: Side Effect — No reload services
   hosts: all
   gather_facts: false
@@ -779,6 +1176,33 @@
           ansible.builtin.assert:
             that:
               - ansible_failed_result.msg is search("must be an absolute path")
+            fail_msg: '{{ ansible_failed_result.msg | default(ansible_failed_result) }}'
+            quiet: true
+
+    # certbot reads the role-wide key options from cli.ini at every renewal
+    # and refuses to change those of a kept key
+    - name: Side Effect | Refuse a kept key with other key options
+      block:
+        - name: Side Effect | Include certbot role with a kept RSA key next to role-wide ECDSA  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            certbot_certificates:
+              - domains: ['same.example.com']
+                reuse_key: true
+              - domains: ['rsa.example.com']
+                key_type: 'rsa'
+                reuse_key: true
+
+        - name: Side Effect | Fail when the kept key with other key options was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a kept RSA key next to role-wide ECDSA'
+
+      rescue:
+        - name: Side Effect | Assert the role refused only the kept key with other key options
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search('keeps the key of rsa\.example\.com \(reuse_key\)')
             fail_msg: '{{ ansible_failed_result.msg | default(ansible_failed_result) }}'
             quiet: true
 

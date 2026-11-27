@@ -98,6 +98,7 @@ provisioner:
           - '192.0.2.20'
           - '2001:db8::20'
         postfix_dns_resolver: '127.0.0.1'
+        postfix_dns_tlsa_enabled: true
         postfix_dns_resolver_port: '{{ molecule_dns_port }}'
         # PostfixAdmin with the read-only users of Postfix and Dovecot; the
         # accounts come from shared/vars/accounts.yml

@@ -336,3 +336,14 @@ postfix_dns_addresses: []
 
 # Expected SPF record of the mail domains ('' skips the SPF check)
 postfix_dns_spf: 'v=spf1 mx -all'
+
+# Print and check the DANE TLSA record of port 25: '3 1 1', the SHA-256 of
+# the public key of postfix_tls_cert_file, computed on the host (installs
+# openssl). Needs DNSSEC on the zone of postfix_myhostname and a key that
+# stays the same at renewal (marcstraube.server.certbot: reuse_key).
+postfix_dns_tlsa_enabled: false
+
+# certbot configuration directory (certbot_config_dir of
+# marcstraube.server.certbot): a postfix_tls_cert_file below its live/
+# directory is checked for reuse_key in its renewal configuration
+postfix_dns_tlsa_certbot_dir: '/etc/letsencrypt'

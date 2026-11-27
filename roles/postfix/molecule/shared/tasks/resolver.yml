@@ -21,6 +21,14 @@
   vars:
     __prepare_resolv_lines: '{{ (__prepare_resolv_conf.content | b64decode).splitlines() | map("trim") | list }}'
 
+# TLSA record of the test certificate (DANE '3 1 1', SHA-256 of the
+# public key), computed with community.crypto independent of the openssl
+# command of the role
+- name: Prepare | Read the public key of the test certificate
+  community.crypto.x509_certificate_info:
+    path: /etc/molecule-tls/mail.pem
+  register: __prepare_mail_certificate
+
 # Below /etc/dnsmasq.d: an AppArmor profile for dnsmasq on the container host
 # attaches by path to the dnsmasq inside the container and only allows its
 # standard configuration paths

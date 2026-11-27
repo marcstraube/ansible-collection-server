@@ -78,3 +78,32 @@ __certbot_reload_retry_cron_job: '{{ __certbot_reload_script }} --retry'
 __certbot_certificate_post_hooks: >-
   {{ certbot_certificates | selectattr('post_hook', 'defined')
      | map(attribute='post_hook') | select | list }}
+
+# Names of the entries of certbot_certificates that keep their key with key
+# options other than the role-wide ones. certbot reads them from cli.ini at
+# every renewal, where they replace the saved options of the certificate,
+# and refuses to change the options of a kept key: the renewal would fail.
+__certbot_reuse_key_conflicts: >-
+  {%- set ns = namespace(names=[]) -%}
+  {%- for cert in certbot_certificates if cert.reuse_key | default(certbot_reuse_key) | bool -%}
+  {%- set key_type = cert.key_type | default(certbot_key_type) -%}
+  {%- if key_type != certbot_key_type
+        or (key_type == 'rsa'
+            and cert.rsa_key_size | default(certbot_rsa_key_size) | int != certbot_rsa_key_size | int)
+        or (key_type == 'ecdsa'
+            and cert.elliptic_curve | default(certbot_elliptic_curve) != certbot_elliptic_curve) -%}
+  {%- set ns.names = ns.names + [cert.name | default(cert.domains[0])] -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {{ ns.names }}
+
+# Key options of a certificate on the certonly command line. Input:
+# __certbot_cert, an entry of certbot_certificates
+__certbot_key_type: '{{ __certbot_cert.key_type | default(certbot_key_type) }}'
+__certbot_key_args: >-
+  {{ ['--key-type', __certbot_key_type]
+     + (['--rsa-key-size', __certbot_cert.rsa_key_size | default(certbot_rsa_key_size) | string]
+        if __certbot_key_type == 'rsa' else [])
+     + (['--elliptic-curve', __certbot_cert.elliptic_curve | default(certbot_elliptic_curve)]
+        if __certbot_key_type == 'ecdsa' else [])
+     + (['--reuse-key'] if __certbot_cert.reuse_key | default(certbot_reuse_key) | bool else []) }}

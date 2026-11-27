@@ -20,6 +20,12 @@ local=/example.net/
 # The MTA (host-record also writes the PTR records)
 host-record=mail.example.com,192.0.2.20,2001:db8::21
 
+# TLSA record of port 25 (type 52: usage 3, selector 1, matching type 1,
+# the SHA-256 of the public key of the test certificate)
+dns-rr=_25._tcp.mail.example.com,52,030101{{ __prepare_mail_certificate.public_key_fingerprints.sha256 | replace(':', '') }}
+# and of another key, as during a key rollover
+dns-rr=_25._tcp.mail.example.com,52,030101{{ 'ab' * 32 }}
+
 # The MariaDB server of the instance for the lookups over TLS (mariadb)
 host-record=db.example.com,127.0.0.1
 
