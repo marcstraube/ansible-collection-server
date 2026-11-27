@@ -3,6 +3,35 @@
 # Shared Variables
 #
 
+# Directory certbot reads cli.ini from without --config (certbot's
+# CLI_DEFAULTS, the same on every platform)
+__certbot_default_config_dir: '/etc/letsencrypt'
+
+# Characters certbot_config_dir may contain: it ends up unquoted in systemd
+# ExecStart (where % starts a specifier), in the EL environment file (split
+# at whitespace) and in the cron job (shell, where % ends the command). \Z,
+# as $ would also accept a trailing newline.
+__certbot_config_dir_pattern: '^/[A-Za-z0-9._/@+-]+\Z'
+
+# certbot_config_dir without trailing slashes, so '/etc/letsencrypt/' counts
+# as the default directory
+__certbot_config_dir_real: "{{ certbot_config_dir | regex_replace('(?<=.)/+$', '') }}"
+
+# Points certbot at the cli.ini of the role, which sets config-dir, work-dir
+# and logs-dir, when certbot_config_dir is another directory. Every certbot
+# command of the role and the renew command of the renewal unit and the cron
+# job carry it. One word, as the EL renewal unit splits $CERTBOT_ARGS at
+# whitespace. Empty with the default directory, so the commands stay as the
+# packages ship them.
+__certbot_config_arg: >-
+  {{ '' if __certbot_config_dir_real == __certbot_default_config_dir
+     else '--config=' ~ __certbot_config_dir_real ~ '/cli.ini' }}
+
+# Comment the role writes directly above the CERTBOT_ARGS line it owns in the
+# EL environment file. Only a line under it is the role's; the role never
+# touches a CERTBOT_ARGS line without it.
+__certbot_args_marker: '# Managed by Ansible (marcstraube.server.certbot): CERTBOT_ARGS'
+
 # Services reloaded after a renewal run and after an issuance in a play
 __certbot_reload_services: >-
   {{
@@ -19,6 +48,15 @@ __certbot_reload_script: '/usr/local/sbin/certbot-reload-services'
 
 # Post hook value the role writes on EL (POST_HOOK in the environment file)
 __certbot_post_hook_arg: '--post-hook={{ __certbot_reload_script }}'
+
+# Options the role adds to the packaged renew command: on Debian and Arch
+# Linux through the drop-in of the renewal unit, which exists only with
+# options, and in the cron job (EL: environment file, see renewal.yml)
+__certbot_renew_options: >-
+  {{
+    ([__certbot_config_arg] if __certbot_config_arg | length > 0 else []) +
+    ([__certbot_post_hook_arg] if __certbot_reload_services | length > 0 else [])
+  }}
 
 # Marker the script leaves after a failed check or reload; root only
 __certbot_reload_marker_dir: '/var/lib/certbot-reload-services'

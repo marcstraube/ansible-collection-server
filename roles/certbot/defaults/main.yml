@@ -209,6 +209,11 @@ certbot_work_dir: '/var/lib/letsencrypt'
 # Let's Encrypt log directory
 certbot_log_dir: '/var/log/letsencrypt'
 
+# Run with another certbot_config_dir although /etc/letsencrypt/renewal still
+# holds renewal configurations, which certbot then no longer renews (for
+# example when another tool manages the certificates there)
+certbot_default_dir_leftovers_ok: false
+
 # =============================================================================
 # CERTIFICATE MANAGEMENT
 # =============================================================================

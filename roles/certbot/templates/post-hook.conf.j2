@@ -1,6 +1,13 @@
 {{ ansible_managed | comment }}
+{% if __certbot_reload_services | length > 0 %}
 # Packaged renew command plus the service reload script as post hook, which
 # certbot runs once per renewal run and only when it attempted a renewal.
+{% else %}
+# Packaged renew command.
+{% endif %}
+{% if __certbot_config_arg | length > 0 %}
+# --config points certbot at the cli.ini of the role in {{ certbot_config_dir }}.
+{% endif %}
 [Service]
 ExecStart=
-ExecStart={{ __certbot_renew_command }} --post-hook={{ __certbot_reload_script }}
+ExecStart={{ ([__certbot_renew_command] + __certbot_renew_options) | join(' ') }}

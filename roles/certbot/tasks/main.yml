@@ -46,6 +46,73 @@
   tags:
     - always
 
+# The renew command carries --config=<dir>/cli.ini unquoted: in systemd
+# ExecStart, the EL environment file and the cron job
+- name: Main | Assert certbot_config_dir is an absolute path of plain characters
+  ansible.builtin.assert:
+    that:
+      - certbot_config_dir is match(__certbot_config_dir_pattern)
+    fail_msg: >-
+      certbot_config_dir '{{ certbot_config_dir }}' must be an absolute path
+      of letters, digits and . _ / @ + - only; the renew command passes it
+      unquoted to systemd, the EL environment file and cron.
+    quiet: true
+  when: certbot_enabled | bool
+  tags:
+    - always
+
+#
+# Certificates in the Default Directory
+#
+# With another certbot_config_dir certbot renews only the certificates there.
+# Certificates in the default directory, for example from a role version that
+# did not pass --config yet, would expire unnoticed, so the run fails before
+# any change. Read only; tagged always, so runs limited by tags check it too.
+#
+
+- name: Main | Check the renewal directory of the default directory
+  ansible.builtin.stat:
+    path: '{{ __certbot_default_config_dir }}/renewal'
+  register: __certbot_default_renewal_dir
+  check_mode: false
+  when:
+    - certbot_enabled | bool
+    - __certbot_config_arg | length > 0
+    - not certbot_default_dir_leftovers_ok | bool
+  tags:
+    - always
+
+- name: Main | Find renewal configurations in the default directory
+  ansible.builtin.find:
+    paths: '{{ __certbot_default_config_dir }}/renewal'
+    patterns: '*.conf'
+    file_type: any
+  register: __certbot_default_renewal_confs
+  check_mode: false
+  when:
+    - __certbot_default_renewal_dir is not skipped
+    - __certbot_default_renewal_dir.stat.isdir | default(false)
+  tags:
+    - always
+
+- name: Main | Assert the default directory holds no renewal configurations
+  ansible.builtin.assert:
+    that:
+      - __certbot_default_renewal_confs.files | length == 0
+    fail_msg: >-
+      {{ __certbot_default_config_dir }}/renewal holds renewal configurations
+      ({{ __certbot_default_renewal_confs.files | map(attribute='path') | map('basename') | sort | join(', ') }}),
+      but certbot_config_dir is {{ certbot_config_dir }}: certbot would no
+      longer renew these certificates. Move them to certbot_config_dir, remove
+      them once nothing reads them, or set certbot_config_dir to
+      {{ __certbot_default_config_dir }}; see MIGRATION.md of the collection.
+      Set certbot_default_dir_leftovers_ok to true when another tool manages
+      them.
+    quiet: true
+  when: __certbot_default_renewal_confs is not skipped
+  tags:
+    - always
+
 - name: Main | Import preflight tasks
   ansible.builtin.import_tasks: preflight.yml
   when: certbot_enabled | bool

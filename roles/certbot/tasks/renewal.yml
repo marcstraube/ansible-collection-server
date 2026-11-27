@@ -109,8 +109,49 @@
     - __certbot_reload_services | length == 0
     - not (ansible_check_mode and __certbot_install | default({}) is changed)
 
+# EL: certbot-renew.service also passes $CERTBOT_ARGS, expanded like
+# $POST_HOOK. With a certbot_config_dir other than the default the last
+# CERTBOT_ARGS line (the one systemd uses) carries --config=<dir>/cli.ini under
+# the marker of the role; preflight.yml failed before when a CERTBOT_ARGS line
+# without the marker holds a value.
+- name: Renewal | Set the cli.ini of the renewal unit (EL)
+  ansible.builtin.replace:
+    path: '{{ __certbot_sysconfig_file }}'
+    regexp: '^(?:{{ __certbot_args_marker | regex_escape }}\n)?CERTBOT_ARGS=.*$(?![\s\S]*^CERTBOT_ARGS=)'
+    replace: '{{ __certbot_args_marker }}\nCERTBOT_ARGS="{{ __certbot_config_arg }}"'
+  when:
+    - __certbot_sysconfig_file | default('') | length > 0
+    - __certbot_config_arg | length > 0
+    - not (ansible_check_mode and __certbot_install | default({}) is changed)
+
+# The packaged file has a CERTBOT_ARGS line; preflight.yml read whether a
+# file that existed before the run still has one
+- name: Renewal | Add the cli.ini of the renewal unit (EL)
+  ansible.builtin.lineinfile:
+    path: '{{ __certbot_sysconfig_file }}'
+    # Two lines; the task runs only while the file has no CERTBOT_ARGS line
+    line: "{{ __certbot_args_marker }}\nCERTBOT_ARGS=\"{{ __certbot_config_arg }}\""
+  when:
+    - __certbot_sysconfig_file | default('') | length > 0
+    - __certbot_config_arg | length > 0
+    - __certbot_sysconfig_content is not skipped
+    - __certbot_sysconfig_content.content | b64decode is not search('(?m)^CERTBOT_ARGS=')
+
+# With the default directory only the line under the marker of the role is
+# reset, and the marker removed; any other CERTBOT_ARGS line stays as it is
+- name: Renewal | Reset the cli.ini of the renewal unit (EL)
+  ansible.builtin.replace:
+    path: '{{ __certbot_sysconfig_file }}'
+    regexp: '^{{ __certbot_args_marker | regex_escape }}\nCERTBOT_ARGS=.*$'
+    replace: 'CERTBOT_ARGS=""'
+  when:
+    - __certbot_sysconfig_file | default('') | length > 0
+    - __certbot_config_arg | length == 0
+    - not (ansible_check_mode and __certbot_install | default({}) is changed)
+
 # Debian and Arch Linux: the packaged unit has no hook variable, so a drop-in
-# replaces ExecStart with the packaged renew command plus the post hook.
+# replaces ExecStart with the packaged renew command plus the post hook and
+# --config (__certbot_renew_options); without them there is no drop-in.
 - name: Renewal | Create the renewal unit drop-in directory
   ansible.builtin.file:
     path: '/etc/systemd/system/{{ __certbot_service_name }}.d'
@@ -121,9 +162,9 @@
   register: __certbot_dropin_dir_result
   when:
     - __certbot_renew_command | default('') | length > 0
-    - __certbot_reload_services | length > 0
+    - __certbot_renew_options | length > 0
 
-- name: Renewal | Deploy the post hook drop-in of the renewal unit
+- name: Renewal | Deploy the drop-in of the renewal unit
   ansible.builtin.template:
     src: post-hook.conf.j2
     dest: '/etc/systemd/system/{{ __certbot_service_name }}.d/post-hook.conf'
@@ -134,17 +175,17 @@
   # Check mode does not create the directory the template writes into
   when:
     - __certbot_renew_command | default('') | length > 0
-    - __certbot_reload_services | length > 0
+    - __certbot_renew_options | length > 0
     - not (ansible_check_mode and __certbot_dropin_dir_result is changed)
 
-- name: Renewal | Remove the post hook drop-in of the renewal unit
+- name: Renewal | Remove the drop-in of the renewal unit
   ansible.builtin.file:
     path: '/etc/systemd/system/{{ __certbot_service_name }}.d/post-hook.conf'
     state: absent
   register: __certbot_dropin_absent_result
   when:
     - __certbot_renew_command | default('') | length > 0
-    - __certbot_reload_services | length == 0
+    - __certbot_renew_options | length == 0
 
 # Right away, so the checks below read the effective unit
 - name: Renewal | Reload systemd units after a drop-in change
@@ -158,10 +199,15 @@
   ansible.builtin.systemd_service:
     name: '{{ __certbot_service_name }}'
   register: __certbot_renew_unit
+  # In check mode a changed drop-in is not in effect yet
   when:
     - __certbot_renew_command | default('') | length > 0
-    - __certbot_reload_services | length > 0
+    - __certbot_renew_options | length > 0
     - not (ansible_check_mode and __certbot_install | default({}) is changed)
+    - >-
+      not (ansible_check_mode
+      and (__certbot_dropin_dir_result | default({}) is changed
+           or __certbot_dropin_result | default({}) is changed))
 
 # A masked or missing unit has no ExecStart to check; the renewal does not
 # run then either
@@ -169,7 +215,7 @@
   ansible.builtin.debug:
     msg: >-
       {{ __certbot_service_name }} is {{ __certbot_renew_unit.status.LoadState | default('not found') }},
-      so the renewal does not run and the post hook drop-in has no effect.
+      so the renewal does not run and the drop-in of the role has no effect.
   when:
     - __certbot_renew_unit is not skipped
     - __certbot_renew_unit.status.LoadState | default('') != 'loaded'
@@ -188,7 +234,7 @@
   ansible.builtin.debug:
     msg: >-
       The packaged {{ __certbot_service_name }} no longer runs
-      '{{ __certbot_renew_command }}'. The post hook drop-in replaces its
+      '{{ __certbot_renew_command }}'. The drop-in of the role replaces its
       ExecStart with that command, so the change of the package is not in
       effect. Update __certbot_renew_command in the vars of the certbot role.
   when:
@@ -198,16 +244,16 @@
       not in (__certbot_renew_unit_file.content | b64decode).splitlines()
 
 # Another drop-in that adds ExecStart would make the unit renew twice, the
-# second time without the post hook; one that replaces ExecStart drops the
-# post hook
-- name: Renewal | Assert the renewal unit runs a single renew command with the post hook
+# second time without the post hook and --config; one that replaces
+# ExecStart drops them
+- name: Renewal | Assert the renewal unit runs a single renew command with the options of the role
   ansible.builtin.assert:
     that:
       - (__certbot_renew_unit.status.ExecStart | default('')).count('argv[]=') == 1
-      - __certbot_post_hook_arg in __certbot_renew_unit.status.ExecStart | default('')
+      - __certbot_renew_options | reject('in', __certbot_renew_unit.status.ExecStart | default('')) | list | length == 0
     fail_msg: >-
       {{ __certbot_service_name }} does not run exactly one renew command with
-      {{ __certbot_post_hook_arg }} (ExecStart:
+      {{ __certbot_renew_options | join(' ') }} (ExecStart:
       {{ __certbot_renew_unit.status.ExecStart | default('') }}). Another
       drop-in in /etc/systemd/system/{{ __certbot_service_name }}.d sets
       ExecStart; remove it or clear ExecStart there.
@@ -251,9 +297,7 @@
     day: "{{ certbot_cron_day }}"
     month: "{{ certbot_cron_month }}"
     weekday: "{{ certbot_cron_weekday }}"
-    job: >-
-      certbot renew --quiet{{ (' --post-hook=' ~ __certbot_reload_script)
-      if __certbot_reload_services | length > 0 else '' }}
+    job: "{{ (['certbot renew --quiet'] + __certbot_renew_options) | join(' ') }}"
     user: 'root'
     state: "{{ (certbot_auto_renew | bool and not certbot_use_systemd_timer | bool) | ternary('present', 'absent') }}"
   when: not (certbot_use_systemd_timer | bool) or __certbot_crontab_stat.stat.exists
