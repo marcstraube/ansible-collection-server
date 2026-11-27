@@ -186,6 +186,40 @@ and its settings apply wherever the `cli.ini` of the role does not set them.
 `. _ / @ + -`, and on EL the role fails while a `CERTBOT_ARGS` line it did not
 write holds a value; move such options to `certbot_custom_config`.
 
+### `certbot` — certificates keep the key options they were issued with
+
+All hosts with the role are affected. Up to v1.1.4 the role wrote `key-type`
+and `rsa-key-size` or `elliptic-curve` to `cli.ini`. certbot reads that file
+at every renewal and gave those values precedence over the key options saved
+for each certificate: every renewal created a key with the role-wide
+options, also for an entry of `certbot_certificates` with its own `key_type`,
+`rsa_key_size` or `elliptic_curve`. The role now passes
+the key options on the certonly command line only; certbot saves them for the
+certificate, and every renewal keeps them.
+
+#### Required action
+
+Nothing while the key options stay the same. After the upgrade:
+
+- A change of `certbot_key_type`, `certbot_rsa_key_size` or
+  `certbot_elliptic_curve` applies to certificates the role requests from
+  then on, no longer to existing ones at their next renewal. Move an existing
+  certificate to the new options by hand, as the README of the role shows
+  under Certificate Defaults (`certbot renew --cert-name <name>
+  --force-renewal` with the key options, `--config` for another
+  `certbot_config_dir`, then the service reload; `--new-key` and, with DANE,
+  the rollover of the postfix role for a certificate with `reuse_key`).
+- An entry whose own key options an earlier renewal replaced with the
+  role-wide ones keeps those; renew it by hand the same way to give it its
+  own options again (`certbot certificates` shows the key type).
+- certbot run by hand no longer takes the key options of the role from
+  `cli.ini`: pass them on the command line when requesting a certificate.
+- Remove key options from `certbot_custom_config`: the role now fails on
+  them, as they would again replace the saved ones at every renewal.
+- With a `certbot_config_dir` other than `/etc/letsencrypt`, remove a
+  `/etc/letsencrypt/cli.ini` left from earlier role versions: certbot still
+  reads it, and its key options would replace the saved ones.
+
 ## v1.1.4 - 2026-11-19
 
 ### `certbot` — services reload once per renewal run, without a restart

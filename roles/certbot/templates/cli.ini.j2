@@ -15,14 +15,8 @@ server = https://acme-staging-v02.api.letsencrypt.org/directory
 server = {{ certbot_server }}
 {% endif %}
 
-key-type = {{ certbot_key_type }}
-
-{% if certbot_key_type == 'rsa' %}
-rsa-key-size = {{ certbot_rsa_key_size }}
-{% elif certbot_key_type == 'ecdsa' %}
-elliptic-curve = {{ certbot_elliptic_curve }}
-{% endif %}
-
+{# No key options: certbot reads cli.ini at every renewal, where they would
+   replace the key options saved for each certificate. certonly passes them. #}
 {% if certbot_preferred_chain | length > 0 %}
 preferred-chain = {{ certbot_preferred_chain }}
 {% endif %}

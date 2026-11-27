@@ -446,8 +446,6 @@
             group: root
             mode: '0755'
 
-        # certificates.yml alone: main.yml would refuse the RSA entry with key
-        # reuse next to the role-wide ECDSA, as cli.ini breaks its renewal
         - name: Side Effect | Run the certificate tasks with key reuse for every certificate  # noqa: role-name[path]
           ansible.builtin.include_role:
             name: '{{ playbook_dir }}/../..'
@@ -1179,30 +1177,28 @@
             fail_msg: '{{ ansible_failed_result.msg | default(ansible_failed_result) }}'
             quiet: true
 
-    # certbot reads the role-wide key options from cli.ini at every renewal
-    # and refuses to change those of a kept key
-    - name: Side Effect | Refuse a kept key with other key options
+    # A key option in cli.ini would replace those saved for each certificate
+    - name: Side Effect | Refuse key options in certbot_custom_config
       block:
-        - name: Side Effect | Include certbot role with a kept RSA key next to role-wide ECDSA  # noqa: role-name[path]
+        - name: Side Effect | Include certbot role with a key option in certbot_custom_config  # noqa: role-name[path]
           ansible.builtin.include_role:
             name: '{{ playbook_dir }}/../..'
           vars:
-            certbot_certificates:
-              - domains: ['same.example.com']
-                reuse_key: true
-              - domains: ['rsa.example.com']
-                key_type: 'rsa'
-                reuse_key: true
+            certbot_custom_config: |
+              no-eff-email = true
+                rsa-key-size: 4096
 
-        - name: Side Effect | Fail when the kept key with other key options was accepted
+        - name: Side Effect | Fail when the key option in certbot_custom_config was accepted
           ansible.builtin.fail:
-            msg: 'The role accepted a kept RSA key next to role-wide ECDSA'
+            msg: 'The role accepted rsa-key-size in certbot_custom_config'
 
       rescue:
-        - name: Side Effect | Assert the role refused only the kept key with other key options
+        - name: Side Effect | Assert the role refused the key option in certbot_custom_config
           ansible.builtin.assert:
             that:
-              - ansible_failed_result.msg is search('keeps the key of rsa\.example\.com \(reuse_key\)')
+              - >-
+                ansible_failed_result.msg
+                is search('certbot_custom_config sets key-type, rsa-key-size or elliptic-curve')
             fail_msg: '{{ ansible_failed_result.msg | default(ansible_failed_result) }}'
             quiet: true
 

@@ -132,8 +132,9 @@
         that:
           - "'email = test@example.com' in (__certbot_cli_ini_content.content | b64decode)"
           - "'agree-tos = true' in (__certbot_cli_ini_content.content | b64decode)"
-          - "'key-type = ecdsa' in (__certbot_cli_ini_content.content | b64decode)"
-          - "'elliptic-curve = secp384r1' in (__certbot_cli_ini_content.content | b64decode)"
+          - "'key-type' not in (__certbot_cli_ini_content.content | b64decode)"
+          - "'elliptic-curve' not in (__certbot_cli_ini_content.content | b64decode)"
+          - "'rsa-key-size' not in (__certbot_cli_ini_content.content | b64decode)"
           - "'staging' in (__certbot_cli_ini_content.content | b64decode)"
         fail_msg: 'cli.ini does not contain expected settings'
         success_msg: 'cli.ini contains expected settings'

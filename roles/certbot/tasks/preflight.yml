@@ -60,9 +60,9 @@
     fail_msg: >-
       CERTBOT_ARGS in {{ __certbot_sysconfig_file }} is set to
       {{ __certbot_args_foreign | join(', ') }}, which {{ __certbot_config_arg }}
-      for certbot_config_dir would replace. Move renew options to
-      certbot_custom_config (cli.ini, which certbot reads on renewal as well)
-      or remove them, and leave a single CERTBOT_ARGS="" there.
+      for certbot_config_dir would replace. Move renew options other than key
+      options to certbot_custom_config (cli.ini, which certbot reads on
+      renewal as well) or remove them, and leave a single CERTBOT_ARGS="" there.
     quiet: true
   vars:
     # Lines under the marker of the role are its own

@@ -350,8 +350,8 @@ certbot_extra_args: []
 #   - '--debug'
 #   - '--non-interactive'
 
-# Custom configuration file content
+# Custom configuration file content, read by certbot at every run. No key
+# options: they would replace those saved for each certificate at renewal.
 certbot_custom_config: ''
 # Example: |
-#   rsa-key-size = 4096
-#   email = admin@example.com
+#   no-eff-email = true
