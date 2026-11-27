@@ -2,7 +2,7 @@
 # Runs after verify.yml. The first play checks the refusal of a certificate
 # post hook and of a foreign POST_HOOK (EL), the read-only check of saved post
 # hooks, the cron job with post hook and retry, and a configured unit that
-# does not exist. The second play removes all reload services, the third
+# does not exist, at a renewal and at an issuance. The second play removes all reload services, the third
 # checks that the role removed the script and every reference to it, and the
 # fourth one that a foreign POST_HOOK survives the removal (EL). The last two
 # check the command lines of the certificate tasks and the renewal with
@@ -240,6 +240,125 @@
           - __side_effect_marker_missing.stat.exists
         fail_msg: '{{ __side_effect_reload_missing.stdout_lines + __side_effect_reload_missing.stderr_lines }}'
         quiet: true
+
+    - name: Side Effect | Retry the reload with the missing unit
+      ansible.builtin.command:
+        cmd: /usr/local/sbin/certbot-reload-services --retry
+      register: __side_effect_retry_missing
+      changed_when: false
+      failed_when: >-
+        __side_effect_retry_missing.rc != 1
+        or 'molecule-missing.service: unit not found, not reloaded' not in __side_effect_retry_missing.stderr
+
+    # The issuance on a host where a later play installs the service: the
+    # handler skips the missing unit and reloads the rest. It does not clear
+    # the marker of the failure above, and leaves none of its own.
+    - name: Side Effect | Read the reload count of the test unit before the handlers
+      ansible.builtin.command:
+        cmd: cat /run/molecule-reload-test.log
+      register: __side_effect_reloads_before
+      changed_when: false
+      failed_when: false
+
+    - name: Side Effect | Notify the certificate handler with a pending reload
+      ansible.builtin.command:
+        cmd: 'true'
+      changed_when: true
+      notify: Reload cert services
+
+    - name: Side Effect | Run the certificate handler with a pending reload
+      ansible.builtin.meta: flush_handlers
+
+    - name: Side Effect | Check the retry marker after the handler
+      ansible.builtin.stat:
+        path: /var/lib/certbot-reload-services/pending
+      register: __side_effect_marker_kept
+
+    - name: Side Effect | Remove the retry marker
+      ansible.builtin.file:
+        path: /var/lib/certbot-reload-services/pending
+        state: absent
+
+    - name: Side Effect | Notify the certificate handler
+      ansible.builtin.command:
+        cmd: 'true'
+      changed_when: true
+      notify: Reload cert services
+
+    - name: Side Effect | Run the certificate handler
+      ansible.builtin.meta: flush_handlers
+
+    - name: Side Effect | Check the retry marker after the second handler run
+      ansible.builtin.stat:
+        path: /var/lib/certbot-reload-services/pending
+      register: __side_effect_marker_issuance
+
+    - name: Side Effect | Read the reload count of the test unit after the handlers
+      ansible.builtin.command:
+        cmd: cat /run/molecule-reload-test.log
+      register: __side_effect_reloads_after
+      changed_when: false
+
+    - name: Side Effect | Run the service reload script as the handler does
+      ansible.builtin.command:
+        cmd: /usr/local/sbin/certbot-reload-services --issuance
+      register: __side_effect_reload_issuance
+      changed_when: false
+      failed_when: false
+
+    - name: Side Effect | Assert the issuance skips a missing unit
+      ansible.builtin.assert:
+        that:
+          - >-
+            __side_effect_reloads_after.stdout_lines | length
+            == __side_effect_reloads_before.stdout_lines | length + 2
+          - "__certbot_reload_result.stderr_lines | select('search', 'unit not found, skipped$') | list | length == 1"
+          - __side_effect_marker_kept.stat.exists
+          - not __side_effect_marker_issuance.stat.exists
+          - __side_effect_reload_issuance.rc == 0
+          - "'certbot-reload-services: molecule-missing.service: unit not found, skipped'
+            in __side_effect_reload_issuance.stderr_lines"
+          - "'certbot-reload-services: nginx reloaded' in __side_effect_reload_issuance.stdout_lines"
+        fail_msg: >-
+          marker kept {{ __side_effect_marker_kept.stat.exists }},
+          marker left {{ __side_effect_marker_issuance.stat.exists }},
+          {{ __side_effect_reload_issuance.stdout_lines + __side_effect_reload_issuance.stderr_lines }}
+        quiet: true
+
+    # A failure of another service still fails the issuance
+    - name: Side Effect | Fail the issuance on a broken configuration
+      block:
+        - name: Side Effect | Break the nginx configuration
+          ansible.builtin.copy:
+            content: "this_is_not_a_directive;\n"
+            dest: /etc/nginx/molecule.d/broken.conf
+            owner: root
+            group: root
+            mode: '0644'
+
+        - name: Side Effect | Run the service reload script for the issuance with a broken service
+          ansible.builtin.command:
+            cmd: /usr/local/sbin/certbot-reload-services --issuance
+          register: __side_effect_issuance_broken
+          changed_when: false
+          failed_when: __side_effect_issuance_broken.rc != 1
+
+        - name: Side Effect | Check the retry marker after the failed issuance
+          ansible.builtin.stat:
+            path: /var/lib/certbot-reload-services/pending
+          register: __side_effect_marker_broken
+          failed_when: not __side_effect_marker_broken.stat.exists
+
+      always:
+        - name: Side Effect | Restore the nginx configuration
+          ansible.builtin.file:
+            path: /etc/nginx/molecule.d/broken.conf
+            state: absent
+
+        - name: Side Effect | Remove the marker of the failed issuance
+          ansible.builtin.file:
+            path: /var/lib/certbot-reload-services/pending
+            state: absent
 
     # Back to the systemd timer, with the retry timer switched off: both cron
     # jobs go away, the retry units stay but the timer does not run

@@ -1,0 +1,214 @@
+---
+#
+# TLS
+#
+# The checks run first, before the socket group and the drop-in change.
+#
+
+# A missing file stops valkey-server at the start; the check names the
+# file before the configuration changes.
+- name: Configure | Check the TLS files
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  loop: >-
+    {{ [valkey_tls_cert_file, valkey_tls_key_file, valkey_tls_ca_file] | select | list }}
+  register: __valkey_tls_stat
+  when: valkey_tls_enabled | bool
+
+- name: Configure | Assert the TLS files exist
+  ansible.builtin.assert:
+    that:
+      - __valkey_tls_missing | length == 0
+    fail_msg: >-
+      TLS file(s) not found: {{ __valkey_tls_missing | join(', ') }}. Deploy
+      certificate and key (e.g. with marcstraube.common.pki) before enabling
+      valkey_tls_enabled.
+    quiet: true
+  vars:
+    __valkey_tls_missing: >-
+      {{ __valkey_tls_stat.results | default([]) | rejectattr('stat.exists') | map(attribute='item') | list }}
+  when:
+    - valkey_tls_enabled | bool
+    - not ansible_check_mode
+
+# Debian: valkey-server.service runs with PrivateUsers=true and maps every
+# group but the service user's own to nobody, so a key readable through a
+# supplementary group (e.g. ssl-cert) fails at the start. The service reads
+# a file as its owner, through the group valkey or, for certificate and CA,
+# as world-readable. The socket group drop-in sets PrivateUsers=false and
+# lifts the restriction.
+- name: Configure | Assert the service user can read the TLS files (Debian)
+  ansible.builtin.assert:
+    that:
+      - >-
+        (__valkey_tls_file.stat.pw_name == __valkey_user and __valkey_tls_file.stat.rusr)
+        or (__valkey_tls_file.stat.gr_name == __valkey_user and __valkey_tls_file.stat.rgrp)
+        or (__valkey_tls_file.item != valkey_tls_key_file and __valkey_tls_file.stat.roth)
+    fail_msg: >-
+      {{ __valkey_tls_file.item }} ({{ __valkey_tls_file.stat.pw_name }}:{{ __valkey_tls_file.stat.gr_name }}
+      {{ __valkey_tls_file.stat.mode }}) is not readable by the service user {{ __valkey_user }}:
+      {{ __valkey_service_name }}.service runs with PrivateUsers=true, other groups
+      are mapped to nobody. Issue the file with owner '{{ __valkey_user }}' or group
+      '{{ __valkey_user }}' (key mode 0640 or 0600){{ '' if __valkey_tls_file.item == valkey_tls_key_file
+      else ', or world-readable' }}.
+    quiet: true
+  # Without TLS the stat results carry no stat; the loop is templated
+  # before the condition
+  loop: >-
+    {{ __valkey_tls_stat.results | default([]) | selectattr('stat', 'defined')
+       | selectattr('stat.exists') | list }}
+  loop_control:
+    loop_var: __valkey_tls_file
+    label: '{{ __valkey_tls_file.item }}'
+  when:
+    - valkey_tls_enabled | bool
+    - __valkey_private_users | bool
+    - not __valkey_socket_group_dropin_active | bool
+    - not ansible_check_mode
+
+#
+# Unix Socket Group
+#
+# valkey-server changes the group of the socket itself (unixsocketgroup).
+# A process without CAP_CHOWN can only hand a file to a group it belongs
+# to, so the service user joins the socket group.
+#
+
+- name: Configure | Unix socket group
+  ansible.builtin.group:
+    name: '{{ valkey_unix_socket_group }}'
+    system: true
+    state: present
+  register: __valkey_socket_group_result
+  when:
+    - valkey_unix_socket | length > 0
+    - valkey_unix_socket_group | length > 0
+
+- name: Configure | Add the service user to the unix socket group
+  ansible.builtin.user:
+    name: '{{ __valkey_user }}'
+    groups:
+      - '{{ valkey_unix_socket_group }}'
+    append: true
+  register: __valkey_socket_user_result
+  notify: Restart Valkey
+  # Check mode creates neither the group nor, on a new host, the service
+  # user, and the user module refuses a group that does not exist
+  when:
+    - valkey_unix_socket | length > 0
+    - valkey_unix_socket_group | length > 0
+    - not (ansible_check_mode and __valkey_socket_group_result is changed)
+    - not __valkey_check_mode_install | default(false) | bool
+
+# Debian: valkey-server.service maps every group but its own to nobody
+# (PrivateUsers=true) and kills the chown system call (the filter excludes
+# @privileged, which holds @chown). Both block the socket group: without
+# @chown valkey-server dies with SIGSYS, without PrivateUsers=false the
+# chown fails with EINVAL. The drop-in lifts both for the socket group and
+# is removed again without one.
+- name: Configure | Systemd drop-in directory for the socket group (Debian)
+  ansible.builtin.file:
+    path: '/etc/systemd/system/{{ __valkey_service_name }}.service.d'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  register: __valkey_dropin_dir_result
+  when: __valkey_socket_group_dropin_active | bool
+
+- name: Configure | Systemd drop-in for the socket group (Debian)
+  ansible.builtin.template:
+    src: socket-group.conf.j2
+    dest: '/etc/systemd/system/{{ __valkey_service_name }}.service.d/socket-group.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  register: __valkey_dropin_result
+  notify:
+    - Reload Valkey systemd units
+    - Restart Valkey
+  # Check mode does not create the directory the template writes into
+  when:
+    - __valkey_socket_group_dropin_active | bool
+    - not (ansible_check_mode and __valkey_dropin_dir_result is changed)
+
+- name: Configure | Remove the systemd drop-in for the socket group (Debian)
+  ansible.builtin.file:
+    path: '/etc/systemd/system/{{ __valkey_service_name }}.service.d/socket-group.conf'
+    state: absent
+  register: __valkey_dropin_absent_result
+  notify:
+    - Reload Valkey systemd units
+    - Restart Valkey
+  when:
+    - __valkey_socket_group_dropin | bool
+    - not __valkey_socket_group_dropin_active | bool
+
+#
+# SELinux
+#
+# valkey-server runs as redis_t, which may only bind ports labeled
+# redis_port_t (6379, 16379 and 26379 out of the box). Any other plain or
+# TLS port gets the label, or valkey-server fails to bind it with
+# "Permission denied".
+#
+
+- name: Configure | Label additional ports for SELinux
+  community.general.seport:
+    ports: '{{ __valkey_selinux_ports }}'
+    proto: tcp
+    setype: redis_port_t
+    state: present
+  vars:
+    __valkey_selinux_ports: >-
+      {{ ([valkey_port | int]
+          + ([valkey_tls_port | int] if valkey_tls_enabled | bool else []))
+         | reject('equalto', 0) | map('string')
+         | reject('in', __valkey_selinux_default_ports) | unique | list }}
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+    - __valkey_selinux_ports | length > 0
+
+#
+# Configuration
+#
+
+# The role owns users.conf and valkey.conf as a whole. users.conf holds the
+# SHA-256 hashes of the ACL passwords: no_log keeps them out of the diff,
+# valkey.conf holds no secret and shows its diff. valkey.conf includes
+# users.conf, which has to exist before the next start. Check mode on a new
+# host has neither the directory nor the service user that owns the files.
+- name: Configure | Deploy users.conf
+  ansible.builtin.template:
+    src: users.conf.j2
+    dest: '{{ __valkey_users_file }}'
+    owner: '{{ __valkey_config_owner }}'
+    group: '{{ __valkey_config_group }}'
+    mode: '{{ __valkey_config_mode }}'
+  register: __valkey_users_result
+  notify: Restart Valkey
+  no_log: true
+  when: not __valkey_check_mode_install | default(false) | bool
+
+- name: Configure | Deploy valkey.conf
+  ansible.builtin.template:
+    src: valkey.conf.j2
+    dest: '{{ __valkey_config_file }}'
+    owner: '{{ __valkey_config_owner }}'
+    group: '{{ __valkey_config_group }}'
+    mode: '{{ __valkey_config_mode }}'
+  register: __valkey_config_result
+  notify: Restart Valkey
+  when: not __valkey_check_mode_install | default(false) | bool
+
+# The restart handler also listens to the certificate topic, which only
+# concerns Valkey with TLS. It reads this fact to restart for a changed
+# configuration without TLS, so a certificate renewed for another service
+# in the same play does not restart Valkey.
+- name: Configure | Record a configuration change for the restart handler
+  ansible.builtin.set_fact:
+    __valkey_config_changed: >-
+      {{ [__valkey_socket_user_result, __valkey_dropin_result,
+          __valkey_dropin_absent_result, __valkey_users_result, __valkey_config_result]
+         | select('changed') | list | length > 0 }}

@@ -1,0 +1,35 @@
+---
+# No SOGo packages for EL: a local image with the Debian package, run with
+# rootless podman under the sogo user
+__sogo_install_method: 'container'
+__sogo_packages:
+  - 'sogo'
+__sogo_activesync_packages:
+  - 'sogo-activesync'
+__sogo_update_pattern: ''
+
+# Programs in the image, run in a container of their own
+__sogo_tool: '/usr/sbin/sogo-tool'
+__sogo_ealarms_notify: '/usr/sbin/sogo-ealarms-notify'
+__sogo_command_prefix: '{{ __sogo_container_job_prefix }}'
+
+# Unit of the role; the PID check of a replaced binary does not apply
+__sogo_service_name: 'sogo.service'
+__sogo_pid_file: ''
+
+# WOWorkersCount goes into sogo.conf
+__sogo_defaults_file: ''
+
+# The role copies the WebServerResources of the image here
+__sogo_web_resources_path: '{{ sogo_web_resources_dir }}'
+
+# plparse is in the image only
+__sogo_config_validate: ''
+
+# memcached on this host
+__sogo_memcached_packages:
+  - 'memcached'
+__sogo_memcached_service_name: 'memcached.service'
+
+# Socket of a local MariaDB server (sogo_db_create)
+__sogo_mariadb_socket: '/var/lib/mysql/mysql.sock'

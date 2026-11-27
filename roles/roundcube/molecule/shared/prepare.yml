@@ -1,0 +1,379 @@
+---
+# Test environment of the postgresql, mariadb and update scenarios, as on a
+# real host: nginx (role of this collection), PHP-FPM with a dedicated
+# roundcube pool (marcstraube.common.php), the database server of
+# __molecule_db_type, PostfixAdmin with the test mailboxes, the database
+# user of the password plugin, a test certificate and Dovecot with
+# ManageSieve (roles of this collection). EPEL on EL for Dovecot CE.
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - vars/main.yml
+
+  vars:
+    __prepare_packages:
+      Archlinux:
+        - systemd
+        - dbus
+        - procps-ng
+        - iproute2
+        - openssl
+        - python
+      Debian:
+        - systemd
+        - dbus
+        - procps
+        - iproute2
+        - openssl
+        - locales
+      RedHat:
+        - systemd
+        - dbus
+        - procps-ng
+        - iproute
+        - openssl
+        - glibc-langpack-en
+    # Extensions of Roundcube and PostfixAdmin besides the ones every
+    # platform builds in: the PDO driver, intl, mbstring (built in on Arch
+    # Linux), DOM (xml on Debian and EL), iconv (built in on Debian and EL)
+    __prepare_php_extensions:
+      postgresql:
+        Archlinux: ['pdo_pgsql', 'intl', 'iconv']
+        Debian: ['pdo_pgsql', 'intl', 'mbstring', 'xml']
+        RedHat: ['pdo_pgsql', 'intl', 'mbstring', 'xml']
+      mariadb:
+        Archlinux: ['pdo_mysql', 'intl', 'iconv']
+        Debian: ['pdo_mysql', 'intl', 'mbstring', 'xml']
+        RedHat: ['pdo_mysql', 'intl', 'mbstring', 'xml']
+    # EL 9: the php:8.3 module stream, the first with Argon2
+    __prepare_php_version: >-
+      {{ '8.3' if ansible_facts['os_family'] == 'RedHat'
+                 and ansible_facts['distribution_major_version'] == '9' else 'auto' }}
+    __prepare_mariadb_socket: >-
+      {{ '/var/lib/mysql/mysql.sock' if ansible_facts['os_family'] == 'RedHat' else '/run/mysqld/mysqld.sock' }}
+    __prepare_nologin:
+      Archlinux: '/usr/bin/nologin'
+      Debian: '/usr/sbin/nologin'
+      RedHat: '/sbin/nologin'
+
+  tasks:
+    # Sudo PAM bypass — required for tasks using `become_user` on
+    # geerlingguy Rocky containers under GitHub-hosted runners
+    # (test container only).
+
+    - name: Prepare | Bypass sudo PAM stack (RedHat container)
+      ansible.builtin.copy:
+        content: |
+          #%PAM-1.0
+          auth       sufficient   pam_permit.so
+          account    sufficient   pam_permit.so
+          password   sufficient   pam_permit.so
+          session    sufficient   pam_permit.so
+        dest: /etc/pam.d/sudo
+        owner: root
+        group: root
+        mode: '0644'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Disable sudoers authentication (RedHat container)
+      ansible.builtin.copy:
+        content: 'Defaults !authenticate'
+        dest: /etc/sudoers.d/molecule-no-auth
+        owner: root
+        group: root
+        mode: '0440'
+        validate: 'visudo -cf %s'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Update package cache (Arch)
+      community.general.pacman:
+        update_cache: true
+        upgrade: true
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    # The pacman ignore drop-in setup of marcstraube.common.package_management
+    # that the database roles expect; pacman fails on an Include glob
+    # without a match, so a file is in place before the Include line
+    - name: Prepare | Create pacman ignore drop-in directory (Arch)
+      ansible.builtin.file:
+        path: /etc/pacman.d/ignore.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Create pacman ignore drop-in (Arch)
+      ansible.builtin.copy:
+        content: "# molecule\n"
+        dest: /etc/pacman.d/ignore.d/00-molecule.conf
+        owner: root
+        group: root
+        mode: '0644'
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Include pacman ignore drop-ins (Arch)
+      ansible.builtin.lineinfile:
+        path: /etc/pacman.conf
+        line: 'Include = /etc/pacman.d/ignore.d/*.conf'
+        insertafter: '^\[options\]'
+        firstmatch: true
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Update package cache (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Update package cache (RedHat)
+      ansible.builtin.dnf:
+        update_cache: true
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    # Multi-purpose repository the Dovecot CE packages depend on (libunwind);
+    # on a real host it comes from marcstraube.common.package_management
+    - name: Prepare | Install EPEL (RedHat)
+      ansible.builtin.dnf:
+        name: epel-release
+        state: present
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name: '{{ __prepare_packages[ansible_facts["os_family"]] }}'
+        state: present
+      retries: 3
+      delay: 5
+
+    # The PostgreSQL role sets the en_US.UTF-8 locale in the molecule vars
+    - name: Prepare | Generate en_US.UTF-8 locale (Debian)
+      community.general.locale_gen:
+        name: en_US.UTF-8
+        state: present
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Enable PostgreSQL 16 module stream (EL9)
+      ansible.builtin.dnf:
+        name: '@postgresql:16'
+        state: present
+      when:
+        - __molecule_db_type == 'postgresql'
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['distribution_major_version'] == '9'
+
+    #
+    # Web Server and PHP-FPM
+    #
+    # nginx first: on EL its user, the owner of the pool socket, comes with
+    # the package. The pool user has to exist before marcstraube.common.php
+    # writes the pool; on a real host it comes from marcstraube.common.users.
+    #
+
+    - name: Prepare | Include nginx role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../nginx'
+
+    - name: Prepare | Create the PHP-FPM pool group
+      ansible.builtin.group:
+        name: '{{ roundcube_php_fpm_group }}'
+        system: true
+        state: present
+
+    - name: Prepare | Create the PHP-FPM pool user
+      ansible.builtin.user:
+        name: '{{ roundcube_php_fpm_user }}'
+        group: '{{ roundcube_php_fpm_group }}'
+        system: true
+        shell: '{{ __prepare_nologin[ansible_facts["os_family"]] }}'
+        create_home: false
+        state: present
+
+    - name: Prepare | Include php role
+      ansible.builtin.include_role:
+        name: marcstraube.common.php
+      vars:
+        php_versions:
+          - version: '{{ __prepare_php_version }}'
+            # The update scenario adds pdo_sqlite for its SQLite step
+            extensions: >-
+              {{ __prepare_php_extensions[__molecule_db_type][ansible_facts['os_family']]
+                 + __molecule_php_extra_extensions | default([]) }}
+            fpm: true
+            fpm_pools:
+              - name: 'roundcube'
+                user: '{{ roundcube_php_fpm_user }}'
+                group: '{{ roundcube_php_fpm_group }}'
+                listen: '{{ __molecule_fpm_socket }}'
+                listen_owner: '{{ __molecule_web_user[ansible_facts["os_family"]] }}'
+                listen_group: '{{ __molecule_web_user[ansible_facts["os_family"]] }}'
+        php_default_version: '{{ __prepare_php_version }}'
+
+    #
+    # Database and PostfixAdmin
+    #
+
+    - name: Prepare | Include postgresql role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postgresql'
+      when: __molecule_db_type == 'postgresql'
+
+    # A self-signed certificate of the MariaDB server for 127.0.0.1, which
+    # Roundcube verifies (the certificate is its own CA); the key readable
+    # for the mysql user
+    - name: Prepare | Create the MariaDB TLS directory
+      ansible.builtin.file:
+        path: /etc/molecule-tls
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: __molecule_db_type == 'mariadb'
+
+    - name: Prepare | Create the MariaDB test certificate
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -newkey
+          - rsa:2048
+          - -nodes
+          - -days
+          - '30'
+          - -subj
+          - '/CN=localhost'
+          - -addext
+          - 'subjectAltName=DNS:localhost,IP:127.0.0.1'
+          - -keyout
+          - /etc/molecule-tls/db.key
+          - -out
+          - /etc/molecule-tls/db.pem
+        creates: /etc/molecule-tls/db.pem
+      when: __molecule_db_type == 'mariadb'
+
+    - name: Prepare | Make the MariaDB test key readable
+      ansible.builtin.file:
+        path: '{{ item }}'
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - /etc/molecule-tls/db.key
+        - /etc/molecule-tls/db.pem
+      when: __molecule_db_type == 'mariadb'
+
+    - name: Prepare | Include mariadb role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../mariadb'
+      when: __molecule_db_type == 'mariadb'
+
+    - name: Prepare | Include postfixadmin role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postfixadmin'
+
+    # The privileges of the README: the user reads the login name and
+    # writes the hash and the change time of a mailbox, nothing else
+    - name: Prepare | Create the password plugin user (PostgreSQL)
+      community.postgresql.postgresql_user:
+        name: '{{ __molecule_password_db_user }}'
+        password: '{{ __molecule_password_db_password }}'
+        state: present
+      become: true
+      become_user: postgres
+      when: __molecule_db_type == 'postgresql'
+
+    - name: Prepare | Grant the password plugin user its columns (PostgreSQL)
+      community.postgresql.postgresql_query:
+        login_db: 'postfixadmin'
+        query: >-
+          GRANT SELECT (username), UPDATE (password, modified) ON mailbox
+          TO {{ __molecule_password_db_user }}
+      become: true
+      become_user: postgres
+      changed_when: false
+      when: __molecule_db_type == 'postgresql'
+
+    - name: Prepare | Create the password plugin user (MariaDB)
+      ansible.mariadb.mariadb_user:
+        name: '{{ __molecule_password_db_user }}'
+        host: 'localhost'
+        password: '{{ __molecule_password_db_password }}'
+        login_unix_socket: '{{ __prepare_mariadb_socket }}'
+        state: present
+      when: __molecule_db_type == 'mariadb'
+
+    - name: Prepare | Grant the password plugin user its columns (MariaDB)
+      ansible.mariadb.mariadb_query:
+        login_db: 'postfixadmin'
+        login_unix_socket: '{{ __prepare_mariadb_socket }}'
+        query: >-
+          GRANT SELECT (username), UPDATE (password, modified) ON postfixadmin.mailbox
+          TO '{{ __molecule_password_db_user }}'@'localhost'
+      changed_when: false
+      when: __molecule_db_type == 'mariadb'
+
+    #
+    # Test Certificate and Dovecot
+    #
+
+    - name: Prepare | Create the private key directory
+      ansible.builtin.file:
+        path: /etc/ssl/private
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Prepare | Create the test certificate
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -newkey
+          - rsa:2048
+          - -nodes
+          - -days
+          - '30'
+          - -subj
+          - '/CN=mail.example.com'
+          - -addext
+          - 'subjectAltName=DNS:mail.example.com,DNS:localhost'
+          - -keyout
+          - '{{ __molecule_tls_key }}'
+          - -out
+          - '{{ __molecule_tls_cert }}'
+        creates: '{{ __molecule_tls_cert }}'
+
+    - name: Prepare | Restrict the test key
+      ansible.builtin.file:
+        path: '{{ __molecule_tls_key }}'
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Prepare | Make the test certificate readable
+      ansible.builtin.file:
+        path: '{{ __molecule_tls_cert }}'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Include dovecot role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../dovecot'
+
+    # After every other role: the host has AppArmor for the role under test
+    - name: Prepare | Set up AppArmor
+      ansible.builtin.include_tasks: tasks/apparmor_host.yml
+      when: __molecule_apparmor | default(false) | bool

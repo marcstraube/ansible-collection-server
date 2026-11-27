@@ -1,0 +1,138 @@
+---
+name: Update PostfixAdmin Version
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly Monday 6:00 UTC
+  workflow_dispatch:       # Manual trigger
+
+# The job only reads the repository; the pull request is pushed and opened
+# with the release bot app token.
+permissions:
+  contents: read
+
+jobs:
+  update-postfixadmin:
+    name: Check for new PostfixAdmin release
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      # The role installs the release archive postfixadmin-v<version>-php84
+      # (the build for PHP 8.1 and newer) and verifies its SHA-256 checksum.
+      # The role default follows the release GitHub marks as latest; tags
+      # are v<X.Y.Z>, older 3.x tags (postfixadmin-3.3.x) never become
+      # latest again. The bump waits until the php84 archive is attached.
+      - name: Get latest PostfixAdmin release
+        id: postfixadmin
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RELEASE=$(gh api repos/postfixadmin/postfixadmin/releases/latest)
+          TAG=$(jq -r '.tag_name' <<< "$RELEASE")
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Unexpected latest release tag from GitHub: '$TAG'"
+            exit 1
+          fi
+          LATEST="${TAG#v}"
+          CURRENT=$(grep '^postfixadmin_version:' roles/postfixadmin/defaults/main.yml \
+            | sed "s/.*'\(.*\)'/\1/")
+          NEWER=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | tail -n 1)
+          if [[ "$LATEST" != "$CURRENT" && "$NEWER" == "$LATEST" ]]; then
+            UPDATE=true
+          else
+            UPDATE=false
+          fi
+          ASSET="postfixadmin-${TAG}-php84.tar.gz"
+          DIGEST=$(jq -r --arg name "$ASSET" \
+            '.assets[] | select(.name == $name) | .digest // empty' <<< "$RELEASE")
+          if [[ "$UPDATE" == "true" && -z "$DIGEST" ]]; then
+            UPDATE=false
+            echo "::warning::Release ${TAG} has no ${ASSET} with a digest yet"
+          fi
+          {
+            echo "latest=$LATEST"
+            echo "current=$CURRENT"
+            echo "update=$UPDATE"
+            echo "asset=$ASSET"
+            echo "digest=$DIGEST"
+          } >> "$GITHUB_OUTPUT"
+          echo "Current: $CURRENT, Latest: $LATEST, update: $UPDATE"
+
+      # PostfixAdmin publishes no signature; the checksum is computed from
+      # the downloaded archive and must match the digest GitHub reports for
+      # the asset.
+      - name: Verify the release archive and compute its checksum
+        id: checksum
+        if: steps.postfixadmin.outputs.update == 'true'
+        env:
+          LATEST: ${{ steps.postfixadmin.outputs.latest }}
+          ASSET: ${{ steps.postfixadmin.outputs.asset }}
+          DIGEST: ${{ steps.postfixadmin.outputs.digest }}
+        run: |
+          WORK="$RUNNER_TEMP/postfixadmin"
+          mkdir -p "$WORK"
+          curl -fsSL -o "$WORK/$ASSET" \
+            "https://github.com/postfixadmin/postfixadmin/releases/download/v${LATEST}/${ASSET}"
+          SHA256=$(sha256sum "$WORK/$ASSET" | cut -d' ' -f1)
+          if [[ "sha256:$SHA256" != "$DIGEST" ]]; then
+            echo "::error::${ASSET} checksum sha256:${SHA256} differs from the published ${DIGEST}"
+            exit 1
+          fi
+          tar -tzf "$WORK/$ASSET" "postfixadmin-v${LATEST}-php84/public/upgrade.php" > /dev/null
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+      # Only the role default moves. The update scenario keeps installing
+      # the release pinned in molecule/update/molecule.yml
+      # (__molecule_previous_version), which stays older than every new
+      # default, so the bump PR tests the update and the schema upgrade
+      # from that release to the new one.
+      - name: Update defaults/main.yml
+        if: steps.postfixadmin.outputs.update == 'true'
+        run: |
+          sed -i \
+            -e "s/^postfixadmin_version: '.*'/postfixadmin_version: '${{ steps.postfixadmin.outputs.latest }}'/" \
+            -e "s/^postfixadmin_checksum: '.*'/postfixadmin_checksum: 'sha256:${{ steps.checksum.outputs.sha256 }}'/" \
+            roles/postfixadmin/defaults/main.yml
+
+      # Pull requests opened with github.token do not trigger the CI
+      # workflow; the release bot app token lets the bump PR run the
+      # postfixadmin molecule matrix.
+      - name: Generate release bot token
+        if: steps.postfixadmin.outputs.update == 'true'
+        uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
+      - name: Create Pull Request
+        if: steps.postfixadmin.outputs.update == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          commit-message: >-
+            chore(postfixadmin): update PostfixAdmin version
+            ${{ steps.postfixadmin.outputs.current }} →
+            ${{ steps.postfixadmin.outputs.latest }}
+          branch: chore/update-postfixadmin-${{ steps.postfixadmin.outputs.latest }}
+          title: >-
+            chore(postfixadmin): update PostfixAdmin version to
+            ${{ steps.postfixadmin.outputs.latest }}
+          body: |
+            Automated update of `postfixadmin_version` and `postfixadmin_checksum` in `roles/postfixadmin/defaults/main.yml`.
+
+            - **Previous:** `${{ steps.postfixadmin.outputs.current }}`
+            - **New:** `${{ steps.postfixadmin.outputs.latest }}`
+            - **SHA-256:** `${{ steps.checksum.outputs.sha256 }}` (`${{ steps.postfixadmin.outputs.asset }}`, matches the digest GitHub publishes for the asset)
+
+            Release notes: https://github.com/postfixadmin/postfixadmin/releases/tag/v${{ steps.postfixadmin.outputs.latest }}
+
+            The role runs the schema upgrade of the new release on the next run; the `update` molecule scenario covers the step from the release pinned in `roles/postfixadmin/molecule/update/molecule.yml`.
+
+            ---
+            This PR was created automatically by the `update-postfixadmin-version` workflow.
+          labels: dependencies
+          delete-branch: true

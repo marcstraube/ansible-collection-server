@@ -1,0 +1,84 @@
+#!/bin/bash
+{{ ansible_managed | comment }}
+#
+# Writes one RDB snapshot of the whole Valkey instance (every database) to
+# {{ valkey_backup_dir }}, named valkey-<YYYYmmddTHHMMSS>.rdb.
+# valkey-cli --rdb fetches the snapshot from the running server through a
+# replication sync; the server keeps serving its clients.
+#
+# Usage: valkey-backup [<snapshot to keep> | --ping]
+#
+#   no argument          Run by {{ __valkey_backup_service_name }}.
+#   <snapshot to keep>   File name in the backup directory that the
+#                        rotation never removes (the snapshot a restore
+#                        reads).
+#   --ping               Send PING over the connection of the backup and
+#                        print the reply, without a snapshot (the health
+#                        check of a restore).
+#
+# The retention is count-based: the snapshot just written counts, older
+# snapshots beyond the count are removed, so a failing schedule never
+# removes the last good snapshot.
+# Snapshots kept: {{ valkey_backup_keep | int }}
+
+set -euo pipefail
+umask 077
+
+if [ "$#" -gt 1 ]; then
+    echo "Usage: $0 [<snapshot to keep> | --ping]" >&2
+    exit 64
+fi
+
+BACKUP_DIR={{ valkey_backup_dir | quote }}
+BACKUP_DIR="${BACKUP_DIR%/}"
+KEEP={{ valkey_backup_keep | int }}
+PROTECT="${1:-}"
+# Timestamp part of a snapshot name
+STAMP='[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]'
+
+{% if valkey_backup_user | length > 0 %}
+# The password of the ACL user {{ valkey_backup_user }} is read in full,
+# whitespace and line breaks included, and reaches valkey-cli in the
+# environment instead of the command line.
+REDISCLI_AUTH=''
+IFS= read -r -d '' REDISCLI_AUTH < {{ __valkey_backup_auth_file | quote }} || true
+export REDISCLI_AUTH
+
+{% endif %}
+if [ "${PROTECT}" = '--ping' ]; then
+    exec valkey-cli {{ (__valkey_cli_connection + __valkey_cli_user) | map('quote') | join(' ') }} PING
+fi
+
+mkdir -p "${BACKUP_DIR}"
+
+# Two runs within one second get distinct names
+SET="${BACKUP_DIR}/valkey-$(date +%Y%m%dT%H%M%S).rdb"
+while [ -e "${SET}" ]; do
+    sleep 1
+    SET="${BACKUP_DIR}/valkey-$(date +%Y%m%dT%H%M%S).rdb"
+done
+
+# A failed transfer leaves no partial file that the rotation would count
+PARTIAL="${SET}.partial"
+trap 'rm -f -- "${PARTIAL}"' EXIT
+
+echo "Writing ${SET}"
+valkey-cli {{ (__valkey_cli_connection + __valkey_cli_user) | map('quote') | join(' ') }} --rdb "${PARTIAL}"
+mv -f -- "${PARTIAL}" "${SET}"
+
+# Rotation: snapshots, newest first, without the snapshot just written and
+# the protected snapshot; everything beyond the retention is removed. The
+# timestamp in the name sorts chronologically.
+FIND_ARGS=("${BACKUP_DIR}" -mindepth 1 -maxdepth 1 -type f -name "valkey-${STAMP}.rdb" ! -path "${SET}")
+if [ -n "${PROTECT}" ]; then
+    FIND_ARGS+=(! -name "${PROTECT}")
+fi
+find "${FIND_ARGS[@]}" -printf '%f\n' \
+    | sort -r \
+    | tail -n +$((KEEP > 1 ? KEEP : 1)) \
+    | while IFS= read -r OLD_SET; do
+        echo "Removing ${BACKUP_DIR}/${OLD_SET} beyond the retention of ${KEEP}"
+        rm -f -- "${BACKUP_DIR:?}/${OLD_SET}"
+    done
+
+echo "Backup completed: $(date)"

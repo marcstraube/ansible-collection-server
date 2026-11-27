@@ -1,0 +1,16 @@
+---
+# Sends one message through Postfix with the SMTP test client.
+# Input: __send (session, see files/smtp_send.py), __send_name (result fact).
+# Output: the fact named in __send_name with the replies.
+
+- name: Verify | Send the message through Postfix
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/molecule-smtp-send
+    stdin: '{{ __send | to_json }}'
+  register: __send_result
+  changed_when: false
+
+- name: Verify | Record the replies
+  ansible.builtin.set_fact:
+    '{{ __send_name }}': '{{ __send_result.stdout | from_json }}'

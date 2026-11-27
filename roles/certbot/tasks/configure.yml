@@ -9,7 +9,15 @@
   loop:
     - "{{ certbot_config_dir }}"
     - "{{ certbot_work_dir }}"
-    - "{{ certbot_log_dir }}"
+
+# 0700 as certbot creates it; tmpfiles.d of the Arch Linux package sets it too
+- name: Configure | Create the log directory
+  ansible.builtin.file:
+    path: "{{ certbot_log_dir }}"
+    state: directory
+    owner: 'root'
+    group: 'root'
+    mode: '0700'
 
 - name: Configure | Create webroot directory
   ansible.builtin.file:

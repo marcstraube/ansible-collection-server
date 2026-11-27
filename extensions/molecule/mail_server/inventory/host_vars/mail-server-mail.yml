@@ -1,0 +1,56 @@
+---
+# Mail host: Valkey for rspamd, Dovecot, rspamd and Postfix; the lookups in
+# the PostfixAdmin database on the database host with TLS, clamd on the
+# clamd host.
+ansible_python_interpreter: /usr/bin/python3
+
+valkey_enabled: true
+valkey_users:
+  - name: 'rspamd'
+    password: 'rspamd-Valkey-42'
+
+dovecot_enabled: true
+dovecot_db_type: 'postgresql'
+dovecot_db_host: '{{ __molecule_db_host }}'
+dovecot_db_password: '{{ __molecule_db_passwords.dovecot }}'
+dovecot_db_tls: true
+dovecot_db_tls_ca_file: '{{ __molecule_ca_file }}'
+dovecot_tls_cert_file: '/etc/molecule-tls/mail.pem'
+dovecot_tls_key_file: '/etc/molecule-tls/mail.key'
+dovecot_managesieve_enabled: true
+dovecot_shared_mailboxes:
+  - owner: 'support@example.com'
+    user: 'alice@example.com'
+    rights: 'lrws'
+
+rspamd_enabled: true
+rspamd_controller_password: 'rspamd-Read-42'
+rspamd_controller_enable_password: 'rspamd-Enable-42'
+rspamd_redis_password: 'rspamd-Valkey-42'
+rspamd_antivirus_enabled: true
+rspamd_clamd_address: '{{ __molecule_clamd_host }}:3310'
+# The DNS report needs public records
+rspamd_dns_check_enabled: false
+
+# Postfix of this role replaces marcstraube.common.mta of the base system
+mta_enabled: false
+postfix_enabled: true
+postfix_db_type: 'postgresql'
+postfix_db_host: '{{ __molecule_db_host }}'
+postfix_db_password: '{{ __molecule_db_passwords.postfix }}'
+postfix_db_tls: true
+postfix_db_tls_ca_file: '{{ __molecule_ca_file }}'
+postfix_myhostname: 'mail.example.com'
+postfix_mydomain: 'example.com'
+postfix_tls_cert_file: '/etc/molecule-tls/mail.pem'
+postfix_tls_key_file: '/etc/molecule-tls/mail.key'
+# The shared mailbox of Dovecot: alice may send as support
+postfix_sender_permissions:
+  'support@example.com':
+    - 'alice@example.com'
+# verify sends from the clamd host as an outside client (XCLIENT), so
+# rspamd sees an address outside the networks it treats as local
+postfix_extra_main_cf:
+  smtpd_authorized_xclient_hosts: >-
+    {{ hostvars[__molecule_clamd_host]['ansible_facts']['default_ipv4']['address'] }}
+postfix_dns_check_enabled: false

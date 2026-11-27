@@ -1,0 +1,105 @@
+---
+# Test resolver: dnsmasq answers example.com (mail.example.com on
+# __prepare_mail_address, the MX of the domain for the sender check of
+# Postfix) and forwards everything else to the resolver the instance had,
+# which keeps working for package installs and the container names of a
+# podman network. SOGo reaches Dovecot and Postfix by the name in their
+# certificate through it.
+
+# A second prepare run keeps the resolver: resolv.conf points to it by then
+- name: Prepare | Check for the test resolver
+  ansible.builtin.stat:
+    path: /etc/dnsmasq.d/molecule-dns.conf
+  register: __prepare_resolver_stat
+
+- name: Prepare | Set up the test resolver once
+  when: not __prepare_resolver_stat.stat.exists
+  block:
+    - name: Prepare | Read the resolver configuration of the instance
+      ansible.builtin.slurp:
+        src: /etc/resolv.conf
+      register: __prepare_resolv_conf
+
+    - name: Prepare | Record the upstream resolvers
+      ansible.builtin.set_fact:
+        __prepare_upstream_resolvers: >-
+          {{ __prepare_resolv_lines | select('match', '^nameserver\s') | map('split') | map('last')
+             | reject('in', ['127.0.0.1', '::1']) | list }}
+        __prepare_resolv_search: >-
+          {{ __prepare_resolv_lines | select('match', '^(search|domain)\s') | list }}
+      vars:
+        __prepare_resolv_lines: '{{ (__prepare_resolv_conf.content | b64decode).splitlines() | map("trim") | list }}'
+
+    # Below /etc/dnsmasq.d: an AppArmor profile for dnsmasq on the container host
+    # attaches by path to the dnsmasq inside the container and only allows its
+    # standard configuration paths
+    - name: Prepare | Create test resolver configuration directory
+      ansible.builtin.file:
+        path: /etc/dnsmasq.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # The addresses of the interfaces only: systemd-resolved of the Arch Linux
+    # image holds port 53 on 127.0.0.53 and 127.0.0.54
+    - name: Prepare | Deploy test resolver configuration
+      ansible.builtin.copy:
+        content: |
+          port=53
+          bind-interfaces
+          user=root
+          no-resolv
+          no-hosts
+          {% for server in __prepare_upstream_resolvers %}
+          server={{ server }}
+          {% endfor %}
+          local=/example.com/
+          local=/example.net/
+          host-record=mail.example.com,{{ __prepare_mail_address }}
+          mx-host=example.com,mail.example.com,10
+          mx-host=example.net,mx.example.net,10
+          host-record=mx.example.net,192.0.2.25
+        dest: /etc/dnsmasq.d/molecule-dns.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    # /usr/sbin/dnsmasq on Debian and Rocky Linux; /usr/sbin links to /usr/bin
+    # on Arch Linux
+    - name: Prepare | Deploy test resolver unit
+      ansible.builtin.copy:
+        content: |
+          [Unit]
+          Description=Test resolver of the sogo scenarios
+
+          [Service]
+          ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/etc/dnsmasq.d/molecule-dns.conf
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/molecule-dns.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Start test resolver
+      ansible.builtin.systemd_service:
+        name: molecule-dns.service
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    # podman bind-mounts resolv.conf: it is rewritten in place
+    - name: Prepare | Use the test resolver on the instance
+      ansible.builtin.copy:
+        content: |
+          {% for line in __prepare_resolv_search %}
+          {{ line }}
+          {% endfor %}
+          nameserver 127.0.0.1
+        dest: /etc/resolv.conf
+        owner: root
+        group: root
+        mode: '0644'
+        unsafe_writes: true

@@ -41,6 +41,25 @@
         fail_msg: '/etc/letsencrypt does not exist'
         success_msg: '/etc/letsencrypt exists'
 
+    - name: Verify | Check the log directory
+      ansible.builtin.stat:
+        path: /var/log/letsencrypt
+      register: __verify_log_dir
+      failed_when: __verify_log_dir.stat.mode != '0700' or __verify_log_dir.stat.pw_name != 'root'
+
+    # The package of Arch Linux ships the mode in tmpfiles.d
+    - name: Verify | Apply the tmpfiles of the package (Arch)
+      ansible.builtin.command:
+        cmd: systemd-tmpfiles --create certbot.conf
+      changed_when: false
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Verify | Check the log directory after the tmpfiles
+      ansible.builtin.stat:
+        path: /var/log/letsencrypt
+      register: __verify_log_dir_tmpfiles
+      failed_when: __verify_log_dir_tmpfiles.stat.mode != __verify_log_dir.stat.mode
+
     - name: Verify | Check webroot directory
       ansible.builtin.stat:
         path: /var/www/letsencrypt

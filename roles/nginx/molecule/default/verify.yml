@@ -191,6 +191,122 @@
         success_msg: 'The default site and the sites on port 443 use the same listen options'
 
     #
+    # HTTP/2 (default on, test-http2-off switches it off)
+    #
+
+    - name: Verify | Read the installed nginx version
+      ansible.builtin.command:
+        argv:
+          - nginx
+          - -v
+      register: __verify_nginx_version
+      changed_when: false
+
+    - name: Verify | Read the HTTP/2 relevant configuration files
+      ansible.builtin.slurp:
+        src: '{{ item }}'
+      loop:
+        - '{{ __nginx_config_file }}'
+        - '{{ __nginx_sites_dir }}/default.conf'
+        - '{{ __nginx_sites_dir }}/test-redirect-default.conf'
+        - '{{ __nginx_sites_dir }}/test-http2-off.conf'
+      register: __verify_http2_files
+
+    # From 1.25.1 every HTTPS server block with HTTP/2 on carries the
+    # directive and the http block none; before that the listen parameter
+    # marks every HTTPS listener with HTTP/2 on.
+    - name: Verify | Assert the HTTP/2 syntax matches the nginx version
+      ansible.builtin.assert:
+        that:
+          - __main is not search('http2 o')
+          - >-
+            (__default is search('(?m)^\s+http2 on;$') and __default is not search('ssl http2'))
+            if __directive else (__default is search('listen 443 ssl http2 default_server;'))
+          - >-
+            (__inherit is search('(?m)^\s+http2 on;$') and __inherit is not search(' ssl http2'))
+            if __directive else (__inherit is search('listen 443 ssl http2;'))
+          - >-
+            (__off is not search('http2 o') and __off is not search(' ssl http2'))
+            if __directive
+            else (__off is search('listen 8443 ssl;') and __off is not search('ssl http2|http2 o'))
+        fail_msg: >-
+          Unexpected HTTP/2 rendering for nginx {{ __version }}
+          (directive: {{ __directive }})
+        success_msg: >-
+          nginx {{ __version }} gets the {{ 'directive' if __directive else 'listen parameter' }}
+      vars:
+        __version: >-
+          {{ (__verify_nginx_version.stderr | regex_search('nginx/([0-9.]+)', '\1') or ['0']) | first }}
+        __directive: "{{ __version is version('1.25.1', '>=') }}"
+        __files: "{{ __verify_http2_files.results | map(attribute='content') | map('b64decode') | list }}"
+        __main: '{{ __files[0] }}'
+        __default: '{{ __files[1] }}'
+        __inherit: '{{ __files[2] }}'
+        __off: '{{ __files[3] }}'
+
+    # After an h2 handshake the server sends a binary SETTINGS frame, which
+    # is not valid text; only the ALPN line is kept.
+    - name: Verify | Negotiate the protocol with each HTTPS site
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          openssl s_client -connect 127.0.0.1:{{ item.port }} -servername {{ item.name }} \
+            -alpn h2,http/1.1 < /dev/null 2> /dev/null \
+            | grep -a -E '^(ALPN protocol|No ALPN)'
+        executable: /bin/bash
+      loop:
+        - name: 'redirect-default.example.com'
+          port: 443
+        - name: 'http2-off.example.com'
+          port: 8443
+      loop_control:
+        label: '{{ item.name }}'
+      register: __verify_alpn
+      changed_when: false
+
+    - name: Verify | Assert the ALPN result per site
+      ansible.builtin.assert:
+        that:
+          - __verify_alpn_result['redirect-default.example.com'] == 'h2'
+          - __verify_alpn_result['http2-off.example.com'] == 'http/1.1'
+        fail_msg: >-
+          Expected h2 for redirect-default.example.com and http/1.1 for
+          http2-off.example.com, got {{ __verify_alpn_result }}
+        success_msg: 'The inheriting site negotiates h2, the site with http2: false http/1.1'
+      vars:
+        __verify_alpn_result: >-
+          {{ dict(__verify_alpn.results | map(attribute='item') | map(attribute='name')
+                  | zip(__verify_alpn.results | map(attribute='stdout')
+                        | map('regex_search', 'ALPN protocol: (\S+)', '\1')
+                        | map('default', ['none'], true) | map('first'))) }}
+
+    # Plain HTTP ports must not speak HTTP/2 with prior knowledge (h2c): the
+    # connection preface must get an HTTP/1 error, not a SETTINGS frame.
+    - name: Verify | Send an HTTP/2 connection preface to port 80
+      ansible.builtin.command:
+        argv:
+          - '{{ ansible_facts["python"]["executable"] }}'
+          - '-c'
+          - |
+            import socket
+            s = socket.create_connection(('127.0.0.1', 80), timeout=5)
+            s.sendall(b'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n' + bytes([0, 0, 0, 4, 0, 0, 0, 0, 0]))
+            try:
+                data = s.recv(64)
+            except socket.timeout:
+                data = b''
+            print('h2' if len(data) >= 9 and data[3] == 4 else 'not h2: ' + repr(data[:20]))
+      register: __verify_h2c
+      changed_when: false
+
+    - name: Verify | Assert port 80 refuses HTTP/2 with prior knowledge
+      ansible.builtin.assert:
+        that:
+          - __verify_h2c.stdout is match('not h2')
+        fail_msg: 'Port 80 answered the HTTP/2 preface with HTTP/2: {{ __verify_h2c.stdout }}'
+        success_msg: '{{ __verify_h2c.stdout }}'
+
+    #
     # Service Verification
     #
 
@@ -292,6 +408,93 @@
         success_msg: 'The HTTP redirects point to the HTTPS port of each site'
 
     #
+    # ACME Challenge and Pending Certificates
+    #
+
+    # The unknown name and the site that is not enabled get their answer from
+    # the default site.
+    - name: Verify | Request the ACME challenge
+      ansible.builtin.uri:
+        url: '{{ item.scheme | default("http") }}://127.0.0.1/.well-known/acme-challenge/{{ __token }}'
+        validate_certs: false
+        headers:
+          Host: '{{ item.host }}'
+        follow_redirects: none
+        return_content: true
+      vars:
+        __token: '{{ item.token | default("molecule") }}'
+      register: __verify_acme
+      failed_when: __verify_acme.status != 200 or __verify_acme.content != item.content | default('shared')
+      loop:
+        - host: 'unknown.example.com'
+        - host: 'acme-pending.example.com'
+        - host: 'acme-redirect.example.com'
+        - host: 'acme-key.example.com'
+        - host: 'redirect-default.example.com'
+        - host: 'redirect-default.example.com'
+          scheme: 'https'
+        - host: 'acme-http.example.com'
+        - host: 'www.acme-http.example.com'
+        - host: 'proxy.example.com'
+        - host: 'static.example.com'
+        - host: 'static.example.com'
+          token: 'molecule.sql'
+        - host: 'acme-own.example.com'
+          content: 'own'
+      loop_control:
+        label: '{{ item.host }} {{ item.token | default("molecule") }}'
+
+    # 444 closes the connection, which uri reports as -1
+    - name: Verify | Request another path next to the challenge
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1/other'
+        headers:
+          Host: '{{ item.host }}'
+        follow_redirects: none
+      register: __verify_acme_other
+      failed_when: >-
+        __verify_acme_other.status != item.status
+        or __verify_acme_other.location | default('') != item.location | default('')
+      loop:
+        - host: 'unknown.example.com'
+          status: -1
+        - host: 'acme-redirect.example.com'
+          status: 301
+          location: 'https://acme-redirect.example.com/other'
+        - host: 'www.acme-http.example.com'
+          status: 301
+          location: 'http://acme-http.example.com/other'
+        - host: 'acme-http.example.com'
+          status: 403
+      loop_control:
+        label: '{{ item.host }}'
+
+    - name: Verify | Read the loaded configuration files
+      ansible.builtin.command:
+        argv:
+          - nginx
+          - -T
+      register: __verify_acme_config
+      changed_when: false
+
+    - name: Verify | Read the disabled site
+      ansible.builtin.slurp:
+        src: '{{ __nginx_sites_dir }}/test-acme-disabled.conf'
+      register: __verify_acme_disabled
+
+    - name: Verify | Assert the sites without a certificate have no HTTPS server
+      ansible.builtin.assert:
+        that:
+          - __verify_acme_config.stdout is search('sites-enabled/test-acme-redirect\.conf:')
+          - __verify_acme_config.stdout is search('sites-enabled/test-acme-key\.conf:')
+          - __verify_acme_config.stdout is not search('sites-enabled/test-acme-pending\.conf:')
+          - __verify_acme_config.stdout is not search('sites-enabled/test-acme-disabled\.conf:')
+          - __verify_acme_config.stdout is not search('/etc/nginx/ssl/acme-')
+          - (__verify_acme_disabled.content | b64decode) is search('listen 443 ssl')
+        fail_msg: 'A site without a certificate or key is not deployed as expected'
+        success_msg: 'The sites without a certificate or key keep only their HTTP redirect'
+
+    #
     # SELinux (RedHat with SELinux enabled)
     #
 
@@ -327,6 +530,108 @@
         __verify_selinux_http_ports: >-
           {{ __verify_selinux_ports.stdout_lines | select('match', '^http_port_t +tcp ')
              | map('regex_replace', '^http_port_t +tcp +', '') | join(', ') | split(', ') }}
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    #
+    # Writable Paths
+    #
+    # Owner and mode on every platform. The SELinux part needs a host with
+    # SELinux enabled; in containers it is disabled and the role skips it.
+    #
+
+    - name: Verify | Stat the writable paths
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+        - '/var/www/writable.example.local/var/cache'
+        - '/var/log/molecule-writable'
+        - '/var/www/writable.example.local/uploads'
+      register: __verify_writable_stat
+
+    - name: Verify | Assert the writable path directories
+      ansible.builtin.assert:
+        that:
+          # mode only: owner and group default to the web server user
+          - __writable['/var/www/writable.example.local/var/cache'].pw_name == __nginx_user
+          - __writable['/var/www/writable.example.local/var/cache'].gr_name == __nginx_group
+          - __writable['/var/www/writable.example.local/var/cache'].mode == '0750'
+          - __writable['/var/log/molecule-writable'].isdir
+          - __writable['/var/log/molecule-writable'].pw_name == 'root'
+          - __writable['/var/log/molecule-writable'].gr_name == 'root'
+          - __writable['/var/log/molecule-writable'].mode == '0770'
+          # label only: left as prepare.yml planted it
+          - __writable['/var/www/writable.example.local/uploads'].pw_name == 'root'
+          - __writable['/var/www/writable.example.local/uploads'].mode == '0755'
+        fail_msg: 'The writable paths do not have the expected state: {{ __writable }}'
+        success_msg: 'Writable paths are created and corrected, label-only paths are left alone'
+      vars:
+        __writable: >-
+          {{ dict(__verify_writable_stat.results | map(attribute='item')
+                  | zip(__verify_writable_stat.results | map(attribute='stat'))) }}
+
+    # Installed on RedHat whether SELinux is enabled or not
+    - name: Verify | Check the SELinux management tools are installed (RedHat)
+      ansible.builtin.package:
+        name: '{{ __nginx_selinux_packages }}'
+        state: present
+      check_mode: true
+      register: __verify_selinux_packages
+      failed_when: __verify_selinux_packages is changed
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Verify | Read the local SELinux file contexts
+      ansible.builtin.command:
+        cmd: semanage fcontext -l -C
+      register: __verify_writable_fcontexts
+      changed_when: false
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    - name: Verify | Read the SELinux labels of the writable paths
+      ansible.builtin.command:
+        argv:
+          - stat
+          - '--format=%n %C'
+          - '/var/www/writable.example.local/var/cache'
+          - '/var/www/writable.example.local/var/cache/existing.txt'
+          - '/var/log/molecule-writable'
+          - '/var/www/writable.example.local/uploads'
+          - '/var/www/writable.example.local/uploads/existing.txt'
+      register: __verify_writable_labels
+      changed_when: false
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    # Each line is "<regex> <file type> <context>": first and last field
+    - name: Verify | Assert the SELinux file contexts and labels
+      ansible.builtin.assert:
+        that:
+          - __fcontexts[__fc_cache] | default('') is search(':httpd_sys_rw_content_t:')
+          - __fcontexts[__fc_log] | default('') is search(':httpd_log_t:')
+          - __fcontexts[__fc_uploads] | default('') is search(':httpd_sys_rw_content_t:')
+          - __labels['/var/www/writable.example.local/var/cache'] is search(':httpd_sys_rw_content_t:')
+          - __labels['/var/www/writable.example.local/var/cache/existing.txt'] is search(':httpd_sys_rw_content_t:')
+          - __labels['/var/log/molecule-writable'] is search(':httpd_log_t:')
+          - __labels['/var/www/writable.example.local/uploads'] is search(':httpd_sys_rw_content_t:')
+          - __labels['/var/www/writable.example.local/uploads/existing.txt'] is search(':httpd_sys_rw_content_t:')
+        fail_msg: >-
+          Unexpected SELinux state. File contexts: {{ __fcontexts }}, labels: {{ __labels }}
+        success_msg: 'The writable paths, and the files in them, carry the type of their entry'
+      vars:
+        # The role escapes the dots of a path in the file context regex
+        __fc_cache: '/var/www/writable\.example\.local/var/cache(/.*)?'
+        __fc_log: '/var/log/molecule-writable(/.*)?'
+        __fc_uploads: '/var/www/writable\.example\.local/uploads(/.*)?'
+        __fcontexts: >-
+          {{ dict(__verify_writable_fcontexts.stdout_lines | map('split') | map('first')
+                  | zip(__verify_writable_fcontexts.stdout_lines | map('split') | map('last'))) }}
+        __labels: >-
+          {{ dict(__verify_writable_labels.stdout_lines | map('split') | map('first')
+                  | zip(__verify_writable_labels.stdout_lines | map('split') | map('last'))) }}
       when:
         - ansible_facts['os_family'] == 'RedHat'
         - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'

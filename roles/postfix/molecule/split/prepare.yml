@@ -1,0 +1,153 @@
+---
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Prepare | Update package cache (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+      retries: 3
+      delay: 5
+
+    # ssl-cert: the group that may read the server key; the postgresql
+    # package adds the postgres user to it
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name:
+          - systemd
+          - dbus
+          - procps
+          - iproute2
+          - locales
+          - openssl
+          - ssl-cert
+          - ca-certificates
+          - dnsmasq-base
+          - python3-cryptography
+        state: present
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Generate en_US.UTF-8 locale (Debian)
+      community.general.locale_gen:
+        name: en_US.UTF-8
+        state: present
+
+    - name: Prepare | Install the SMTP test client
+      ansible.builtin.copy:
+        src: '{{ playbook_dir }}/../shared/files/smtp_session.py'
+        dest: /usr/local/bin/molecule-smtp-session
+        owner: root
+        group: root
+        mode: '0755'
+
+# The test CA with the certificate of Postfix (also for the container name
+# Dovecot sends to) and of the backend (PostgreSQL, Dovecot)
+- name: Prepare — Postfix host
+  hosts: mail
+  gather_facts: false
+
+  vars:
+    __prepare_certificates:
+      - name: 'mail'
+        names: ['mail.example.com', 'postfix-split-mail']
+      - name: 'backend'
+        names: ['postfix-split-backend']
+
+  tasks:
+    # The image ships a policy-rc.d that keeps every package from starting
+    # its service; a Debian host has none. Without it the role has to keep
+    # the first install of Postfix from starting with the packaged
+    # configuration itself.
+    - name: Prepare | Remove the policy-rc.d of the image
+      ansible.builtin.file:
+        path: /usr/sbin/policy-rc.d
+        state: absent
+
+    - name: Prepare | Create the test certificates
+      ansible.builtin.include_tasks: ../shared/tasks/certificates.yml
+
+    - name: Prepare | Fetch the CA and the backend certificate
+      ansible.builtin.fetch:
+        src: '/etc/molecule-tls/{{ item }}'
+        dest: '{{ lookup("env", "MOLECULE_EPHEMERAL_DIRECTORY") }}/postfix-split-{{ item }}'
+        flat: true
+      loop:
+        - 'ca.pem'
+        - 'backend.pem'
+        - 'backend.key'
+
+    - name: Prepare | Set up the test resolver
+      ansible.builtin.include_tasks: ../shared/tasks/resolver.yml
+
+- name: Prepare — Backend host
+  hosts: backend
+  gather_facts: false
+
+  vars_files:
+    - ../shared/vars/accounts.yml
+
+  tasks:
+    - name: Prepare | Create the TLS directory
+      ansible.builtin.file:
+        path: /etc/molecule-tls
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # The key is readable for the group ssl-cert (postgres); Dovecot reads it
+    # as root
+    - name: Prepare | Install the CA and the backend certificate
+      ansible.builtin.copy:
+        src: '{{ lookup("env", "MOLECULE_EPHEMERAL_DIRECTORY") }}/postfix-split-{{ item.name }}'
+        dest: '/etc/molecule-tls/{{ item.name }}'
+        owner: root
+        group: '{{ item.group }}'
+        mode: '{{ item.mode }}'
+      loop:
+        - {name: 'ca.pem', group: 'root', mode: '0644'}
+        - {name: 'backend.pem', group: 'root', mode: '0644'}
+        - {name: 'backend.key', group: 'ssl-cert', mode: '0640'}
+      loop_control:
+        label: '{{ item.name }}'
+
+    # Dovecot verifies the certificate of Postfix (dovecot_submission_ssl)
+    # against the system trust store
+    - name: Prepare | Add the test CA to the trust store
+      ansible.builtin.copy:
+        src: '{{ lookup("env", "MOLECULE_EPHEMERAL_DIRECTORY") }}/postfix-split-ca.pem'
+        dest: /usr/local/share/ca-certificates/postfix-molecule-ca.crt
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Update the trust store
+      ansible.builtin.command:
+        cmd: update-ca-certificates
+      register: __prepare_trust_store
+      changed_when: __prepare_trust_store.stdout is search('[1-9][0-9]* added')
+
+    - name: Prepare | Include php role
+      ansible.builtin.include_role:
+        name: marcstraube.common.php
+      vars:
+        php_versions:
+          - version: 'auto'
+            extensions: ['pdo_pgsql', 'mbstring']
+            fpm: true
+        php_default_version: 'auto'
+
+    - name: Prepare | Include postgresql role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postgresql'
+
+    - name: Prepare | Include postfixadmin role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postfixadmin'
+
+    # Without Postfix on this host: TCP listeners only
+    - name: Prepare | Include dovecot role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../dovecot'

@@ -1,0 +1,46 @@
+---
+# One SELinux boolean case of side_effect.yml: runs the role with the three
+# nginx_selinux_* variables of the case, then checks each boolean and whether
+# the PHP site reaches the backend on an unlabeled port.
+- name: Side Effect | Include nginx role with the booleans {{ __side_effect_case.name }}  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+  vars:
+    nginx_enabled: true
+    nginx_sites: '{{ __side_effect_selinux_sites }}'
+    nginx_upstreams: '{{ __side_effect_case.upstreams | default([]) }}'
+    nginx_selinux_network_connect: '{{ __side_effect_case.value }}'
+    nginx_selinux_connect_db: '{{ __side_effect_case.value }}'
+    nginx_selinux_sendmail: '{{ __side_effect_case.value }}'
+
+- name: Side Effect | Reload nginx for the PHP site
+  ansible.builtin.meta: flush_handlers
+
+- name: Side Effect | Read the SELinux booleans after {{ __side_effect_case.name }}
+  ansible.builtin.command:
+    argv:
+      - getsebool
+      - httpd_can_network_connect
+      - httpd_can_network_connect_db
+      - httpd_can_sendmail
+  register: __side_effect_selinux_booleans
+  changed_when: false
+
+- name: Side Effect | Request the backend through the PHP site after {{ __side_effect_case.name }}
+  ansible.builtin.uri:
+    url: 'http://127.0.0.1/backend/'
+    headers:
+      Host: 'selinux-php.example.com'
+    status_code: '{{ 200 if __side_effect_case.expected == "on" else 502 }}'
+
+- name: Side Effect | Assert the SELinux booleans after {{ __side_effect_case.name }}
+  ansible.builtin.assert:
+    that:
+      - __side_effect_selinux_booleans.stdout_lines | length == 3
+      - >-
+        __side_effect_selinux_booleans.stdout_lines
+        | select('search', '--> ' ~ __side_effect_case.expected ~ '$') | list | length == 3
+    fail_msg: >-
+      Expected every boolean {{ __side_effect_case.expected }}:
+      {{ __side_effect_selinux_booleans.stdout_lines | join(', ') }}
+    success_msg: 'Every boolean is {{ __side_effect_case.expected }} after {{ __side_effect_case.name }}'

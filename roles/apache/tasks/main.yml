@@ -66,6 +66,77 @@
   tags:
     - always
 
+# The path becomes part of a file context regex and of a restorecon call, so
+# only plain path characters are accepted; the dots are escaped in the regex.
+# Fails before any change.
+- name: Main | Validate the writable paths
+  ansible.builtin.assert:
+    that:
+      - __apache_writable_path_error | length == 0
+    fail_msg: 'apache_writable_paths: {{ __apache_writable_path_error }}'
+    quiet: true
+  loop: '{{ apache_writable_paths }}'
+  loop_control:
+    label: '{{ item.path | default(item) }}'
+  vars:
+    __apache_writable_path_error: >-
+      {{
+        ('entry ' ~ (item | string) ~ ' needs a path')
+        if item is not mapping or item.path is not defined or item.path is not string
+        else ("path '" ~ item.path ~ "' must be absolute, without a trailing slash"
+              ~ " or '.' and '..' components, and contain only letters, digits"
+              ~ " and '.', '_', '@', '-'")
+        if item.path is not match('^(/(?!\.\.?(/|$))[A-Za-z0-9._@-]+)+$')
+        else ("type '" ~ item.type ~ "' of " ~ item.path ~ " must be one of "
+              ~ __apache_writable_path_types | join(', '))
+        if item.type | default('httpd_sys_rw_content_t') not in __apache_writable_path_types
+        else ('owner and group of ' ~ item.path ~ ' must be non-empty strings')
+        if (item.owner is defined and (item.owner is not string or item.owner | length == 0))
+           or (item.group is defined and (item.group is not string or item.group | length == 0))
+        else ('mode of ' ~ item.path ~ " must be a quoted octal string such as '0750'")
+        if item.mode is defined and (item.mode is not string or item.mode is not match('^[0-7]{3,4}$'))
+        else ''
+      }}
+  when: apache_enabled | bool
+  tags:
+    - always
+
+# The server default decides the Protocols line of the main configuration
+# and whether mod_http2 is loaded. Besides true and false it accepts the
+# strings the bool filter maps unambiguously, since -e apache_http2_enabled=false
+# passes a string; anything else, such as a typo, fails before any change.
+- name: Main | Validate the HTTP/2 server default
+  ansible.builtin.assert:
+    that:
+      - >-
+        apache_http2_enabled is boolean
+        or (apache_http2_enabled is integer and apache_http2_enabled in [0, 1])
+        or (apache_http2_enabled is string
+            and apache_http2_enabled | lower in ['true', 'false', 'yes', 'no', 'on', 'off', '1', '0'])
+    fail_msg: "apache_http2_enabled must be true or false, got '{{ apache_http2_enabled }}'"
+    quiet: true
+  when: apache_enabled | bool
+  tags:
+    - always
+
+# The per-vhost value decides the Protocols line of the vhost and whether
+# mod_http2 is loaded, so only true and false are accepted. Fails before any
+# change.
+- name: Main | Validate the HTTP/2 setting of the SSL vhosts
+  ansible.builtin.assert:
+    that:
+      - item.http2 is boolean
+    fail_msg: >-
+      apache_vhosts_ssl: http2 of vhost '{{ item.server_name | default('') }}'
+      must be true or false, got '{{ item.http2 }}'
+    quiet: true
+  loop: "{{ apache_vhosts_ssl | selectattr('http2', 'defined') | list }}"
+  loop_control:
+    label: '{{ item.server_name | default(item) }}'
+  when: apache_enabled | bool
+  tags:
+    - always
+
 - name: Main | Import install tasks
   ansible.builtin.import_tasks: install.yml
   when: apache_enabled | bool
@@ -86,6 +157,14 @@
   tags:
     - apache
     - apache:vhosts
+
+- name: Main | Import writable paths tasks
+  ansible.builtin.import_tasks: writable_paths.yml
+  when: apache_enabled | bool
+  tags:
+    - apache
+    - apache:vhosts
+    - apache:writable-paths
 
 - name: Main | Include vhosts exclusive tasks
   ansible.builtin.include_tasks:

@@ -1,0 +1,107 @@
+---
+# Stable repository of the rspamd project on Debian and EL. Debian 13 ships
+# the 3.12 series, EL no package at all; the project supports only its own
+# packages. Arch Linux installs from the distribution.
+
+#
+# Debian
+#
+
+- name: Repos | Install apt prerequisites (Debian)
+  ansible.builtin.package:
+    name:
+      - 'ca-certificates'
+      - 'python3-debian'
+    state: present
+  register: __rspamd_apt_prerequisites
+  retries: 3
+  delay: 5
+  when: ansible_facts['os_family'] == 'Debian'
+
+# signed_by takes the key URL directly: the module downloads the key and
+# stores it next to the .sources file. The suite is the release code name.
+# Check mode on a host without python3-debian cannot run the module; the
+# repository is reported as pending through the install below.
+- name: Repos | Add rspamd repository (Debian)
+  ansible.builtin.deb822_repository:
+    name: '{{ __rspamd_repo_name }}'
+    types: deb
+    uris: '{{ rspamd_repo_uris }}'
+    suites: "{{ ansible_facts['distribution_release'] }}"
+    components: main
+    signed_by: '{{ rspamd_repo_signed_by }}'
+    state: present
+  register: __rspamd_apt_repo
+  retries: 5
+  delay: 10
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - not (ansible_check_mode and __rspamd_apt_prerequisites is changed)
+
+- name: Repos | Update apt cache after repository change (Debian)
+  ansible.builtin.apt:
+    update_cache: true
+  retries: 3
+  delay: 5
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - __rspamd_apt_repo is changed
+    - not ansible_check_mode
+
+#
+# RedHat
+#
+
+# The packages need libraries from EPEL. A missing EPEL repository otherwise
+# fails the package task with a dependency error that does not name it.
+# Checked before the repository is added, so nothing changes then.
+- name: Repos | Query the EPEL dependencies (RedHat)
+  ansible.builtin.command:
+    argv: >-
+      {{ ['dnf', '--quiet', 'repoquery', '--latest-limit=1', '--queryformat=%{name}\n']
+         + __rspamd_epel_packages }}
+  register: __rspamd_epel_query
+  changed_when: false
+  check_mode: false
+  retries: 5
+  delay: 10
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Repos | Assert EPEL provides the dependencies (RedHat)
+  ansible.builtin.assert:
+    that:
+      - __rspamd_epel_missing | length == 0
+    fail_msg: >-
+      The rspamd packages need {{ __rspamd_epel_missing | join(', ') }} from
+      EPEL, which no enabled repository provides. Enable EPEL first
+      (marcstraube.common.package_management).
+    quiet: true
+  vars:
+    __rspamd_epel_missing: >-
+      {{ __rspamd_epel_packages | reject('in', __rspamd_epel_query.stdout_lines | default([])) | list }}
+  when: ansible_facts['os_family'] == 'RedHat'
+
+# The repository signs its metadata as well (repo_gpgcheck); dnf imports
+# the key from gpgkey on first use.
+- name: Repos | Add rspamd repository (RedHat)
+  ansible.builtin.yum_repository:
+    name: '{{ __rspamd_repo_name }}'
+    file: '{{ __rspamd_repo_name }}'
+    description: 'Rspamd stable repository for EL $releasever - $basearch'
+    baseurl: '{{ rspamd_repo_baseurl }}'
+    gpgkey: '{{ rspamd_repo_gpgkey }}'
+    gpgcheck: true
+    repo_gpgcheck: true
+    enabled: true
+  retries: 5
+  delay: 10
+  when: ansible_facts['os_family'] == 'RedHat'
+
+# In check mode the repository tasks write nothing; without the repository
+# the package task cannot resolve rspamd. install.yml reports the install
+# as pending then.
+- name: Repos | Check rspamd repository file presence
+  ansible.builtin.stat:
+    path: '{{ __rspamd_repo_file }}'
+  register: __rspamd_repo_stat
+  check_mode: false

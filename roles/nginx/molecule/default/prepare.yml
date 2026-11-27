@@ -69,6 +69,15 @@
           -subj "/CN=testsite.local"
         creates: /etc/nginx/ssl/test.crt
 
+    # certbot's live directory holds links; one without its target is a
+    # missing file (test-acme-key)
+    - name: Prepare | Create a dangling link as key
+      ansible.builtin.file:
+        src: /etc/nginx/ssl/missing.key
+        dest: /etc/nginx/ssl/acme-key.key
+        state: link
+        force: true
+
     # Sensitive-path fixtures in the static site's root. verify.yml requests
     # each one: the denied set must answer 403, the allowed set 200 -- the
     # latter proves the deny patterns are anchored to whole path components.
@@ -105,3 +114,57 @@
         - '.github/workflow.yml'
         - '.envrc'
         - 'allowed.txt'
+
+    # ACME challenge fixtures: the default webroot of the role, the webroot of
+    # own locations and a certbot webroot (side_effect.yml). The .sql token
+    # matches the deny patterns, which must not win over the challenge location.
+    - name: Prepare | Create ACME challenge directories
+      ansible.builtin.file:
+        path: '{{ item }}/.well-known/acme-challenge'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - '/var/www/letsencrypt'
+        - '/var/www/acme-own'
+        - '/var/www/acme-certbot'
+
+    - name: Prepare | Create ACME challenge files
+      ansible.builtin.copy:
+        content: '{{ item.content }}'
+        dest: '{{ item.webroot }}/.well-known/acme-challenge/{{ item.token }}'
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - {webroot: '/var/www/letsencrypt', token: 'molecule', content: 'shared'}
+        - {webroot: '/var/www/letsencrypt', token: 'molecule.sql', content: 'shared'}
+        - {webroot: '/var/www/acme-own', token: 'molecule', content: 'own'}
+        - {webroot: '/var/www/acme-certbot', token: 'molecule', content: 'certbot'}
+
+    # Writable path fixtures, each holding a file. The cache directory has
+    # the wrong owner and mode, which the role must correct; uploads is a
+    # label-only entry the role must leave as planted. With SELinux enabled
+    # both files must get the type of their entry.
+    - name: Prepare | Create writable path fixture directories
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - '/var/www/writable.example.local/var/cache'
+        - '/var/www/writable.example.local/uploads'
+
+    - name: Prepare | Create writable path fixture files
+      ansible.builtin.copy:
+        content: "fixture\n"
+        dest: '{{ item }}/existing.txt'
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - '/var/www/writable.example.local/var/cache'
+        - '/var/www/writable.example.local/uploads'

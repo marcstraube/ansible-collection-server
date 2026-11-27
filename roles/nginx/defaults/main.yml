@@ -197,6 +197,18 @@ nginx_ssl_stapling_verify: true
 nginx_ssl_dhparam: ''
 
 #
+# HTTP/2
+#
+
+# Default for HTTP/2 over TLS (h2) of the HTTPS sites and the default site;
+# plain HTTP ports never get HTTP/2. A site overrides it with its own http2 key
+# (true or false); without the key it inherits this value. From nginx 1.25.1
+# the role renders 'http2 on;' into every HTTPS server block with HTTP/2 on;
+# older nginx only knows the http2 parameter of listen, which applies to every
+# site on the same port, so sites on one port must agree there.
+nginx_http2_enabled: true
+
+#
 # Security Headers
 #
 
@@ -248,6 +260,35 @@ nginx_deny_patterns:
   - '[^/]+\.(bak|orig|swp|swo)'
   # Database dumps
   - '[^/]+\.sql(\.(gz|bz2|xz|zst))?'
+
+# SELinux
+
+# SELinux booleans (RedHat). Each takes one of three values:
+#   null  - leave the boolean as it is on the host (default)
+#   true  - switch it on
+#   false - switch it off
+# The booleans apply to the whole httpd_t domain, which Apache and PHP-FPM
+# share, so the role only switches one off when told to explicitly.
+
+# Allow PHP-FPM workers to reach a database over the network. Not derived from
+# php sites, because the role cannot tell whether an application talks to a
+# database at all, and the boolean should not be widened on hosts that never
+# need it.
+nginx_selinux_connect_db: null
+
+# Allow nginx and its PHP-FPM workers to open outbound network connections.
+# Proxy sites, enabled sites with authentik.enabled and stream servers need
+# this boolean and switch it on automatically; false is rejected while any are
+# configured. An upstream alone does not switch it on, because only a site or
+# a location that proxies to it opens the connection. Set it when the
+# application itself calls out to a remote service, or when a location or
+# extra_config of a site that is not of type proxy proxies to a backend.
+nginx_selinux_network_connect: null
+
+# Allow nginx and its PHP-FPM workers to submit mail through the local MTA.
+# Needed by applications that send mail through PHP's mail() or a sendmail
+# binary; without it submission fails with a bare permission error.
+nginx_selinux_sendmail: null
 
 #
 # Rate Limiting
@@ -318,10 +359,28 @@ nginx_default_site_ssl_certificate: ''
 nginx_default_site_ssl_certificate_key: ''
 
 #
+# ACME / Let's Encrypt (HTTP-01)
+#
+
+# Serve the ACME HTTP-01 challenge (/.well-known/acme-challenge/) from a shared
+# webroot in the default site, the HTTP redirect servers and the sites. A site
+# or nginx_global_locations that defines this location keeps its own. Defaults
+# to certbot_enabled: when certbot manages certificates on this host the
+# challenge is served automatically; otherwise it stays off. Override
+# explicitly to force either behavior.
+nginx_acme_challenge_enabled: '{{ certbot_enabled | default(false) | bool }}'
+
+# Webroot of the challenge, the one certbot writes to
+nginx_acme_webroot: "{{ certbot_webroot_path | default('/var/www/letsencrypt') }}"
+
+#
 # Sites (Virtual Hosts)
 #
 
-# Site definitions
+# Site definitions. Until the certificate and key file of a site that does not
+# serve HTTPS yet exist, a deployed HTTP site is kept on HTTP; of any other
+# site only the HTTP redirect is deployed, and without http_redirect the site
+# is not enabled.
 # Example:
 #
 # Static website:
@@ -368,6 +427,7 @@ nginx_default_site_ssl_certificate_key: ''
 #       - 'full.example.com'
 #     listen: 80  # default: 80
 #     listen_ssl: 443  # default: 443
+#     http2: false  # default: nginx_http2_enabled
 #     root: '/var/www/full'
 #     index: 'index.html'
 #     type: 'static'  # static, proxy, php, custom
@@ -493,6 +553,35 @@ nginx_extra_includes: []
 #     group: 'www-data'
 #     mode: '0755'
 nginx_create_directories: []
+
+#
+# Writable Paths
+#
+# Directories the applications write to (cache, uploads, logs). On RedHat with
+# SELinux enabled each path gets a persistent file context for '<path>(/.*)?'
+# and its labels are restored; elsewhere only the directory is created.
+
+# Directories the web server and its PHP-FPM workers write to. Keys:
+#   path:  absolute path without a trailing slash; letters, digits and
+#          '.', '_', '@', '-' only
+#   type:  SELinux type, 'httpd_sys_rw_content_t' (default), 'httpd_log_t'
+#          for log directories, 'httpd_sys_ra_content_t' for append-only
+#          directories or 'httpd_cache_t'
+#   owner, group, mode: when any of them is set, the role creates the
+#          directory and enforces all three on every run; unset ones default
+#          to the nginx user, the nginx group and '0755'. Without them the
+#          path is only labeled.
+# Example:
+#   - path: '/var/www/app.example.com/var/cache'
+#     owner: 'nginx'
+#     group: 'nginx'
+#     mode: '0750'
+#   - path: '/var/log/app'
+#     type: 'httpd_log_t'
+#     owner: 'nginx'
+#     group: 'nginx'
+#     mode: '0750'
+nginx_writable_paths: []
 
 #
 # Proxy Defaults

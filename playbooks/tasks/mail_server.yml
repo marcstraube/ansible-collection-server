@@ -1,0 +1,135 @@
+---
+# =============================================================================
+# Mail Server Tasks
+# =============================================================================
+# Task file for mail server deployment — single source of truth.
+# Import it from a play with `ansible.builtin.import_tasks`.
+#
+# Stack: pki, certbot, valkey, postfixadmin, postfix, dovecot, rspamd, sogo,
+# roundcube, mail_discovery. Every role is gated on its <role>_enabled
+# toggle, so the inventory decides which parts run on which host; the
+# components may be spread over several hosts of one play.
+#
+# Order (docs/mail-stack-interfaces.md of the infrastructure project):
+#   1. pki, certbot      — certificates exist before Postfix and Dovecot
+#                          assert their certificate paths. A mail host
+#                          without a web server uses a DNS authenticator of
+#                          certbot.
+#   2. valkey            — storage for rspamd and the Roundcube sessions.
+#   3. postfixadmin      — creates and upgrades the schema the other roles
+#                          read.
+#   4. postfix           — the queue directory and the postfix user the
+#                          local LMTP and SASL sockets of Dovecot live in.
+#                          Postfix defers delivery and SASL until Dovecot
+#                          has created them, and defers mail while the
+#                          milter is down (postfix_milter_default_action
+#                          'tempfail'), so nothing passes unfiltered before
+#                          rspamd is up.
+#   5. dovecot           — authentication and LMTP delivery.
+#   6. rspamd            — the milter.
+#   7. sogo, roundcube, mail_discovery
+#
+# The databases of PostfixAdmin, SOGo and Roundcube and the web server with
+# PHP of PostfixAdmin and Roundcube come from earlier plays (database_server,
+# web_server and the base system with marcstraube.common.php).
+#
+# Certificates deployed by marcstraube.common.pki in an earlier play (the base
+# play) cannot notify handlers here, as notifications do not cross plays. pki
+# records the change as pki_cert_material_changed; the forward task at the end
+# notifies 'Reload cert services' again, so Dovecot and Postfix pick up the
+# new material in this run.
+#
+# Roles are imported statically (import_role) so their internal sub-tags are
+# exposed to --tags / --list-tags. Run `ansible-playbook … --list-tags` to see
+# the full set. Dynamic include_role would hide sub-tags behind the include.
+# =============================================================================
+
+- name: Mail | Import pki role
+  ansible.builtin.import_role:
+    name: marcstraube.common.pki
+  tags:
+    - mail
+    - pki
+  when: pki_enabled | bool
+
+- name: Mail | Import certbot role
+  ansible.builtin.import_role:
+    name: marcstraube.server.certbot
+  tags:
+    - mail
+    - certbot
+  when: certbot_enabled | bool
+
+- name: Mail | Import valkey role
+  ansible.builtin.import_role:
+    name: marcstraube.server.valkey
+  tags:
+    - mail
+    - valkey
+  when: valkey_enabled | bool
+
+- name: Mail | Import postfixadmin role
+  ansible.builtin.import_role:
+    name: marcstraube.server.postfixadmin
+  tags:
+    - mail
+    - postfixadmin
+  when: postfixadmin_enabled | bool
+
+- name: Mail | Import postfix role
+  ansible.builtin.import_role:
+    name: marcstraube.server.postfix
+  tags:
+    - mail
+    - postfix
+  when: postfix_enabled | bool
+
+- name: Mail | Import dovecot role
+  ansible.builtin.import_role:
+    name: marcstraube.server.dovecot
+  tags:
+    - mail
+    - dovecot
+  when: dovecot_enabled | bool
+
+- name: Mail | Import rspamd role
+  ansible.builtin.import_role:
+    name: marcstraube.server.rspamd
+  tags:
+    - mail
+    - rspamd
+  when: rspamd_enabled | bool
+
+- name: Mail | Import sogo role
+  ansible.builtin.import_role:
+    name: marcstraube.server.sogo
+  tags:
+    - mail
+    - sogo
+  when: sogo_enabled | bool
+
+- name: Mail | Import roundcube role
+  ansible.builtin.import_role:
+    name: marcstraube.server.roundcube
+  tags:
+    - mail
+    - roundcube
+  when: roundcube_enabled | bool
+
+- name: Mail | Import mail_discovery role
+  ansible.builtin.import_role:
+    name: marcstraube.server.mail_discovery
+  tags:
+    - mail
+    - mail_discovery
+  when: mail_discovery_enabled | bool
+
+- name: Mail | Forward certificate changes from an earlier play
+  ansible.builtin.debug:
+    msg: 'Certificate material changed earlier in this run'
+  changed_when: true
+  when: pki_cert_material_changed | default(false) | bool
+  notify: Reload cert services
+  tags:
+    - mail
+    - pki

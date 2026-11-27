@@ -1,0 +1,192 @@
+---
+# Test environment: PHP-FPM through marcstraube.common.php and the database
+# server of postfixadmin_db_type through the role of this collection, as on
+# a real host. Shared by the postgresql, mariadb and update scenarios.
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __prepare_packages:
+      Archlinux:
+        - systemd
+        - dbus
+        - procps-ng
+      Debian:
+        - systemd
+        - dbus
+        - procps
+        - locales
+      RedHat:
+        - systemd
+        - dbus
+        - procps-ng
+        - glibc-langpack-en
+    # PHP extensions PostfixAdmin needs besides the PDO driver: Debian and
+    # EL compile iconv in, Arch Linux builds mbstring in. TOTP (mariadb
+    # scenario) needs gd; the scenarios without it run without gd.
+    __prepare_php_extensions:
+      postgresql:
+        Archlinux: ['pdo_pgsql', 'iconv']
+        Debian: ['pdo_pgsql', 'mbstring']
+        RedHat: ['pdo_pgsql', 'mbstring']
+      mariadb:
+        Archlinux: ['pdo_mysql', 'iconv']
+        Debian: ['pdo_mysql', 'mbstring']
+        RedHat: ['pdo_mysql', 'mbstring']
+    __prepare_totp_extensions: "{{ ['gd'] if postfixadmin_totp | default(false) | bool else [] }}"
+    # EL 9: the php:8.3 module stream, the first with Argon2
+    __prepare_php_version: >-
+      {{ '8.3' if ansible_facts['os_family'] == 'RedHat'
+                 and ansible_facts['distribution_major_version'] == '9' else 'auto' }}
+    # A dedicated PHP-FPM pool for PostfixAdmin when the scenario sets its
+    # user (postgresql, mariadb); the update scenario keeps the www pool
+    __prepare_fpm_pool_enabled: "{{ postfixadmin_php_fpm_user | default('') | length > 0 }}"
+    __prepare_fpm_pools:
+      - name: 'postfixadmin'
+        user: "{{ postfixadmin_php_fpm_user | default('') }}"
+        group: "{{ postfixadmin_php_fpm_group | default('') }}"
+
+  tasks:
+    # Sudo PAM bypass — required for tasks using `become_user` on
+    # geerlingguy Rocky containers under GitHub-hosted runners
+    # (test container only).
+
+    - name: Prepare | Bypass sudo PAM stack (RedHat container)
+      ansible.builtin.copy:
+        content: |
+          #%PAM-1.0
+          auth       sufficient   pam_permit.so
+          account    sufficient   pam_permit.so
+          password   sufficient   pam_permit.so
+          session    sufficient   pam_permit.so
+        dest: /etc/pam.d/sudo
+        owner: root
+        group: root
+        mode: '0644'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Disable sudoers authentication (RedHat container)
+      ansible.builtin.copy:
+        content: 'Defaults !authenticate'
+        dest: /etc/sudoers.d/molecule-no-auth
+        owner: root
+        group: root
+        mode: '0440'
+        validate: 'visudo -cf %s'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Update package cache (Arch)
+      community.general.pacman:
+        update_cache: true
+        upgrade: true
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    # The pacman ignore drop-in setup of marcstraube.common.package_management
+    # that the database roles expect; pacman fails on an Include glob
+    # without a match, so a file is in place before the Include line
+    - name: Prepare | Create pacman ignore drop-in directory (Arch)
+      ansible.builtin.file:
+        path: /etc/pacman.d/ignore.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Create pacman ignore drop-in (Arch)
+      ansible.builtin.copy:
+        content: "# molecule\n"
+        dest: /etc/pacman.d/ignore.d/00-molecule.conf
+        owner: root
+        group: root
+        mode: '0644'
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Include pacman ignore drop-ins (Arch)
+      ansible.builtin.lineinfile:
+        path: /etc/pacman.conf
+        line: 'Include = /etc/pacman.d/ignore.d/*.conf'
+        insertafter: '^\[options\]'
+        firstmatch: true
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Update package cache (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Update package cache (RedHat)
+      ansible.builtin.dnf:
+        update_cache: true
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name: '{{ __prepare_packages[ansible_facts["os_family"]] }}'
+        state: present
+      retries: 3
+      delay: 5
+
+    # The PostgreSQL role sets the en_US.UTF-8 locale in the molecule vars
+    - name: Prepare | Generate en_US.UTF-8 locale (Debian)
+      community.general.locale_gen:
+        name: en_US.UTF-8
+        state: present
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Enable PostgreSQL 16 module stream (EL9)
+      ansible.builtin.dnf:
+        name: '@postgresql:16'
+        state: present
+      when:
+        - postfixadmin_db_type == 'postgresql'
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['distribution_major_version'] == '9'
+
+    # The pool user has to exist before marcstraube.common.php writes the
+    # pool; on a real host it comes from marcstraube.common.users
+    - name: Prepare | Create the PHP-FPM pool group
+      ansible.builtin.group:
+        name: '{{ postfixadmin_php_fpm_group }}'
+        system: true
+        state: present
+      when: __prepare_fpm_pool_enabled | bool
+
+    - name: Prepare | Create the PHP-FPM pool user
+      ansible.builtin.user:
+        name: '{{ postfixadmin_php_fpm_user }}'
+        group: '{{ postfixadmin_php_fpm_group }}'
+        system: true
+        shell: '/usr/sbin/nologin'
+        create_home: false
+        state: present
+      when: __prepare_fpm_pool_enabled | bool
+
+    - name: Prepare | Include php role
+      ansible.builtin.include_role:
+        name: marcstraube.common.php
+      vars:
+        php_versions:
+          - version: '{{ __prepare_php_version }}'
+            extensions: >-
+              {{ __prepare_php_extensions[postfixadmin_db_type][ansible_facts['os_family']]
+                 + __prepare_totp_extensions }}
+            fpm: true
+            fpm_pools: '{{ __prepare_fpm_pools if __prepare_fpm_pool_enabled | bool else [] }}'
+        php_default_version: '{{ __prepare_php_version }}'
+
+    - name: Prepare | Include postgresql role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postgresql'
+      when: postfixadmin_db_type == 'postgresql'
+
+    - name: Prepare | Include mariadb role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../mariadb'
+      when: postfixadmin_db_type == 'mariadb'
+
+    # After every other role: the host has AppArmor for the role under test
+    - name: Prepare | Set up AppArmor
+      ansible.builtin.include_tasks: tasks/apparmor_host.yml
+      when: __molecule_apparmor | default(false) | bool

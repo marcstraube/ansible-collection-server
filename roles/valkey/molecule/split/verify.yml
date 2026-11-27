@@ -1,0 +1,109 @@
+---
+# valkey-cli exits with 0 on error replies (NOAUTH, NOPERM, WRONGPASS), so
+# every check reads the reply instead of the exit code.
+- name: Verify — Client
+  hosts: valkey_clients
+  gather_facts: false
+
+  vars:
+    __verify_server: "{{ groups['valkey_servers'] | first }}"
+    __verify_tls:
+      - 'valkey-cli'
+      - '--tls'
+      - '--cacert'
+      - '/etc/molecule-tls/ca.crt'
+      - '-h'
+      - "{{ groups['valkey_servers'] | first }}"
+      - '-p'
+      - '6380'
+    __verify_auth:
+      - '--user'
+      - 'rspamd'
+      - '--pass'
+      - 'rspamd-secret'
+      - '--no-auth-warning'
+
+  tasks:
+    - name: Verify | Write and read a key over TLS as the ACL user
+      ansible.builtin.command:
+        argv: '{{ __verify_tls + __verify_auth + item }}'
+      loop:
+        - ['SET', 'rs_split', 'ok']
+        - ['GET', 'rs_split']
+        - ['SET', 'foreign', 'no']
+      register: __verify_tls_user
+      changed_when: false
+
+    - name: Verify | Assert the ACL user works over TLS from the other host
+      ansible.builtin.assert:
+        that:
+          - __verify_tls_user.results[0].stdout == 'OK'
+          - __verify_tls_user.results[1].stdout == 'ok'
+          - __verify_tls_user.results[2].stdout is search('^NOPERM')
+        fail_msg: '{{ __verify_tls_user.results | map(attribute="stdout") | list }}'
+        success_msg: 'The ACL user authenticates over TLS from the client host'
+
+    # The default user must neither pass nor trigger protected mode: an
+    # unauthenticated connection gets NOAUTH, not DENIED
+    - name: Verify | Connect over TLS without credentials
+      ansible.builtin.command:
+        argv: '{{ __verify_tls + ["PING"] }}'
+      register: __verify_tls_default
+      changed_when: false
+
+    - name: Verify | Assert the default user is rejected over TLS
+      ansible.builtin.assert:
+        that:
+          - __verify_tls_default.stdout is search('NOAUTH')
+        fail_msg: '{{ __verify_tls_default.stdout }}'
+        success_msg: 'Connections without an ACL user are not authenticated'
+
+    - name: Verify | Connect to the plain port
+      ansible.builtin.command:
+        argv:
+          - valkey-cli
+          - -h
+          - '{{ __verify_server }}'
+          - -p
+          - '6379'
+          - PING
+      register: __verify_plain
+      changed_when: false
+      # The refused connection is expected: valkey-cli exits with 1
+      failed_when: __verify_plain.rc not in [0, 1]
+
+    - name: Verify | Assert the plain port is refused
+      ansible.builtin.assert:
+        that:
+          - __verify_plain.stdout != 'PONG'
+          - (__verify_plain.stdout ~ __verify_plain.stderr) is search('Connection refused')
+        fail_msg: 'Plain port answered: {{ __verify_plain.stdout }} {{ __verify_plain.stderr }}'
+        success_msg: 'The plain port is closed, other hosts get TLS only'
+
+- name: Verify — Server
+  hosts: valkey_servers
+  gather_facts: false
+
+  tasks:
+    - name: Verify | Read the key through the unix socket
+      ansible.builtin.command:
+        argv:
+          - valkey-cli
+          - -s
+          - /run/valkey/valkey.sock
+          - --user
+          - rspamd
+          - --pass
+          - rspamd-secret
+          - --no-auth-warning
+          - GET
+          - rs_split
+      register: __verify_socket
+      changed_when: false
+
+    - name: Verify | Assert local clients use the unix socket
+      ansible.builtin.assert:
+        that:
+          - __verify_socket.stdout == 'ok'
+        fail_msg: '{{ __verify_socket.stdout }} {{ __verify_socket.stderr }}'
+        success_msg: 'The key written over TLS from the client is read through the socket'

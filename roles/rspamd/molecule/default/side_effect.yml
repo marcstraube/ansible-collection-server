@@ -1,0 +1,292 @@
+---
+# Targeted package update. The stable repository of the rspamd project
+# keeps only its newest build in the metadata (Debian and EL alike) and
+# Arch Linux has a single version, so nothing can be rolled back to an
+# older build: the run covers the minimum checks and an update run on a
+# current host, which must neither change the package nor restart rspamd.
+- name: Side Effect — Minimum
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __side_effect_version: >-
+      {{ ((__side_effect_pkg.epoch ~ ':')
+          if ((__side_effect_pkg.epoch | default('', true) | string) not in ['', 'None', '0']) else '')
+         ~ (__side_effect_pkg.version | default(''))
+         ~ (('-' ~ __side_effect_pkg.release) if (__side_effect_pkg.release | default('', true)) else '') }}
+    __side_effect_pkg: "{{ ansible_facts['packages']['rspamd'] | default([{}]) | first }}"
+
+  tasks:
+    - name: Side Effect | Gather package facts before the update runs
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Record the installed version
+      ansible.builtin.set_fact:
+        __side_effect_version_before: '{{ __side_effect_version }}'
+
+    - name: Side Effect | Read the main PID before the update runs
+      ansible.builtin.command:
+        argv: [systemctl, show, --property=MainPID, --value, rspamd]
+      register: __side_effect_pid_before
+      changed_when: false
+
+    # The pre-check runs before the package task, so a minimum the
+    # repository does not offer changes nothing
+    - name: Side Effect | Run with a minimum the repository does not offer
+      block:
+        - name: Side Effect | Include rspamd role with an unmet minimum  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            rspamd_packages_state: 'latest'
+            rspamd_packages_minimum: "{{ {ansible_facts['os_family']: '99.0'} }}"
+      rescue:
+        - name: Side Effect | Record the minimum check failure
+          ansible.builtin.set_fact:
+            __side_effect_minimum_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Assert the unmet minimum failed without a change
+      ansible.builtin.assert:
+        that:
+          - __side_effect_minimum_error is defined
+          - "'requires 99.0' in __side_effect_minimum_error"
+          - "'nothing was changed' in __side_effect_minimum_error"
+        fail_msg: >-
+          A minimum of 99.0 did not fail before the update (error:
+          {{ __side_effect_minimum_error | default('none') }})
+        success_msg: 'The pre-check rejects a minimum the repository does not offer'
+
+    - name: Side Effect | Run with a mapping without a key for the host
+      block:
+        - name: Side Effect | Include rspamd role with a mapping for another platform  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            rspamd_packages_state: 'latest'
+            rspamd_packages_minimum:
+              Solaris: '1.0'
+      rescue:
+        - name: Side Effect | Record the mapping failure
+          ansible.builtin.set_fact:
+            __side_effect_mapping_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Side Effect | Assert the mapping without a key failed
+      ansible.builtin.assert:
+        that:
+          - __side_effect_mapping_error is defined
+          - "'has no key for this host' in __side_effect_mapping_error"
+        fail_msg: 'A mapping without a key for the host did not fail the run'
+        success_msg: 'A mapping without a key for the host fails the run'
+
+    # The full distribution version of the installed package as minimum
+    - name: Side Effect | Include rspamd role with the update  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        rspamd_packages_state: 'latest'
+        rspamd_packages_minimum: '{{ __side_effect_version_before }}'
+
+    - name: Side Effect | Gather package facts after the update run
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Read the main PID after the update run
+      ansible.builtin.command:
+        argv: [systemctl, show, --property=MainPID, --value, rspamd]
+      register: __side_effect_pid_after
+      changed_when: false
+
+    - name: Side Effect | Assert the current host was neither updated nor restarted
+      ansible.builtin.assert:
+        that:
+          - __side_effect_version == __side_effect_version_before
+          - __side_effect_pid_after.stdout == __side_effect_pid_before.stdout
+        fail_msg: >-
+          rspamd {{ __side_effect_version_before }} -> {{ __side_effect_version }},
+          PID {{ __side_effect_pid_before.stdout }} -> {{ __side_effect_pid_after.stdout }}
+
+# Restart for a replaced binary. No older build is available to update
+# from, so the update itself is simulated the way a package manager does
+# it: the binary is written to a new file and renamed over the old one
+# while rspamd runs, so the main process executes a deleted binary
+# ('/usr/bin/rspamd (deleted)'). The role with 'latest' must test the
+# configuration with the new binary and restart rspamd exactly once.
+- name: Side Effect — Replaced binary
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __side_effect_socket_groups:
+      - "{{ 'clamscan' if ansible_facts['os_family'] == 'RedHat' else 'clamav' }}"
+      - 'molecule-sock'
+
+  tasks:
+    - name: Side Effect | Read the main PID before the replacement
+      ansible.builtin.command:
+        argv: [systemctl, show, --property=MainPID, --value, rspamd]
+      register: __side_effect_pid_replaced
+      changed_when: false
+
+    - name: Side Effect | Create the drop-in directory of rspamd
+      ansible.builtin.file:
+        path: /etc/systemd/system/rspamd.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # Every start of the unit from here on appends a line ('+': as root,
+    # the unit runs as the service user)
+    - name: Side Effect | Create the drop-in that counts the starts of rspamd
+      ansible.builtin.copy:
+        content: |
+          [Service]
+          ExecStartPre=+/bin/sh -c 'echo start >> /run/molecule-rspamd-starts'
+        dest: /etc/systemd/system/rspamd.service.d/molecule-starts.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Side Effect | Load the counting drop-in
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+    - name: Side Effect | Replace the binary as a package update does
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          # Arch Linux: /usr/bin/rspamd links to the versioned binary
+          binary=$(readlink -f /usr/bin/rspamd)
+          cp -p "${binary}" "${binary}.molecule"
+          mv -f "${binary}.molecule" "${binary}"
+          readlink "/proc/{{ __side_effect_pid_replaced.stdout }}/exe"
+      register: __side_effect_exe_before
+      changed_when: true
+
+    - name: Side Effect | Assert the running binary shows as deleted
+      ansible.builtin.assert:
+        that:
+          - __side_effect_exe_before.stdout is search(' \(deleted\)$')
+        fail_msg: '{{ __side_effect_exe_before.stdout }}'
+
+    - name: Side Effect | Include rspamd role with the update  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        rspamd_packages_state: 'latest'
+
+    - name: Side Effect | Read the main PID after the update run
+      ansible.builtin.command:
+        argv: [systemctl, show, --property=MainPID, --value, rspamd]
+      register: __side_effect_pid_new
+      changed_when: false
+
+    - name: Side Effect | Read the binary of the new main process
+      ansible.builtin.command:
+        argv: [readlink, '/proc/{{ __side_effect_pid_new.stdout }}/exe']
+      register: __side_effect_exe_after
+      changed_when: false
+
+    - name: Side Effect | Count the starts of rspamd since the replacement
+      ansible.builtin.command:
+        argv: [cat, /run/molecule-rspamd-starts]
+      register: __side_effect_starts
+      changed_when: false
+      failed_when: false
+
+    - name: Side Effect | Assert the role tested the configuration and restarted rspamd once
+      ansible.builtin.assert:
+        that:
+          - __rspamd_restart_binary | bool
+          - __rspamd_update_config_test.rc | default(1) == 0
+          - __side_effect_pid_new.stdout != __side_effect_pid_replaced.stdout
+          - __side_effect_exe_after.stdout is not search('deleted')
+          - __side_effect_starts.stdout_lines | length == 1
+        fail_msg: >-
+          restart decided {{ __rspamd_restart_binary | default('undefined') }},
+          configtest {{ __rspamd_update_config_test.rc | default('none') }},
+          PID {{ __side_effect_pid_replaced.stdout }} -> {{ __side_effect_pid_new.stdout }},
+          exe {{ __side_effect_exe_after.stdout }}, starts {{ __side_effect_starts.stdout }}
+
+    #
+    # Socket group after a failed run: the membership is in place (added
+    # here out of band, as a run that failed before its restart leaves
+    # it), the running process lacks the group. The role must restart once,
+    # and a further run not at all.
+    #
+
+    - name: Side Effect | Create the extra socket group
+      ansible.builtin.group:
+        name: molecule-sock
+        system: true
+        state: present
+
+    - name: Side Effect | Add the service user to the group without a restart
+      ansible.builtin.user:
+        name: "{{ 'rspamd' if ansible_facts['os_family'] == 'Archlinux' else '_rspamd' }}"
+        groups:
+          - molecule-sock
+        append: true
+
+    - name: Side Effect | Reset the start counter
+      ansible.builtin.file:
+        path: /run/molecule-rspamd-starts
+        state: absent
+
+    - name: Side Effect | Include rspamd role with the extra socket group  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        rspamd_socket_groups: '{{ __side_effect_socket_groups }}'
+
+    # Handlers of an include_role run at the end of the play; flush them so
+    # the restart happens before the checks
+    - name: Side Effect | Run the handlers of the role
+      ansible.builtin.meta: flush_handlers
+
+    - name: Side Effect | Include rspamd role with the extra socket group again  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        rspamd_socket_groups: '{{ __side_effect_socket_groups }}'
+
+    - name: Side Effect | Run the handlers of the second run
+      ansible.builtin.meta: flush_handlers
+
+    - name: Side Effect | Count the starts after the group runs
+      ansible.builtin.command:
+        argv: [cat, /run/molecule-rspamd-starts]
+      register: __side_effect_group_starts
+      changed_when: false
+      failed_when: false
+
+    - name: Side Effect | Read the groups of the running main process
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          grep '^Groups:' "/proc/$(systemctl show --property=MainPID --value rspamd)/status"
+        executable: /bin/bash
+      register: __side_effect_group_status
+      changed_when: false
+
+    - name: Side Effect | Look up the extra socket group
+      ansible.builtin.getent:
+        database: group
+        key: molecule-sock
+
+    - name: Side Effect | Assert one restart and the group in the running process
+      ansible.builtin.assert:
+        that:
+          - __side_effect_group_starts.stdout_lines | length == 1
+          - ansible_facts['getent_group']['molecule-sock'][1] in __side_effect_group_status.stdout.split()[1:]
+        fail_msg: >-
+          starts {{ __side_effect_group_starts.stdout_lines | length }},
+          {{ __side_effect_group_status.stdout }}
+
+    - name: Side Effect | Remove the counting drop-in
+      ansible.builtin.file:
+        path: /etc/systemd/system/rspamd.service.d/molecule-starts.conf
+        state: absent
+
+    - name: Side Effect | Unload the counting drop-in
+      ansible.builtin.systemd_service:
+        daemon_reload: true

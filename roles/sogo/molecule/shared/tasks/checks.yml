@@ -1,0 +1,552 @@
+---
+# Checks of SOGo shared by the verify playbooks. The database server and
+# Dovecot run on __verify_backend (this host unless the scenario sets it);
+# the client talks to nginx on this host as https://__molecule_mail_host.
+#
+# Input: __verify_client (client command line), __verify_backend (default:
+# this host)
+
+#
+# Files and service
+#
+
+- name: Verify | Stat the configuration
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  loop:
+    - /etc/sogo
+    - /etc/sogo/sogo.conf
+    - /etc/sogo/sieve.creds
+  register: __verify_config_stat
+
+- name: Verify | Assert owner and mode of the configuration
+  ansible.builtin.assert:
+    that:
+      - __verify_config_stat.results[0].stat.mode == '0750'
+      - __verify_config_stat.results[1].stat.mode == '0640'
+      - __verify_config_stat.results[2].stat.mode == '0640'
+      - __verify_config_stat.results | map(attribute='stat.pw_name') | unique | list == ['root']
+      - __verify_config_stat.results | map(attribute='stat.gr_name') | unique | list == ['sogo']
+    fail_msg: '{{ __verify_config_stat.results | map(attribute="stat") | list | to_json }}'
+
+- name: Verify | Read sogo.conf
+  ansible.builtin.slurp:
+    src: /etc/sogo/sogo.conf
+  register: __verify_sogo_conf
+  no_log: true
+
+- name: Verify | Assert the user source and the password scheme
+  ansible.builtin.assert:
+    that:
+      - __verify_conf is search('userPasswordAlgorithm = "ARGON2ID";')
+      - __verify_conf is search('prependPasswordScheme = YES;')
+      - __verify_conf is search('viewURL = "(postgresql|mysql)://sogo_view:[^@]+@[^/]+/postfixadmin/sogo_users";')
+      - __verify_conf is search('SOGoPasswordChangeEnabled = YES;')
+    fail_msg: 'sogo.conf lacks the SQL source on the PostfixAdmin view with ARGON2ID'
+  vars:
+    __verify_conf: '{{ __verify_sogo_conf.content | b64decode }}'
+
+- name: Verify | Check the SOGo service
+  ansible.builtin.command:
+    argv: ['systemctl', 'is-active', 'sogo.service', 'memcached.service']
+  register: __verify_services
+  changed_when: false
+  failed_when: __verify_services.stdout_lines != ['active', 'active']
+
+- name: Verify | List the running containers of the sogo user (RedHat)
+  ansible.builtin.command:
+    argv: ['podman', 'ps', '--format', 'json']
+  become: true
+  become_user: sogo
+  environment:
+    XDG_RUNTIME_DIR: /run/sogo
+  register: __verify_podman_ps
+  changed_when: false
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Verify | Assert SOGo runs rootless in its container (RedHat)
+  ansible.builtin.assert:
+    that:
+      - __verify_containers | length == 1
+      - __verify_containers[0].Image == 'localhost/sogo:latest'
+    fail_msg: '{{ __verify_containers | to_json }}'
+  vars:
+    __verify_containers: >-
+      {{ __verify_podman_ps.stdout | from_json | selectattr('Names', 'contains', 'sogo') | list }}
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Verify | Check the process owner of sogod
+  ansible.builtin.command:
+    argv: ['ps', '-C', 'sogod', '-o', 'user=', '--no-headers']
+  register: __verify_sogod_user
+  changed_when: false
+  failed_when: __verify_sogod_user.stdout_lines | unique | list != ['sogo']
+  when: ansible_facts['os_family'] != 'RedHat'
+
+- name: Verify | Check that sogod listens on the loopback address only
+  ansible.builtin.command:
+    argv: ['ss', '--listening', '--tcp', '--numeric', '--no-header', 'sport = :20000']
+  register: __verify_sogod_listen
+  changed_when: false
+  failed_when: >-
+    __verify_sogod_listen.stdout_lines | length == 0
+    or __verify_sogod_listen.stdout_lines | map('split') | map(attribute=3) | reject('eq', '127.0.0.1:20000')
+       | list | length > 0
+
+- name: Verify | Check that memcached listens on the loopback addresses only
+  ansible.builtin.command:
+    argv: ['ss', '--listening', '--tcp', '--numeric', '--no-header', 'sport = :11211']
+  register: __verify_memcached_listen
+  changed_when: false
+  failed_when: >-
+    __verify_memcached_listen.stdout_lines | length == 0
+    or __verify_memcached_listen.stdout_lines | map('split') | map(attribute=3)
+       | reject('match', '^(127\\.0\\.0\\.1|\\[::1\\]):11211$') | list | length > 0
+
+#
+# Web server
+#
+
+- name: Verify | Request the login page, a static resource and the redirects
+  ansible.builtin.command:
+    argv: "{{ __verify_client | split + ['get', '--path', item] }}"
+  loop:
+    - /SOGo/
+    - /SOGo.woa/WebServerResources/img/sogo-full.svg
+    - /.well-known/caldav
+    - /.well-known/carddav
+  register: __verify_web
+  changed_when: false
+
+- name: Verify | Assert the login page, the resource and the redirects
+  ansible.builtin.assert:
+    that:
+      - __verify_pages[0].status == 200
+      - __verify_pages[0].body is search('SOGo')
+      - __verify_pages[1].status == 200
+      - __verify_pages[1].content_type is search('svg')
+      - __verify_pages[2].status == 301
+      - __verify_pages[2].location is search('/SOGo/dav/$')
+      - __verify_pages[3].status == 301
+    fail_msg: '{{ __verify_pages | to_json }}'
+  vars:
+    __verify_pages: "{{ __verify_web.results | map(attribute='stdout') | map('from_json') | list }}"
+
+#
+# Users and passwords
+#
+
+- name: Verify | Read the stored hash of alice
+  ansible.builtin.command:
+    argv: "{{ __verify_db_query[molecule_db_type] | split
+              + [\"SELECT c_password FROM sogo_users WHERE c_uid = 'alice@example.com'\"] }}"
+  become: "{{ molecule_db_type == 'postgresql' }}"
+  become_user: "{{ 'postgres' if molecule_db_type == 'postgresql' else omit }}"
+  delegate_to: '{{ __verify_backend | default(inventory_hostname) }}'
+  register: __verify_alice_hash
+  changed_when: false
+
+- name: Verify | Log in as alice and with a wrong password
+  ansible.builtin.command:
+    argv: "{{ __verify_client | split + ['login', '--user', 'alice@example.com'] }}"
+    stdin: "{{ {'password': item} | to_json }}"
+  loop:
+    - "{{ __molecule_passwords['alice@example.com'] }}"
+    - 'wrong-Password-1'
+  loop_control:
+    index_var: __verify_login_index
+    label: "{{ 'correct' if __verify_login_index == 0 else 'wrong' }}"
+  register: __verify_logins
+  changed_when: false
+  no_log: true
+
+- name: Verify | Assert the login with the {ARGON2ID} hash and the rejection
+  ansible.builtin.assert:
+    that:
+      - __verify_alice_hash.stdout is match('^\{ARGON2ID\}\$argon2id\$')
+      - (__verify_logins.results[0].stdout | from_json).login == 200
+      - (__verify_logins.results[1].stdout | from_json).login != 200
+    fail_msg: >-
+      hash {{ __verify_alice_hash.stdout[:20] }}, logins
+      {{ __verify_logins.results | map(attribute='stdout') | list }}
+    success_msg: 'SOGo accepts the {ARGON2ID} hash of PostfixAdmin and rejects a wrong password'
+
+# dave fails sogo_failed_login_count times; then the correct password is
+# refused as well (the scenario lowers the limits)
+- name: Verify | Fail the login of dave until the account is blocked
+  ansible.builtin.command:
+    argv: "{{ __verify_client | split + ['login', '--user', 'dave@example.com'] }}"
+    stdin: "{{ {'password': 'wrong-Password-' ~ item} | to_json }}"
+  loop: "{{ range(sogo_failed_login_count | int) | list }}"
+  register: __verify_dave_failures
+  changed_when: false
+  no_log: true
+
+- name: Verify | Log in as dave with the correct password
+  ansible.builtin.command:
+    argv: "{{ __verify_client | split + ['login', '--user', 'dave@example.com'] }}"
+    stdin: "{{ {'password': __molecule_passwords['dave@example.com']} | to_json }}"
+  register: __verify_dave_login
+  changed_when: false
+  no_log: true
+
+- name: Verify | Assert the brute-force protection blocks dave
+  ansible.builtin.assert:
+    that:
+      - __verify_dave_failures.results | map(attribute='stdout') | map('from_json') | map(attribute='login')
+        | reject('eq', 403) | list | length == 0
+      - (__verify_dave_login.stdout | from_json).login != 200
+    fail_msg: '{{ __verify_dave_login.stdout }}'
+    success_msg: 'After {{ sogo_failed_login_count }} failures the correct password of dave is refused'
+
+# carol changes her password in SOGo and back, so verify can run again
+- name: Verify | Change the password of carol in SOGo
+  ansible.builtin.command:
+    argv: >-
+      {{ __verify_client | split + ['password', '--user', 'carol@example.com'] }}
+    stdin: "{{ {'password': item.old, 'new_password': item.new} | to_json }}"
+  loop:
+    - old: "{{ __molecule_passwords['carol@example.com'] }}"
+      new: '{{ __molecule_carol_new_password }}'
+  loop_control:
+    label: 'carol'
+  register: __verify_password_change
+  changed_when: true
+  no_log: true
+
+- name: Verify | Read the hash SOGo stored for carol
+  ansible.builtin.command:
+    argv: "{{ __verify_db_query[molecule_db_type] | split
+              + [\"SELECT c_password FROM sogo_users WHERE c_uid = 'carol@example.com'\"] }}"
+  become: "{{ molecule_db_type == 'postgresql' }}"
+  become_user: "{{ 'postgres' if molecule_db_type == 'postgresql' else omit }}"
+  delegate_to: '{{ __verify_backend | default(inventory_hostname) }}'
+  register: __verify_carol_hash
+  changed_when: false
+
+- name: Verify | Authenticate carol with the new password at Dovecot
+  ansible.builtin.command:
+    argv: ['doveadm', 'auth', 'test', 'carol@example.com', '{{ item }}']
+  loop:
+    - '{{ __molecule_carol_new_password }}'
+    - "{{ __molecule_passwords['carol@example.com'] }}"
+  loop_control:
+    index_var: __verify_carol_index
+    label: "{{ 'new' if __verify_carol_index == 0 else 'old' }}"
+  delegate_to: '{{ __verify_backend | default(inventory_hostname) }}'
+  register: __verify_carol_dovecot
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Verify | Log in as carol with the new password
+  ansible.builtin.command:
+    argv: >-
+      {{ __verify_client | split + ['login', '--user', 'carol@example.com'] }}
+    stdin: "{{ {'password': __molecule_carol_new_password} | to_json }}"
+  register: __verify_carol_login
+  changed_when: false
+  no_log: true
+
+- name: Verify | Change the password of carol back
+  ansible.builtin.command:
+    argv: >-
+      {{ __verify_client | split + ['password', '--user', 'carol@example.com'] }}
+    stdin: >-
+      {{ {'password': __molecule_carol_new_password,
+          'new_password': __molecule_passwords['carol@example.com']} | to_json }}
+  register: __verify_password_back
+  changed_when: true
+  no_log: true
+
+- name: Verify | Assert the password change in SOGo reached Dovecot
+  ansible.builtin.assert:
+    that:
+      - (__verify_password_change.results[0].stdout | from_json).status == 200
+      - __verify_carol_hash.stdout is match('^\{ARGON2ID\}\$argon2id\$')
+      - __verify_carol_dovecot.results[0].rc == 0
+      - __verify_carol_dovecot.results[1].rc != 0
+      - (__verify_carol_login.stdout | from_json).login == 200
+      - (__verify_password_back.stdout | from_json).status == 200
+    fail_msg: >-
+      change {{ __verify_password_change.results[0].stdout }}, hash
+      {{ __verify_carol_hash.stdout[:20] }}, Dovecot new/old
+      {{ __verify_carol_dovecot.results | map(attribute='rc') | list }}, login
+      {{ __verify_carol_login.stdout }}, back {{ __verify_password_back.stdout }}
+    success_msg: 'SOGo stores a changed password as {ARGON2ID} hash that Dovecot accepts'
+
+#
+# Mail
+#
+
+- name: Verify | List the IMAP folders of alice through SOGo
+  ansible.builtin.command:
+    argv: >-
+      {{ __verify_client | split + ['mailboxes', '--user', 'alice@example.com'] }}
+    stdin: "{{ {'password': __molecule_passwords['alice@example.com']} | to_json }}"
+  register: __verify_mailboxes
+  changed_when: false
+  no_log: true
+
+- name: Verify | Assert the IMAP folders and the shared mailbox
+  ansible.builtin.assert:
+    that:
+      - __verify_result.status == 200
+      - "'INBOX' in __verify_result.paths"
+      - "'Sent' in __verify_result.paths"
+      - __verify_result.paths | select('search', 'support@example\.com') | list | length > 0
+    fail_msg: '{{ __verify_result | to_json }}'
+    success_msg: 'SOGo lists the folders of alice and the shared mailbox of support'
+  vars:
+    __verify_result: '{{ __verify_mailboxes.stdout | from_json }}'
+
+# SOGo shares a mail folder through IMAP SETACL (folder ACL editor of the
+# web interface); Dovecot lists it in the shared namespace of bob
+- name: Verify | Share the Archive folder of alice with bob through SOGo
+  ansible.builtin.command:
+    argv: >-
+      {{ __verify_client | split
+         + ['share', '--user', 'alice@example.com', '--folder', 'Archive', '--to', 'bob@example.com'] }}
+    stdin: "{{ {'password': __molecule_passwords['alice@example.com']} | to_json }}"
+  register: __verify_share
+  changed_when: true
+  no_log: true
+
+- name: Verify | Read the ACL of the Archive folder of alice
+  ansible.builtin.command:
+    argv: ['doveadm', 'acl', 'get', '-u', 'alice@example.com', 'Archive']
+  delegate_to: '{{ __verify_backend | default(inventory_hostname) }}'
+  register: __verify_share_acl
+  changed_when: false
+
+- name: Verify | List the shared folders of bob
+  ansible.builtin.command:
+    argv: ['doveadm', 'mailbox', 'list', '-u', 'bob@example.com']
+  delegate_to: '{{ __verify_backend | default(inventory_hostname) }}'
+  register: __verify_share_list
+  changed_when: false
+
+- name: Verify | Assert alice shared the folder with bob
+  ansible.builtin.assert:
+    that:
+      - (__verify_share.stdout | from_json).add == 204
+      - (__verify_share.stdout | from_json).status == 200
+      - __verify_share_acl.stdout is search('user=bob@example\\.com')
+      - "'shared/alice@example.com/Archive' in __verify_share_list.stdout_lines"
+    fail_msg: '{{ __verify_share.stdout }} {{ __verify_share_acl.stdout }} {{ __verify_share_list.stdout }}'
+    success_msg: 'A folder shared in SOGo appears in the shared namespace of bob'
+
+- name: Verify | Set the subject of the test message
+  ansible.builtin.set_fact:
+    __verify_subject: 'molecule-sogo-{{ ansible_date_time.epoch }}'
+
+- name: Verify | Send a message from alice to bob through SOGo
+  ansible.builtin.command:
+    argv: >-
+      {{ __verify_client | split
+         + ['send', '--user', 'alice@example.com', '--to', 'bob@example.com', '--subject', __verify_subject] }}
+    stdin: "{{ {'password': __molecule_passwords['alice@example.com']} | to_json }}"
+  register: __verify_send
+  changed_when: true
+  no_log: true
+
+- name: Verify | Assert SOGo sent the message
+  ansible.builtin.assert:
+    that:
+      - (__verify_send.stdout | from_json).send == 200
+    fail_msg: '{{ __verify_send.stdout }}'
+
+- name: Verify | Find the message in the inbox of bob
+  ansible.builtin.command:
+    argv: ['doveadm', 'search', '-u', 'bob@example.com', 'mailbox', 'INBOX', 'subject', '{{ __verify_subject }}']
+  delegate_to: '{{ __verify_backend | default(inventory_hostname) }}'
+  register: __verify_bob_inbox
+  changed_when: false
+  until: __verify_bob_inbox.stdout | length > 0
+  retries: 20
+  delay: 3
+
+#
+# Calendars, address books and Sieve
+#
+
+- name: Verify | Store a CalDAV event and a CardDAV contact
+  ansible.builtin.command:
+    argv: >-
+      {{ __verify_client | split
+         + ['dav', '--kind', item, '--user', 'alice@example.com'] }}
+    stdin: "{{ {'password': __molecule_passwords['alice@example.com']} | to_json }}"
+  loop:
+    - calendar
+    - contact
+  register: __verify_dav
+  changed_when: true
+  no_log: true
+
+- name: Verify | Assert the event and the contact
+  ansible.builtin.assert:
+    that:
+      - __verify_results[0].stored in [201, 204]
+      - __verify_results[0].fetched == 200
+      - __verify_results[0].body is search('SUMMARY:Molecule event')
+      - __verify_results[1].stored in [201, 204]
+      - __verify_results[1].fetched == 200
+      - __verify_results[1].body is search('FN:Molecule Contact')
+    fail_msg: '{{ __verify_results | to_json }}'
+    success_msg: 'CalDAV and CardDAV store and return the event and the contact'
+  vars:
+    __verify_results: "{{ __verify_dav.results | map(attribute='stdout') | map('from_json') | list }}"
+
+- name: Verify | Save a mail filter of alice through SOGo
+  ansible.builtin.command:
+    argv: >-
+      {{ __verify_client | split
+         + ['filter', '--user', 'alice@example.com', '--subject', 'molecule-filter'] }}
+    stdin: "{{ {'password': __molecule_passwords['alice@example.com']} | to_json }}"
+  register: __verify_filter
+  changed_when: true
+  no_log: true
+
+- name: Verify | Read the Sieve script of alice
+  ansible.builtin.command:
+    argv: ['doveadm', 'sieve', 'get', '-u', 'alice@example.com', 'sogo']
+  delegate_to: '{{ __verify_backend | default(inventory_hostname) }}'
+  register: __verify_sieve
+  changed_when: false
+
+- name: Verify | Assert SOGo wrote the filter through ManageSieve
+  ansible.builtin.assert:
+    that:
+      - (__verify_filter.stdout | from_json).status == 200
+      - __verify_sieve.stdout is search('molecule-filter')
+      - __verify_sieve.stdout is search('fileinto')
+    fail_msg: '{{ __verify_filter.stdout }} {{ __verify_sieve.stdout }}'
+
+# An out-of-office reply that ended yesterday; the vacation job below logs in
+# to ManageSieve as the Sieve administrator for alice and removes it
+- name: Verify | Save an expired out-of-office reply of alice through SOGo
+  ansible.builtin.command:
+    argv: "{{ __verify_client | split + ['vacation', '--user', 'alice@example.com', '--subject', 'molecule-filter'] }}"
+    stdin: "{{ {'password': __molecule_passwords['alice@example.com']} | to_json }}"
+  register: __verify_vacation
+  changed_when: true
+  no_log: true
+
+- name: Verify | Read the Sieve script with the out-of-office reply
+  ansible.builtin.command:
+    argv: ['doveadm', 'sieve', 'get', '-u', 'alice@example.com', 'sogo']
+  delegate_to: '{{ __verify_backend | default(inventory_hostname) }}'
+  register: __verify_sieve_vacation
+  changed_when: false
+
+- name: Verify | Assert SOGo wrote the out-of-office reply
+  ansible.builtin.assert:
+    that:
+      - (__verify_vacation.stdout | from_json).status == 200
+      - __verify_sieve_vacation.stdout is search('molecule-vacation')
+    fail_msg: '{{ __verify_vacation.stdout }} {{ __verify_sieve_vacation.stdout }}'
+
+# The master user of the Sieve administrator is limited to ManageSieve
+- name: Verify | Authenticate the Sieve administrator as alice
+  ansible.builtin.command:
+    argv:
+      - doveadm
+      - auth
+      - test
+      - -x
+      - 'service={{ item }}'
+      - -M
+      - '{{ __molecule_sieve_admin }}'
+      - alice@example.com
+      - '{{ __molecule_sieve_admin_password }}'
+  loop:
+    - sieve
+    - imap
+  delegate_to: '{{ __verify_backend | default(inventory_hostname) }}'
+  register: __verify_master
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Verify | Assert the master login works for ManageSieve only
+  ansible.builtin.assert:
+    that:
+      - __verify_master.results[0].rc == 0
+      - __verify_master.results[1].rc != 0
+    fail_msg: 'Master login results (sieve, imap): {{ __verify_master.results | map(attribute="rc") | list }}'
+
+#
+# Periodic jobs
+#
+
+- name: Verify | Check the timers
+  ansible.builtin.command:
+    argv: ['systemctl', 'is-active', '{{ item }}.timer']
+  loop:
+    - sogo-expire-sessions
+    - sogo-ealarms-notify
+    - sogo-vacation-messages
+  register: __verify_timers
+  changed_when: false
+  failed_when: __verify_timers.stdout != 'active'
+
+# A failing job fails the start of its oneshot service. restarted, not
+# started: a run the timer began earlier counts as started and may have read
+# the state before the checks above changed it; a restart waits for a fresh
+# run to finish
+- name: Verify | Run every job once
+  ansible.builtin.systemd_service:
+    name: '{{ item }}.service'
+    state: restarted
+  loop:
+    - sogo-expire-sessions
+    - sogo-ealarms-notify
+    - sogo-vacation-messages
+
+- name: Verify | Read the results of the jobs
+  ansible.builtin.command:
+    argv: ['systemctl', 'show', '--property=Result', '--value', '{{ item }}.service']
+  loop:
+    - sogo-expire-sessions
+    - sogo-ealarms-notify
+    - sogo-vacation-messages
+  register: __verify_jobs
+  changed_when: false
+  failed_when: __verify_jobs.stdout != 'success'
+
+- name: Verify | Read the Sieve script after the vacation job
+  ansible.builtin.command:
+    argv: ['doveadm', 'sieve', 'get', '-u', 'alice@example.com', 'sogo']
+  delegate_to: '{{ __verify_backend | default(inventory_hostname) }}'
+  register: __verify_sieve_after_job
+  changed_when: false
+
+- name: Verify | Assert the vacation job ended the out-of-office reply
+  ansible.builtin.assert:
+    that:
+      - __verify_sieve_after_job.stdout is not search('molecule-vacation')
+      - __verify_sieve_after_job.stdout is search('molecule-filter')
+    fail_msg: '{{ __verify_sieve_after_job.stdout }}'
+    success_msg: 'sogo-tool update-autoreply logged in as the Sieve administrator and removed the reply'
+
+#
+# ActiveSync
+#
+
+- name: Verify | Ask ActiveSync for its protocol versions
+  ansible.builtin.command:
+    argv: >-
+      {{ __verify_client | split + ['activesync', '--user', 'alice@example.com'] }}
+    stdin: "{{ {'password': __molecule_passwords['alice@example.com']} | to_json }}"
+  register: __verify_activesync
+  changed_when: false
+  no_log: true
+  when: sogo_activesync_enabled | default(false) | bool
+
+- name: Verify | Assert ActiveSync answers
+  ansible.builtin.assert:
+    that:
+      - (__verify_activesync.stdout | from_json).status == 200
+      - (__verify_activesync.stdout | from_json).versions is search('14')
+    fail_msg: '{{ __verify_activesync.stdout }}'
+  when: sogo_activesync_enabled | default(false) | bool

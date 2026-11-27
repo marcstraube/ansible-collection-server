@@ -1,0 +1,132 @@
+---
+# Shares from dovecot_shared_mailboxes, applied with doveadm acl through the
+# running service. doveadm acl set also writes the shared mailbox map, so
+# the folder shows up under shared/<owner>/ for the user (global ACLs in
+# dovecot.conf would not). The current ACL is read first; only differences
+# are written. ACL entries that are not listed (shares users set up through
+# IMAP SETACL) stay untouched.
+
+# Exit status 68: the folder does not exist yet. A reload of service.yml
+# right before replaces the auth processes asynchronously, so a lookup
+# failure (exit status 75) is retried. In check mode a changed
+# configuration is not active yet: the running service would answer with
+# the old one, so the ACLs are not read then.
+- name: Shared | Read the ACLs of the shared folders
+  ansible.builtin.command:
+    argv:
+      - doveadm
+      - -f
+      - json
+      - acl
+      - get
+      - -u
+      - '{{ item.owner }}'
+      - '{{ item.folder }}'
+  loop: '{{ __dovecot_shared_folders }}'
+  loop_control:
+    label: '{{ item.owner }} {{ item.folder }}'
+  register: __dovecot_acl_current
+  changed_when: false
+  failed_when: __dovecot_acl_current.rc not in [0, 68]
+  until: __dovecot_acl_current.rc in [0, 68]
+  retries: 5
+  delay: 2
+  check_mode: false
+  when:
+    - not __dovecot_check_mode_install | default(false) | bool
+    - not (ansible_check_mode and __dovecot_config_changed | default(false) | bool)
+
+# A folder that is shared but does not exist yet is created in the owner's
+# mailbox (only for entries to grant, never to remove)
+- name: Shared | Create missing shared folders
+  ansible.builtin.command:
+    argv:
+      - doveadm
+      - mailbox
+      - create
+      - -u
+      - '{{ item.item.owner }}'
+      - '{{ item.item.folder }}'
+  loop: >-
+    {{ __dovecot_acl_current.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'eq', 68)
+       | selectattr('item.grant') | list }}
+  loop_control:
+    label: '{{ item.item.owner }} {{ item.item.folder }}'
+  register: __dovecot_shared_create
+  changed_when: true
+
+- name: Shared | Plan the ACL changes
+  ansible.builtin.set_fact:
+    __dovecot_acl_actions: >-
+      {%- set ns = namespace(actions=[]) -%}
+      {%- for result in __dovecot_acl_current.results | default([]) | selectattr('rc', 'defined') -%}
+      {%- set folder = result.item -%}
+      {%- set current = {} -%}
+      {%- if result.rc == 0 -%}
+      {%- for acl in result.stdout | from_json -%}
+      {%- set _ = current.update({acl.id: acl.rights.split() | sort}) -%}
+      {%- endfor -%}
+      {%- endif -%}
+      {%- for entry in __dovecot_shared_entries
+            | selectattr('owner', 'eq', folder.owner) | selectattr('folder', 'eq', folder.folder) -%}
+      {%- set id = 'user=' ~ entry.user -%}
+      {%- set wanted = entry.rights | list | map('extract', __dovecot_acl_rights) | unique | sort -%}
+      {%- if entry.state == 'absent' -%}
+      {%- if id in current -%}
+      {%- set ns.actions = ns.actions + [{'owner': folder.owner, 'folder': folder.folder, 'id': id,
+            'action': 'delete', 'rights': []}] -%}
+      {%- endif -%}
+      {%- elif (entry.mode == 'managed' and current.get(id) != wanted)
+               or (entry.mode == 'initial' and id not in current) -%}
+      {%- set ns.actions = ns.actions + [{'owner': folder.owner, 'folder': folder.folder, 'id': id,
+            'action': 'set', 'rights': wanted}] -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- set owner_wanted = __dovecot_owner_rights | list | map('extract', __dovecot_acl_rights) | sort -%}
+      {%- set locks = __dovecot_shared_entries | selectattr('owner', 'eq', folder.owner)
+            | selectattr('folder', 'eq', folder.folder) | selectattr('state', 'eq', 'present')
+            | rejectattr('owner_admin') | list -%}
+      {%- if locks | length > 0 -%}
+      {%- if (locks | selectattr('mode', 'eq', 'managed') | list | length > 0 and current.get('owner') != owner_wanted)
+             or ('owner' not in current) -%}
+      {%- set ns.actions = ns.actions + [{'owner': folder.owner, 'folder': folder.folder, 'id': 'owner',
+            'action': 'set', 'rights': owner_wanted}] -%}
+      {%- endif -%}
+      {%- elif current.get('owner') == owner_wanted
+               and __dovecot_shared_entries | selectattr('owner', 'eq', folder.owner)
+                   | selectattr('folder', 'eq', folder.folder) | selectattr('mode', 'eq', 'managed')
+                   | list | length > 0 -%}
+      {#- The owner entry the role wrote for owner_admin: false; without such an
+          entry the owner gets the default rights (all) back -#}
+      {%- set ns.actions = ns.actions + [{'owner': folder.owner, 'folder': folder.folder, 'id': 'owner',
+            'action': 'delete', 'rights': []}] -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ ns.actions }}
+  when: not __dovecot_check_mode_install | default(false) | bool
+
+- name: Shared | Grant the rights
+  ansible.builtin.command:
+    argv: >-
+      {{ ['doveadm', 'acl', 'set', '-u', item.owner, item.folder, item.id] + item.rights }}
+  loop: "{{ __dovecot_acl_actions | default([]) | selectattr('action', 'eq', 'set') | list }}"
+  loop_control:
+    label: '{{ item.owner }} {{ item.folder }} {{ item.id }}: {{ item.rights | join(" ") }}'
+  register: __dovecot_shared_grant
+  changed_when: true
+
+- name: Shared | Remove the rights
+  ansible.builtin.command:
+    argv:
+      - doveadm
+      - acl
+      - delete
+      - -u
+      - '{{ item.owner }}'
+      - '{{ item.folder }}'
+      - '{{ item.id }}'
+  loop: "{{ __dovecot_acl_actions | default([]) | selectattr('action', 'eq', 'delete') | list }}"
+  loop_control:
+    label: '{{ item.owner }} {{ item.folder }} {{ item.id }}'
+  register: __dovecot_shared_remove
+  changed_when: true

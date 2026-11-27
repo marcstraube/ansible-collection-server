@@ -1,0 +1,243 @@
+---
+# Restores a backup set of sogo_backup_dir (sogo-<YYYYmmdd-HHMMSS>, one file
+# per user). The current state is backed up first (the backup script never
+# rotates the named set; with no user data yet, as on a new or emptied
+# database, there is nothing to save and the restore goes on); then
+# sogo-tool restore replaces every folder of every user of the set with its
+# content (-F ALL) and restores the preferences (-p; with the Sieve
+# administrator also the Sieve script). Users of the set the user source no
+# longer knows are skipped with a warning; a restore that restores none of
+# the users of the set fails (an unreachable user source makes every user
+# unknown).
+# Whenever a restore command ran, memcached is emptied (the restore gives the
+# folders new IDs), SOGo restarted and the run waits for it, also when a
+# later user fails. Check mode runs none of the commands.
+
+- name: Restore | Find the backup sets
+  ansible.builtin.find:
+    paths: '{{ sogo_backup_dir }}'
+    file_type: directory
+    patterns: 'sogo-*'
+    excludes: '*.partial'
+  register: __sogo_restore_sets
+
+- name: Restore | Validate the set to restore
+  ansible.builtin.assert:
+    that:
+      - sogo_restore in __sogo_restore_names
+    fail_msg: |
+      sogo_restore '{{ sogo_restore }}' is not a backup set in {{ sogo_backup_dir }}.
+      Available sets:
+      {% for name in __sogo_restore_names | sort %}
+        - {{ name }}
+      {% else %}
+        (none)
+      {% endfor %}
+    quiet: true
+  vars:
+    __sogo_restore_names: "{{ __sogo_restore_sets.files | map(attribute='path') | map('basename') | list }}"
+
+- name: Restore | Find the users of the set
+  ansible.builtin.find:
+    paths: '{{ sogo_backup_dir }}/{{ sogo_restore }}'
+    file_type: file
+  register: __sogo_restore_users
+
+# An empty set would restore nothing and end green
+- name: Restore | Validate the set holds users
+  ansible.builtin.assert:
+    that:
+      - __sogo_restore_users.files | length > 0
+    fail_msg: >-
+      The backup set {{ sogo_restore }} in {{ sogo_backup_dir }} holds no user
+      file; there is nothing to restore. Name a complete set.
+    quiet: true
+
+# Before the block: the facts below read it also when the backup failed
+- name: Restore | Reset the results of an earlier restore
+  ansible.builtin.set_fact:
+    __sogo_restore_runs: {}
+
+- name: Restore | Restore the set
+  block:
+    - name: Restore | Back up the current state
+      ansible.builtin.command:
+        argv:
+          - '{{ __sogo_backup_script }}'
+          - '-k'
+          - '{{ sogo_restore }}'
+      become: true
+      become_user: '{{ __sogo_user }}'
+      # The environment of the units: the TLS settings of libpq on Debian and
+      # Arch Linux, the podman runtime directory on Rocky Linux
+      environment: "{{ __sogo_db_environment | combine({'XDG_RUNTIME_DIR': __sogo_runtime_dir}) }}"
+      register: __sogo_restore_backup
+      changed_when: __sogo_restore_backup.stdout is not search('nothing to back up')
+
+    # Destructive folder restore first, then the preferences. A user the
+    # user source no longer knows ("user '...' not found") is skipped, unless
+    # the output also reports an error.
+    - name: Restore | Restore the folders and preferences of every user
+      ansible.builtin.command:
+        argv: >-
+          {{ __sogo_command_prefix + [__sogo_tool, 'restore']
+             + (['-F', 'ALL'] if item.1 == 'folders' else ['-p'])
+             + (['-c', __sogo_sieve_creds_file] if item.1 == 'preferences' and __sogo_sieve_admin_set | bool else [])
+             + [sogo_backup_dir ~ '/' ~ sogo_restore, item.0] }}
+      loop: >-
+        {{ __sogo_restore_users.files | map(attribute='path') | map('basename') | sort
+           | product(['folders', 'preferences']) | list }}
+      loop_control:
+        label: '{{ item.0 }}: {{ item.1 }}'
+      become: true
+      become_user: '{{ __sogo_user }}'
+      environment: "{{ __sogo_db_environment | combine({'XDG_RUNTIME_DIR': __sogo_runtime_dir}) }}"
+      register: __sogo_restore_runs
+      changed_when: __sogo_restore_runs.rc == 0
+      failed_when: >-
+        __sogo_restore_runs.rc != 0
+        and ((__sogo_restore_runs.stdout ~ __sogo_restore_runs.stderr) is not search(__sogo_restore_unknown_user)
+             or (__sogo_restore_runs.stdout ~ __sogo_restore_runs.stderr)
+                | regex_replace(__sogo_restore_unknown_user, '')
+                is search(__sogo_restore_error, ignorecase=true))
+
+  always:
+    - name: Restore | Record the restored and the skipped users
+      ansible.builtin.set_fact:
+        __sogo_restore_ran: >-
+          {{ __sogo_restore_runs.results | default([]) | selectattr('rc', 'defined') | list | length > 0 }}
+        __sogo_restored_users: >-
+          {{ __sogo_restore_runs.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'eq', 0)
+             | map(attribute='item') | map('first') | unique | list }}
+        __sogo_restore_skipped: >-
+          {{ __sogo_restore_runs.results | default([]) | selectattr('rc', 'defined') | rejectattr('rc', 'eq', 0)
+             | rejectattr('failed')
+             | map(attribute='item') | map('first') | unique | list }}
+
+    - name: Restore | Warn about skipped users
+      ansible.builtin.debug:
+        msg: >-
+          Skipped users of {{ sogo_restore }} that the user source does not
+          know: {{ __sogo_restore_skipped | join(', ') }}.
+      when: __sogo_restore_skipped | length > 0
+
+    # A destructive folder restore recreates the folders with new IDs, while
+    # memcached still holds the folder information of the old ones: SOGo
+    # would answer 404 for the restored objects until those entries expire.
+    - name: Restore | Empty the cache of SOGo (memcached on this host)
+      ansible.builtin.systemd_service:
+        name: '{{ __sogo_memcached_service_name }}'
+        state: restarted
+      when:
+        - __sogo_restore_ran | bool
+        - __sogo_memcached_local | bool
+
+    - name: Restore | Restart SOGo
+      ansible.builtin.systemd_service:
+        name: '{{ __sogo_service_name }}'
+        state: restarted
+      when:
+        - __sogo_restore_ran | bool
+        - sogo_service_enabled | bool
+
+    - name: Restore | Wait for sogod
+      ansible.builtin.wait_for:
+        host: "{{ sogo_bind | regex_replace(':[0-9]+$', '') | regex_replace('^\\[(.*)\\]$', '\\1') }}"
+        port: "{{ sogo_bind | regex_replace('^.*:', '') | int }}"
+        timeout: '{{ sogo_service_start_timeout | int }}'
+      when:
+        - __sogo_restore_ran | bool
+        - sogo_service_enabled | bool
+
+    # A memcached on another host gets flush_all over its TCP port, after
+    # the restart (a failed flush must not leave SOGo stopped); the result
+    # is checked below. Host and port come through the environment.
+    - name: Restore | Empty the cache of SOGo (memcached on another host)
+      ansible.builtin.shell:
+        cmd: |
+          # timeout ends a connect or a read that hangs (a firewall dropping
+          # the packets) with status 124, so the task always reports a status
+          timeout 20 bash -c '
+            set -eu
+            exec 3<>"/dev/tcp/$MEMCACHED_HOST/$MEMCACHED_PORT"
+            printf "flush_all\r\nquit\r\n" >&3
+            IFS= read -r reply <&3 || {
+              echo "memcached closed the connection without an answer" >&2
+              exit 1
+            }
+            if [ "$reply" != "$(printf "OK\r")" ] && [ "$reply" != OK ]; then
+              echo "memcached answered: $reply" >&2
+              exit 1
+            fi
+          '
+        executable: /bin/bash
+      environment:
+        MEMCACHED_HOST: '{{ __sogo_memcached_tcp_host }}'
+        MEMCACHED_PORT: '{{ __sogo_memcached_tcp_port }}'
+      # Backstop only: a task timeout would end the run before the assert
+      # below; the command ends itself after 20 seconds
+      timeout: 120
+      register: __sogo_restore_flush
+      changed_when: __sogo_restore_flush.rc == 0
+      failed_when: false
+      when:
+        - __sogo_restore_ran | bool
+        - not __sogo_memcached_local | bool
+
+    - name: Restore | Assert the cache on the other host was emptied
+      ansible.builtin.assert:
+        that:
+          - (__sogo_restore_flush.rc | default(0)) == 0
+        fail_msg: >-
+          flush_all to memcached on {{ sogo_memcached_host }} failed
+          ({{ __sogo_restore_flush_error }}). {{ __sogo_restore_flush_next }}
+          SOGo may answer 404 for the restored objects until their cached
+          entries expire. Flush it by hand from a host that reaches memcached:
+          printf 'flush_all\r\nquit\r\n' | nc {{ __sogo_memcached_tcp_host }} {{ __sogo_memcached_tcp_port }}
+          (it answers OK), or restart memcached there.
+        quiet: true
+      vars:
+        # Users whose restore failed for real (not the skipped unknown ones)
+        __sogo_restore_failed_users: >-
+          {{ __sogo_restore_runs.results | default([]) | selectattr('failed', 'defined') | selectattr('failed')
+             | map(attribute='item') | map('first') | unique | list }}
+        # What to do next: run the restore again unless it is complete (no
+        # user failed for real and at least one was restored); with nothing
+        # restored the message says what the assert below would say
+        __sogo_restore_flush_next: >-
+          {{ ('The restore is NOT complete: it failed for ' ~ __sogo_restore_failed_users | join(', ')
+              ~ ' (see the error of "Restore the folders and preferences of every user" above).'
+              ~ ' Fix the cause and run the restore again.')
+             if __sogo_restore_failed_users | length > 0
+             else (('No user of ' ~ sogo_restore ~ ' was restored; the user source knows none of '
+                    ~ __sogo_restore_skipped | join(', ') ~ '. Check the connection to the user source'
+                    ~ ' (the PostfixAdmin view) and run the restore again.')
+                   if __sogo_restored_users | length == 0
+                   else ('The restore itself is complete: do NOT run it again'
+                         ~ ' (it would back up and restore once more).')) }}
+        # The cause first: the timeout, the answer of memcached or the
+        # message of bash (connection refused), else the status
+        __sogo_restore_flush_error: >-
+          {{ 'timed out after 20 seconds' if __sogo_restore_flush.rc | default(0) == 124
+             else (__sogo_restore_flush.stderr | default('', true) | regex_replace('\\s+', ' ') | trim
+                   or 'status ' ~ __sogo_restore_flush.rc | default('none')) }}
+      when:
+        - __sogo_restore_ran | bool
+        - not __sogo_memcached_local | bool
+
+    # Every user unknown (an unreachable user source answers "not found" for
+    # all of them): nothing was restored
+    - name: Restore | Assert the restore restored a user
+      ansible.builtin.assert:
+        that:
+          - __sogo_restored_users | length > 0
+        fail_msg: >-
+          No user of {{ sogo_restore }} was restored; the user source knows none
+          of {{ __sogo_restore_skipped | join(', ') }}. Check the connection to
+          the user source (the PostfixAdmin view).
+        quiet: true
+      # A user that failed for real ends the run with its own error
+      when:
+        - __sogo_restore_ran | bool
+        - __sogo_restore_skipped | length > 0
+        - __sogo_restore_runs is not failed

@@ -1,0 +1,93 @@
+---
+- name: Prepare the environment
+  ansible.builtin.import_playbook: ../shared/prepare.yml
+
+# The previous release with the accounts of the shared scenarios; the
+# schema version and the configuration are recorded for verify.
+- name: Prepare — Previous release
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - ../shared/vars/accounts.yml
+
+  vars:
+    postfixadmin_version: '{{ __molecule_previous_version }}'
+    postfixadmin_checksum: '{{ __molecule_previous_checksum }}'
+
+  tasks:
+    # The workflow that bumps the role default leaves the previous release
+    # pinned here; it has to stay older than the default
+    - name: Prepare | Load role defaults
+      ansible.builtin.include_vars:
+        file: '../../defaults/main.yml'
+        name: __prepare_defaults
+
+    - name: Prepare | Assert the previous release is older than the role default
+      ansible.builtin.assert:
+        that:
+          - __molecule_previous_version is version(__prepare_defaults.postfixadmin_version, '<')
+        fail_msg: >-
+          __molecule_previous_version {{ __molecule_previous_version }} is not older than
+          the role default {{ __prepare_defaults.postfixadmin_version }}
+
+    - name: Prepare | Include postfixadmin role with the previous release  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+
+    - name: Prepare | Read the schema version of the previous release
+      ansible.builtin.command:
+        argv:
+          - php
+          - /usr/local/lib/postfixadmin-ansible/postfixadmin-ansible.php
+          - /var/www/postfixadmin
+        stdin: '{"action": "status"}'
+      register: __prepare_status
+      changed_when: false
+
+    - name: Prepare | Stat config.local.php
+      ansible.builtin.stat:
+        path: /etc/postfixadmin/config.local.php
+        checksum_algorithm: sha256
+      register: __prepare_config
+
+    - name: Prepare | Record the state before the update
+      ansible.builtin.copy:
+        content: |
+          {{ {'status': __prepare_status.stdout | from_json,
+              'config_checksum': __prepare_config.stat.checksum} | to_nice_json }}
+        dest: /root/molecule-before-update.json
+        owner: root
+        group: root
+        mode: '0600'
+
+    # Leftover of an interrupted update: the swap has to remove it
+    - name: Prepare | Create a replaced release directory
+      ansible.builtin.file:
+        path: /var/www/.postfixadmin.old
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Leave a replaced release behind
+      ansible.builtin.copy:
+        content: "leftover\n"
+        dest: /var/www/.postfixadmin.old/leftover
+        owner: root
+        group: root
+        mode: '0644'
+
+    # Older pre-update dumps for the rotation (postfixadmin_backup_update_keep
+    # 2): the update keeps its own dump and the newer of the two
+    - name: Prepare | Create older pre-update dumps
+      ansible.builtin.command:
+        argv:
+          - touch
+          - '-d'
+          - '{{ item.date }}'
+          - '/var/backups/postfixadmin/postfixadmin-4.0.4-{{ item.stamp }}.sql.gz'
+        creates: '/var/backups/postfixadmin/postfixadmin-4.0.4-{{ item.stamp }}.sql.gz'
+      loop:
+        - {date: '2020-01-01', stamp: '20200101T000000'}
+        - {date: '2020-01-02', stamp: '20200102T000000'}

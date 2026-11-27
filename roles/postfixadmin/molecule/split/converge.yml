@@ -1,0 +1,9 @@
+---
+- name: Converge
+  hosts: web
+  gather_facts: true
+
+  tasks:
+    - name: Converge | Include postfixadmin role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'

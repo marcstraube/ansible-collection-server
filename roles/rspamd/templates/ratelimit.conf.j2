@@ -1,0 +1,4 @@
+{{ ansible_managed | comment }}
+{% if rspamd_ratelimits | length > 0 %}
+rates = {{ rspamd_ratelimits | to_json }};
+{% endif %}
