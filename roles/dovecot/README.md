@@ -353,6 +353,42 @@ Redirected mail keeps the local recipient as envelope sender
 | `dovecot_tls_cert_file`    | `''`        | **REQUIRED** — certificate with the chain, PEM |
 | `dovecot_tls_key_file`     | `''`        | **REQUIRED** — private key, PEM                |
 | `dovecot_tls_min_protocol` | `'TLSv1.2'` | `TLSv1.2` or `TLSv1.3`                         |
+| `dovecot_tls_cipher_list`  | AEAD suites | Suites up to TLS 1.2; `''` = Dovecot default   |
+
+`dovecot_tls_cipher_list` defaults to the ECDHE and DHE suites with AEAD
+(AES-GCM, ChaCha20-Poly1305) of the Mozilla intermediate profile:
+
+```text
+ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:
+ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:
+ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:
+DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-CHACHA20-POLY1305
+```
+
+(one string, the line breaks are only for reading). Only mail clients
+connect to IMAP, POP3 and ManageSieve, and every current client supports
+AES-GCM or ChaCha20-Poly1305; the CBC suites with HMAC-SHA1, -SHA256 and
+-SHA384 that the Dovecot default (`ALL:!kRSA:...`) also offers only add
+attack surface such as Lucky13-style padding oracles. The TLS 1.3 suites
+(`ssl_cipher_suites`) stay the OpenSSL defaults, which are all AEAD. The
+value is an OpenSSL cipher list without whitespace; `''` leaves
+`ssl_cipher_list` out of `dovecot.conf`, so the Dovecot default applies.
+The DHE suites only take effect with Diffie-Hellman parameters
+(`ssl_server_dh_file` in `dovecot_extra_config`); without them Dovecot uses
+the ECDHE suites, and a client that offers only DHE-RSA with AES-GCM in TLS
+1.2 (Internet Explorer 11 and Outlook on Windows 7 and 8.1, SChannel) fails
+on 993 and 4190 while the Postfix role accepts it on submission. Like `ssl_min_protocol`, `ssl_cipher_list` also applies
+to the TLS connections Dovecot opens itself, such as the one to
+`dovecot_submission_host`; Postfix offers the AEAD suites on port 25 as
+well.
+
+The role only checks the characters of `dovecot_tls_cipher_list`, not
+whether the names exist or the list is secure. A list that matches no
+cipher suite passes `doveconf` and breaks every TLS connection at runtime,
+TLS 1.3 included (`imap-login: Error: Failed to initialize SSL connection:
+... Can't set cipher list ... no cipher match`), and a value such as
+`'ALL:@SECLEVEL=0'` weakens TLS without a warning. Check a custom list with
+`openssl ciphers -v '<list>'` first.
 
 Dovecot sends only the certificates of `ssl_server_cert_file`: the
 intermediate certificates have to follow the server certificate in
@@ -638,14 +674,17 @@ Sieve scripts before and after the personal one, a personal Sieve rule
 uploaded over ManageSieve, the subscribed special-use folders, logins
 before STARTTLS on 143 and 4190 refused, TLSv1.1 refused by the server
 (where the client cannot offer it, as with the crypto policy of EL, the
-rendered `ssl_min_protocol` instead), the spam training, the SELinux port
+rendered `ssl_min_protocol` instead), the effective `ssl_cipher_list`
+(`doveconf`) and a TLS 1.2 handshake on 993 refused with only CBC suites
+and accepted with AES-GCM, the spam training, the SELinux port
 labels, module and mail root label (SELinux enabled only), and the shared
 mailboxes: listed for the granted user, `SETACL` refused without admin, the
 owner without admin, a folder a user shares himself; a second run with
 changed entries (`state: absent` removes a grant, an `initial` entry keeps
 its rights, a `disabled` entry applies nothing, dropping `owner_admin:
-false` removes the owner entry, the user's own share stays) and a repeat
-run without ACL changes. The role fails before any change for a broken
+false` removes the owner entry, the user's own share stays; with
+`dovecot_tls_cipher_list: ''` the Dovecot default cipher list applies) and
+a repeat run without ACL or configuration changes. The role fails before any change for a broken
 `dovecot_extra_config` (`dovecot.conf` and the running service untouched),
 a missing Postfix queue directory, a wildcard TCP listener, a config version
 above the installed release and an `http://` URL for an rspamd controller

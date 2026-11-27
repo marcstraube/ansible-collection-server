@@ -27,12 +27,16 @@ def emit(**fields):
     sys.exit(0)
 
 
-def tls_context(ca_file=None, minimum=None, maximum=None):
+def tls_context(ca_file=None, minimum=None, maximum=None, ciphers=None):
     ctx = ssl.create_default_context(cafile=ca_file)
     if ca_file is None:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-    if minimum in ('TLSv1', 'TLSv1_1'):
+    if ciphers:
+        # Offer only these suites (TLS 1.2 and older); the server has to pick
+        # one of them or refuse
+        ctx.set_ciphers(ciphers)
+    elif minimum in ('TLSv1', 'TLSv1_1'):
         # Allow the client to offer the old versions; the server has to refuse
         ctx.set_ciphers('DEFAULT:@SECLEVEL=0')
     if minimum:
@@ -163,25 +167,31 @@ def cmd_pop3(args):
 
 
 def cmd_tls(args):
-    """TLS handshake limited to one protocol version. A refusal is split into
-    the server's protocol_version alert ('server_refused') and a client that
-    cannot offer the version at all ('client_unsupported', e.g. a system
+    """TLS handshake limited to one protocol version and, with --cipher, to
+    the given suites. A refusal is split into the server's protocol_version
+    alert ('server_refused'), its handshake_failure alert when it shares no
+    suite with the client ('cipher_refused') and a client that cannot offer
+    the version or the suites at all ('client_unsupported', e.g. a system
     crypto policy on EL), so a negative test cannot pass by accident."""
     try:
-        ctx = tls_context(None, args.version, args.version)
+        ctx = tls_context(None, args.version, args.version, args.cipher)
     except (ValueError, ssl.SSLError) as exc:
-        emit(handshake=False, server_refused=False, client_unsupported=True, error=str(exc))
+        emit(handshake=False, server_refused=False, cipher_refused=False, client_unsupported=True,
+             error=str(exc))
     try:
         with connect(f'{args.host}:{args.port}') as raw:
             with ctx.wrap_socket(raw, server_hostname=args.host) as tls:
-                emit(handshake=True, version=tls.version(), server_refused=False, client_unsupported=False)
+                emit(handshake=True, version=tls.version(), cipher=tls.cipher()[0], server_refused=False,
+                     cipher_refused=False, client_unsupported=False)
     except ssl.SSLError as exc:
         text = str(exc)
         emit(handshake=False, error=text,
              server_refused='ALERT_PROTOCOL_VERSION' in text,
+             cipher_refused='ALERT_HANDSHAKE_FAILURE' in text,
              client_unsupported='NO_PROTOCOLS_AVAILABLE' in text or 'NO_CIPHERS_AVAILABLE' in text)
     except OSError as exc:
-        emit(handshake=False, server_refused=False, client_unsupported=False, error=str(exc))
+        emit(handshake=False, server_refused=False, cipher_refused=False, client_unsupported=False,
+             error=str(exc))
 
 
 def cmd_lmtp(args):
@@ -346,6 +356,7 @@ def main():
     p.add_argument('--host', default='localhost')
     p.add_argument('--port', type=int, default=993)
     p.add_argument('--version', required=True, choices=['TLSv1', 'TLSv1_1', 'TLSv1_2', 'TLSv1_3'])
+    p.add_argument('--cipher')
     p.set_defaults(func=cmd_tls)
 
     p = sub.add_parser('lmtp')

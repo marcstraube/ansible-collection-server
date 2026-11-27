@@ -233,7 +233,9 @@
     - always
 
 # The logins of postfix_sender_permissions end up in an lmdb table: one line
-# per address, the logins separated by commas.
+# per address, the logins separated by commas. The excluded ciphers end up
+# joined with commas in one '-o' argument of master.cf, which ends at
+# whitespace.
 - name: Main | Validate the submission settings
   ansible.builtin.assert:
     that:
@@ -251,6 +253,15 @@
                 or postfix_sender_permissions.values() | select('string') | list | length > 0
                 or postfix_sender_permissions.values() | reject('string') | flatten | map('string')
                    | reject('match', '^[^\s,]+$') | list | length > 0
+             else '',
+           ("postfix_submission_tls_exclude_ciphers must be a list of OpenSSL cipher names without whitespace"
+            ~ " or commas, e.g. ['SHA1', 'SHA256', 'SHA384'], or [] (got '"
+            ~ postfix_submission_tls_exclude_ciphers ~ "').")
+             if postfix_submission_tls_exclude_ciphers is string
+                or postfix_submission_tls_exclude_ciphers is mapping
+                or postfix_submission_tls_exclude_ciphers is not iterable
+                or postfix_submission_tls_exclude_ciphers | reject('string') | list | length > 0
+                or postfix_submission_tls_exclude_ciphers | reject('match', '^[A-Za-z0-9+._-]+\Z') | list | length > 0
              else ''
          ] | select | list }}
   when: postfix_enabled | bool

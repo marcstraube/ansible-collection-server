@@ -17,10 +17,14 @@ Session keys:
   data                   message text (sent when a recipient was accepted)
   tls_version            'TLSv1_1', 'TLSv1_2', ...: only the TLS handshake
                          with exactly this version, then QUIT
+  tls_ciphers            OpenSSL cipher list the client offers (TLS 1.2
+                         and older; with tls_version)
 
 Output keys: connect, ehlo, starttls, auth, mail, rcpt (list), data,
-tls (negotiated version), error, error_code (the reply that ended the
-session), client_error (the local TLS library refused the version itself).
+tls (negotiated version), cipher (negotiated suite), error, error_code (the
+reply that ended the session), client_error (the local TLS library refused
+the version or the suites itself), cipher_refused (the server shares no
+suite with the client: handshake_failure alert).
 """
 
 import base64
@@ -30,12 +34,12 @@ import ssl
 import sys
 
 
-def context(version=None):
+def context(version=None, ciphers=None):
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     if version:
-        ctx.set_ciphers('DEFAULT:@SECLEVEL=0')
+        ctx.set_ciphers(ciphers or 'DEFAULT:@SECLEVEL=0')
         ctx.minimum_version = getattr(ssl.TLSVersion, version)
         ctx.maximum_version = getattr(ssl.TLSVersion, version)
     return ctx
@@ -53,11 +57,12 @@ def main():
     out = {}
     mode = req.get('mode', 'plain')
     version = req.get('tls_version')
+    ciphers = req.get('tls_ciphers')
     source = (req['source'], 0) if req.get('source') else None
     smtp = None
     try:
         if mode == 'tls':
-            smtp = smtplib.SMTP_SSL(timeout=20, context=context(version), source_address=source)
+            smtp = smtplib.SMTP_SSL(timeout=20, context=context(version, ciphers), source_address=source)
         else:
             smtp = smtplib.SMTP(timeout=20, source_address=source)
         # SMTP_SSL.connect() and starttls() pass the host of the constructor
@@ -67,14 +72,16 @@ def main():
         out['connect'] = reply(smtp.connect(req['host'], int(req['port'])))
         if mode == 'tls':
             out['tls'] = smtp.sock.version()
+            out['cipher'] = smtp.sock.cipher()[0]
         out['ehlo'] = reply(smtp.ehlo(req.get('helo', 'client.example.net')))
         if mode == 'starttls':
             if req.get('auth_before_tls'):
                 token = base64.b64encode(b'\0dummy@example.com\0dummy').decode()
                 out['auth'] = reply(smtp.docmd('AUTH', 'PLAIN ' + token))
                 return out
-            out['starttls'] = reply(smtp.starttls(context=context(version)))
+            out['starttls'] = reply(smtp.starttls(context=context(version, ciphers)))
             out['tls'] = smtp.sock.version()
+            out['cipher'] = smtp.sock.cipher()[0]
             out['ehlo'] = reply(smtp.ehlo(req.get('helo', 'client.example.net')))
         if version:
             return out
@@ -91,7 +98,9 @@ def main():
                 out['data'] = [exc.smtp_code, exc.smtp_error.decode('utf-8', 'replace')]
     except ssl.SSLError as exc:
         out['error'] = str(exc)
-        out['client_error'] = 'NO_PROTOCOLS_AVAILABLE' in str(exc) or 'no protocols available' in str(exc)
+        out['client_error'] = any(text in str(exc) for text in ('NO_PROTOCOLS_AVAILABLE', 'no protocols available',
+                                                                 'NO_CIPHERS_AVAILABLE', 'no ciphers available'))
+        out['cipher_refused'] = 'ALERT_HANDSHAKE_FAILURE' in str(exc)
     except smtplib.SMTPResponseException as exc:
         # A reply that ends the session (e.g. 421 at the greeting)
         out['error'] = '%s: %s' % (type(exc).__name__, exc)

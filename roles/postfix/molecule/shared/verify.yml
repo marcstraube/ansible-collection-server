@@ -25,13 +25,18 @@
     __verify_platform: >-
       {{ ansible_facts['os_family'] ~ ('-' ~ ansible_facts['distribution_major_version']
                                        if ansible_facts['os_family'] == 'RedHat' else '') }}
-    # Settings of the role run that changes the milter and the relay host
+    # CBC suites with HMAC-SHA1, -SHA256 and -SHA384 for the RSA test
+    # certificate, which submission refuses up to TLS 1.2
+    __verify_cbc_ciphers: 'ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384'
+    # Settings of the role run that changes the milter, the relay host and
+    # the cipher suites of submission (the Postfix default)
     __verify_variant:
       postfix_milters:
         - 'inet:127.0.0.1:11332'
       postfix_relayhost: '[relay.example.net]:587'
       postfix_relayhost_username: 'mailer@example.net'
       postfix_relayhost_password: 'relay-Secret-42'
+      postfix_submission_tls_exclude_ciphers: []
 
   tasks:
     #
@@ -150,6 +155,23 @@
           - __verify_postconf.stdout_lines[7] is match('^unionmap:\{proxy:')
           - __verify_postconf.stdout_lines[8] == 'lmdb'
         fail_msg: '{{ __verify_postconf.stdout_lines | to_json }}'
+
+    - name: Verify | Read the master.cf parameters
+      ansible.builtin.command:
+        argv: [postconf, '-P']
+      register: __verify_postconf_master
+      changed_when: false
+
+    # Only submission and submissions exclude cipher suites, port 25 keeps
+    # the Postfix default
+    - name: Verify | Assert the excluded cipher suites of submission
+      ansible.builtin.assert:
+        that:
+          - >-
+            __verify_postconf_master.stdout_lines | select('search', 'smtpd_tls_mandatory_exclude_ciphers') | sort
+            == ['465/inet/smtpd_tls_mandatory_exclude_ciphers = SHA1,SHA256,SHA384,kRSA',
+                '587/inet/smtpd_tls_mandatory_exclude_ciphers = SHA1,SHA256,SHA384,kRSA']
+        fail_msg: '{{ __verify_postconf_master.stdout_lines | to_json }}'
 
     - name: Verify | Stat the SQL lookup files
       ansible.builtin.stat:
@@ -412,6 +434,51 @@
             port: 587
             mode: 'starttls'
             tls_version: 'TLSv1_2'
+          # TLS 1.2 cipher suites (the handshake only; RSA test certificate):
+          # only CBC suites with HMAC-SHA1, -SHA256 and -SHA384, only AES-GCM
+          # with static RSA key exchange, or AES-GCM with ECDHE
+          cbc_465:
+            host: '127.0.0.1'
+            port: 465
+            mode: 'tls'
+            tls_version: 'TLSv1_2'
+            tls_ciphers: '{{ __verify_cbc_ciphers }}'
+          cbc_587:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            tls_version: 'TLSv1_2'
+            tls_ciphers: '{{ __verify_cbc_ciphers }}'
+          cbc_25:
+            host: '127.0.0.1'
+            port: 25
+            mode: 'starttls'
+            tls_version: 'TLSv1_2'
+            tls_ciphers: '{{ __verify_cbc_ciphers }}'
+          rsa_465:
+            host: '127.0.0.1'
+            port: 465
+            mode: 'tls'
+            tls_version: 'TLSv1_2'
+            tls_ciphers: 'AES128-GCM-SHA256'
+          rsa_587:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            tls_version: 'TLSv1_2'
+            tls_ciphers: 'AES128-GCM-SHA256'
+          aead_465:
+            host: '127.0.0.1'
+            port: 465
+            mode: 'tls'
+            tls_version: 'TLSv1_2'
+            tls_ciphers: 'ECDHE-RSA-AES128-GCM-SHA256'
+          aead_587:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            tls_version: 'TLSv1_2'
+            tls_ciphers: 'ECDHE-RSA-AES128-GCM-SHA256'
 
     - name: Verify | Assert port 25
       ansible.builtin.assert:
@@ -467,6 +534,26 @@
             ansible_facts['os_family'] == 'RedHat'
             or not (__s.tls11_465.client_error | default(false) or __s.tls11_587.client_error | default(false))
         fail_msg: "{{ __s | dict2items | selectattr('key', 'match', 'tls1') | items2dict | to_json }}"
+      vars:
+        __s: '{{ __verify_smtp }}'
+
+    # The client of EL offers the CBC suites as well (an explicit cipher
+    # list replaces the one of the crypto policy)
+    - name: Verify | Assert submission refuses CBC and static RSA suites and port 25 keeps them
+      ansible.builtin.assert:
+        that:
+          - __s.cbc_465.cipher_refused | default(false)
+          - __s.cbc_587.cipher_refused | default(false)
+          - __s.rsa_465.cipher_refused | default(false)
+          - __s.rsa_587.cipher_refused | default(false)
+          - >-
+            [__s.cbc_465, __s.cbc_587, __s.rsa_465, __s.rsa_587]
+            | selectattr('client_error', 'defined') | selectattr('client_error') | list | length == 0
+          - __s.aead_465.cipher == 'ECDHE-RSA-AES128-GCM-SHA256'
+          - __s.aead_587.cipher == 'ECDHE-RSA-AES128-GCM-SHA256'
+          - __s.cbc_25.tls == 'TLSv1.2'
+          - __s.cbc_25.cipher is match('ECDHE-RSA-AES(128|256)-SHA(256|384)?$')
+        fail_msg: "{{ __s | dict2items | selectattr('key', 'match', '(cbc|rsa|aead)_') | items2dict | to_json }}"
       vars:
         __s: '{{ __verify_smtp }}'
 
@@ -607,6 +694,7 @@
         postfix_relayhost: '{{ __verify_variant.postfix_relayhost }}'
         postfix_relayhost_username: '{{ __verify_variant.postfix_relayhost_username }}'
         postfix_relayhost_password: '{{ __verify_variant.postfix_relayhost_password }}'
+        postfix_submission_tls_exclude_ciphers: '{{ __verify_variant.postfix_submission_tls_exclude_ciphers }}'
         postfix_db_host: "{{ 'db.example.com' if postfix_db_type == 'mariadb' else 'localhost' }}"
         postfix_db_tls: "{{ postfix_db_type == 'mariadb' }}"
         postfix_db_tls_ca_file: "{{ '/etc/molecule-tls/ca.pem' if postfix_db_type == 'mariadb' else '' }}"
@@ -696,6 +784,21 @@
         fail_msg: >-
           {{ __verify_relay.stdout_lines }}
           {{ __verify_relay_files.results | map(attribute='stat.mode') | list }}
+
+    - name: Verify | Read the master.cf parameters without excluded cipher suites
+      ansible.builtin.command:
+        argv: [postconf, '-P']
+      register: __verify_postconf_master_default
+      changed_when: false
+
+    # postfix_submission_tls_exclude_ciphers: [] leaves the Postfix default
+    - name: Verify | Assert submission excludes no cipher suites
+      ansible.builtin.assert:
+        that:
+          - __verify_postconf_master_default.stdout_lines | select('search', 'smtpd_tls_mandatory_exclude_ciphers')
+            | list | length == 0
+          - __verify_postconf_master_default.stdout_lines | select('match', '(465|587)/inet/') | list | length > 0
+        fail_msg: '{{ __verify_postconf_master_default.stdout_lines | to_json }}'
 
     - name: Verify | Send mail while the milter is unreachable
       ansible.builtin.include_tasks: tasks/smtp.yml

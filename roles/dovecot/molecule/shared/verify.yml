@@ -480,6 +480,44 @@
         __verify_min_protocol_set: >-
           {{ (__verify_config.content | b64decode) is search('(?m)^ssl_min_protocol = TLSv1\.[23]$') }}
 
+    - name: Verify | Read the effective TLS 1.2 cipher list
+      ansible.builtin.command:
+        argv: [doveconf, '-h', ssl_cipher_list]
+      register: __verify_cipher_list
+      changed_when: false
+
+    # The test certificate has an RSA key. The client offers only the CBC
+    # suites (HMAC-SHA1, -SHA256 and -SHA384) in the first handshake and one
+    # AES-GCM suite in the second.
+    - name: Verify | Handshake on 993 with CBC and AEAD suites
+      ansible.builtin.command:
+        argv: '{{ __verify_test.split() + ["tls", "--version", "TLSv1_2", "--cipher", item] }}'
+      loop:
+        - 'ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384'
+        - 'ECDHE-RSA-AES128-GCM-SHA256'
+      register: __verify_ciphers
+      changed_when: false
+
+    - name: Verify | Assert only the AEAD suites of dovecot_tls_cipher_list are offered
+      ansible.builtin.assert:
+        that:
+          - __verify_cipher_list.stdout == __verify_aead_list
+          - not __verify_cbc.handshake
+          - __verify_cbc.cipher_refused
+          - not __verify_cbc.client_unsupported
+          - __verify_aead.handshake
+          - __verify_aead.cipher == 'ECDHE-RSA-AES128-GCM-SHA256'
+        fail_msg: >-
+          {{ {'ssl_cipher_list': __verify_cipher_list.stdout, 'cbc': __verify_cbc, 'aead': __verify_aead} | to_json }}
+      vars:
+        __verify_cbc: '{{ __verify_ciphers.results[0].stdout | from_json }}'
+        __verify_aead: '{{ __verify_ciphers.results[1].stdout | from_json }}'
+        # Role default
+        __verify_aead_list: >-
+          {{ ['ECDHE-ECDSA-AES128-GCM-SHA256', 'ECDHE-RSA-AES128-GCM-SHA256', 'ECDHE-ECDSA-AES256-GCM-SHA384',
+              'ECDHE-RSA-AES256-GCM-SHA384', 'ECDHE-ECDSA-CHACHA20-POLY1305', 'ECDHE-RSA-CHACHA20-POLY1305',
+              'DHE-RSA-AES128-GCM-SHA256', 'DHE-RSA-AES256-GCM-SHA384', 'DHE-RSA-CHACHA20-POLY1305'] | join(':') }}
+
     # What Postfix speaks to the auth listeners
     - name: Verify | Authenticate over SASL through the socket and TCP
       ansible.builtin.command:
@@ -744,13 +782,15 @@
     # (no change expected), a disabled entry is added (nothing applied) and
     # owner_admin: false is dropped (the owner entry the role wrote goes, the
     # owner gets the default rights back). The share alice set up herself
-    # through SETACL stays. A repeat run changes nothing.
+    # through SETACL stays. A repeat run changes nothing. Both runs also set
+    # dovecot_tls_cipher_list to '' (the Dovecot default).
     #
 
     - name: Verify | Run the role with changed shared mailbox entries  # noqa: role-name[path]
       ansible.builtin.include_role:
         name: '{{ playbook_dir }}/../..'
       vars:
+        dovecot_tls_cipher_list: ''
         dovecot_shared_mailboxes: &verify_changed_shares
           - owner: 'support@example.com'
             user: 'alice@example.com'
@@ -811,6 +851,7 @@
       ansible.builtin.include_role:
         name: '{{ playbook_dir }}/../..'
       vars:
+        dovecot_tls_cipher_list: ''
         dovecot_shared_mailboxes: *verify_changed_shares
 
     - name: Verify | Assert the repeat run changed no ACL
@@ -820,6 +861,25 @@
           - __dovecot_shared_remove.results | default([]) | selectattr('changed') | list | length == 0
           - __dovecot_shared_create.results | default([]) | selectattr('changed') | list | length == 0
           - not (__dovecot_config_changed | bool)
+
+    - name: Verify | Read the cipher list without dovecot_tls_cipher_list
+      ansible.builtin.command:
+        argv: [doveconf, '-h', ssl_cipher_list]
+      register: __verify_cipher_default
+      changed_when: false
+
+    - name: Verify | Read dovecot.conf without dovecot_tls_cipher_list
+      ansible.builtin.slurp:
+        src: /etc/dovecot/dovecot.conf
+      register: __verify_config_default
+
+    # '' leaves the line out: the built-in default of Dovecot applies
+    - name: Verify | Assert the Dovecot default cipher list
+      ansible.builtin.assert:
+        that:
+          - (__verify_config_default.content | b64decode) is not search('(?m)^ssl_cipher_list =')
+          - __verify_cipher_default.stdout is match('ALL:')
+        fail_msg: '{{ __verify_cipher_default.stdout }}'
 
     - name: Verify | Run the role with the converge entries again  # noqa: role-name[path]
       ansible.builtin.include_role:

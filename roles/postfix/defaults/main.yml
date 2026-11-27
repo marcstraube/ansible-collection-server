@@ -172,6 +172,20 @@ postfix_submissions_enabled: true
 # through submission
 postfix_submission_hide_client: false
 
+# Cipher properties whose suites submission and submissions refuse up to
+# TLS 1.2 (smtpd_tls_mandatory_exclude_ciphers of the two services, OpenSSL
+# names without whitespace or commas). The default removes the CBC suites
+# (MAC SHA1, SHA256, SHA384) and the static RSA key exchange (kRSA, no
+# forward secrecy), leaving the ECDHE and DHE suites with AES-GCM or
+# ChaCha20-Poly1305: only mail clients connect there, and current ones all
+# support them. Port 25 keeps every suite of the Postfix default, and the
+# TLS 1.3 suites stay unchanged. [] keeps the Postfix default.
+postfix_submission_tls_exclude_ciphers:
+  - 'SHA1'
+  - 'SHA256'
+  - 'SHA384'
+  - 'kRSA'
+
 # Further logins allowed to send as an address, e.g. a shared mailbox:
 # address: list of logins. Read access to a mailbox never allows sending
 # as it; the logins of the database stay owners as well.
