@@ -233,7 +233,12 @@
                      and (dovecot_tls_key_file | length == 0 or dovecot_tls_key_file is match('^/[^\s"''{}]+$')))
              else '',
            ("dovecot_tls_min_protocol must be 'TLSv1.2' or 'TLSv1.3' (got '" ~ dovecot_tls_min_protocol ~ "').")
-             if dovecot_tls_min_protocol not in ['TLSv1.2', 'TLSv1.3'] else ''
+             if dovecot_tls_min_protocol not in ['TLSv1.2', 'TLSv1.3'] else '',
+           ("dovecot_tls_cipher_list must be an OpenSSL cipher list without whitespace, e.g. "
+            ~ "'ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-CHACHA20-POLY1305', or '' (got '"
+            ~ dovecot_tls_cipher_list ~ "').")
+             if dovecot_tls_cipher_list is not string
+                or dovecot_tls_cipher_list is not match('^[A-Za-z0-9:+!@=,._-]*\Z') else ''
          ] | select | list }}
   when: dovecot_enabled | bool
   tags:

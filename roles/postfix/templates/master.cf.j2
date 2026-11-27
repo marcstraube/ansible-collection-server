@@ -13,7 +13,9 @@
   'smtpd_sender_restrictions=reject_sender_login_mismatch,permit_sasl_authenticated,reject',
   'smtpd_relay_restrictions=permit_sasl_authenticated,reject',
   'milter_macro_daemon_name=ORIGINATING',
-] + (['cleanup_service_name=submission-cleanup'] if postfix_submission_hide_client | bool else []) -%}
+] + (['smtpd_tls_mandatory_exclude_ciphers=' ~ postfix_submission_tls_exclude_ciphers | join(',')]
+     if postfix_submission_tls_exclude_ciphers | length > 0 else [])
+  + (['cleanup_service_name=submission-cleanup'] if postfix_submission_hide_client | bool else []) -%}
 {{ ansible_managed | comment }}
 #
 # master.cf of marcstraube.server.postfix: the services of the package, the

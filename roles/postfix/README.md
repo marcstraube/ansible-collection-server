@@ -254,12 +254,13 @@ domains:
 
 ### Submission
 
-| Variable                         | Default | Description                                          |
-| -------------------------------- | ------- | ---------------------------------------------------- |
-| `postfix_submission_enabled`     | `true`  | Port 587 with STARTTLS                               |
-| `postfix_submissions_enabled`    | `true`  | Port 465 with implicit TLS                           |
-| `postfix_submission_hide_client` | `false` | Remove the `Received` header with the client address |
-| `postfix_sender_permissions`     | `{}`    | Further logins per sender address (shared mailboxes) |
+| Variable                                 | Default   | Description                                          |
+| ---------------------------------------- | --------- | ---------------------------------------------------- |
+| `postfix_submission_enabled`             | `true`    | Port 587 with STARTTLS                               |
+| `postfix_submissions_enabled`            | `true`    | Port 465 with implicit TLS                           |
+| `postfix_submission_hide_client`         | `false`   | Remove the `Received` header with the client address |
+| `postfix_sender_permissions`             | `{}`      | Further logins per sender address (shared mailboxes) |
+| `postfix_submission_tls_exclude_ciphers` | see below | Cipher properties refused on 465/587 up to TLS 1.2   |
 
 Both ports require TLS and SASL authentication through Dovecot; `AUTH` is not
 offered before TLS. `reject_sender_login_mismatch` lets a user send only from
@@ -284,6 +285,52 @@ postfix_sender_permissions:
 The role writes them into the `lmdb:` table `/etc/postfix/sender_permissions`
 and joins it with the PostfixAdmin queries in a `unionmap:`, so the owners of
 both count.
+
+Submission and submissions offer only ECDHE and DHE suites with AES-GCM or
+ChaCha20-Poly1305 up to TLS 1.2: the role sets
+`smtpd_tls_mandatory_exclude_ciphers` of both services to the cipher
+properties of `postfix_submission_tls_exclude_ciphers`, joined with commas.
+The default `['SHA1', 'SHA256', 'SHA384', 'kRSA']` removes the CBC suites
+with HMAC-SHA1, -SHA256 and -SHA384 and the suites with static RSA key
+exchange (no forward secrecy) from the `medium` list of
+`smtpd_tls_mandatory_ciphers`; the PSK suites that remain in the list are
+never negotiated, Postfix configures no pre-shared keys. Only the users' own
+mail clients connect there, and every current client supports AES-GCM or
+ChaCha20-Poly1305 with ECDHE; the CBC suites only add attack surface such
+as Lucky13-style padding oracles. The TLS 1.3 suites stay unchanged (all
+AEAD with forward secrecy). The entries are OpenSSL cipher names without
+whitespace or commas (they go into one `-o` argument of `master.cf`); `[]`
+sets nothing and keeps the Postfix default. While the list is set, the `-o`
+argument overrides a `smtpd_tls_mandatory_exclude_ciphers` in
+`postfix_extra_main_cf` for the two services; `smtpd_tls_mandatory_ciphers`
+there (e.g. `high`) still applies.
+
+The role only checks the characters of the entries, not whether the names
+exist or the result is secure: Postfix ignores an unknown name silently
+(`'SHA-1'` excludes nothing). Check the result with `openssl ciphers -v
+'aNULL:-aNULL:HIGH:MEDIUM:+RC4:@STRENGTH:!SHA1:!SHA256:!SHA384:!kRSA'`
+(the `medium` list with one `!<name>` per entry).
+
+Devices and applications that send through 465 or 587 with TLS 1.2, such as
+scan-to-mail printers, UPS and monitoring appliances or the TLS stacks of
+older ERP systems, must support AES-GCM or ChaCha20-Poly1305 with ECDHE or
+DHE. Before the rollout, list the suites they negotiate today:
+
+```bash
+journalctl SYSLOG_FACILITY=2 | grep -E 'postfix/submissions?/smtpd.*TLS connection established' \
+  | grep -vE 'TLSv1\.3|cipher (ECDHE|DHE)-[A-Z0-9-]*(GCM|CHACHA20)'
+```
+
+After the rollout a client without a common suite logs `SSL_accept error`
+followed by a `TLS library problem` warning that ends in
+`SSL routines::no shared cipher`, under `postfix/submission/smtpd` or
+`postfix/submissions/smtpd`. Such a client needs an update, or the host
+keeps the Postfix default with `postfix_submission_tls_exclude_ciphers: []`.
+
+Port 25 keeps all suites of the Postfix default (`smtpd_tls_ciphers`): TLS
+is opportunistic there (`smtpd_tls_security_level = may`). A sending server
+whose TLS stack shares no suite with a narrower list fails the handshake
+and usually delivers again without TLS, which is worse than a CBC suite.
 
 ### Inbound
 
@@ -369,21 +416,22 @@ dnssec`.
 | `postfix_tls_mandatory_protocols` | `'!SSLv2, !SSLv3, !TLSv1, !TLSv1.1'` | Submission and required outbound TLS      |
 
 Port 25 offers STARTTLS (`smtpd_tls_security_level = may`), submission
-requires TLS. The protocols use the exclusion syntax, which Postfix 3.5 on EL
-9 understands as well; ranges such as `'>=TLSv1.2'` need Postfix 3.6, and the
-role refuses them on EL 9 (Postfix 3.5 would accept them in `postfix check`
-and run every TLS service without TLS). Postfix reads certificate and key as
-root when a service starts, so root-only files work. Certificate, key, the
-CA file (when set) and `postfix_db_tls_ca_file` (with `postfix_db_tls`) must
-exist when the role runs: a missing file fails the run before any change
-(`postfix check` does not open them; Postfix would only fail when a TLS
-service starts). Check mode skips this check. A run limited with `--tags` to
-other roles or to `postfix:dns` skips it, and so does `--skip-tags` with one of
-`postfix:install`, `postfix:maps`, `postfix:configure` and `postfix:service`,
-also when the run still selects the others. The role reloads Postfix on the
-`Reload cert services` handler topic of `marcstraube.common.pki`; for
-renewals of the certbot timer set `certbot_postfix_enabled: true` in
-`marcstraube.server.certbot`.
+requires TLS and offers only AEAD cipher suites (see
+[Submission](#submission)). The protocols use the exclusion syntax, which
+Postfix 3.5 on EL 9 understands as well; ranges such as `'>=TLSv1.2'` need
+Postfix 3.6, and the role refuses them on EL 9 (Postfix 3.5 would accept them
+in `postfix check` and run every TLS service without TLS). Postfix reads
+certificate and key as root when a service starts, so root-only files work.
+Certificate, key, the CA file (when set) and `postfix_db_tls_ca_file` (with
+`postfix_db_tls`) must exist when the role runs: a missing file fails the run
+before any change (`postfix check` does not open them; Postfix would only fail
+when a TLS service starts). Check mode skips this check. A run limited with
+`--tags` to other roles or to `postfix:dns` skips it, and so does
+`--skip-tags` with one of `postfix:install`, `postfix:maps`,
+`postfix:configure` and `postfix:service`, also when the run still selects the
+others. The role reloads Postfix on the `Reload cert services` handler topic
+of `marcstraube.common.pki`; for renewals of the certbot timer set
+`certbot_postfix_enabled: true` in `marcstraube.server.certbot`.
 
 ### Limits
 
@@ -508,27 +556,31 @@ to the controller on a port per platform (`15411`-`15414` for postgresql,
 `15421`-`15424` for mariadb) for the DNS check. The controller needs
 `dnspython`.
 
-`postgresql` and `mariadb` run a check before converge and after
-idempotence, the targeted package update with a rollback in side effect, and
-verify the early failure with `mta_enabled` unset, with a compatibility
-level above the release (before any change) and with a missing TLS key, the
-lookups through proxymap, the permissions of the
-lookup files, port 25 (mailbox, alias, alias domain, unknown recipient,
-relaying from outside and from `mynetworks`), delivery into the Maildir over
-LMTP, local mail to `root`, `postmaster` replacing the entry of the package alias
-file (and the package entry restored in side effect), submission on 587 and 465 (`AUTH` before
-STARTTLS refused, wrong password, sender of another user, alias, alias domain,
-shared mailbox with and without `postfix_sender_permissions`, no relaying
-from `mynetworks` without login), the removed or kept `Received` header, the
-quota-status rejection, TLS 1.1 refused and TLS 1.2 accepted on 465 and 587
-(the TLS library of EL refuses TLS 1.1 on the client side; there the
-configuration is checked), a broken `postfix_extra_main_cf` rejected without
-touching `main.cf` or the master process, mail deferred with a 4xx reply
-while the milter is unreachable together with the warning, the relay host
-settings and their removal, the submission login and the LMTP delivery in
-the mail log, and the DNS report. `mariadb` also runs the lookups over TCP
-with TLS (`db.example.com`, `tls_verify_cert`) against a MariaDB server with
-the test certificate, for a user that may only connect with TLS.
+`postgresql` and `mariadb` run a check before converge and after idempotence,
+the targeted package update with a rollback in side effect, and verify the
+early failure with `mta_enabled` unset, with a compatibility level above the
+release (before any change) and with a missing TLS key, the lookups through
+proxymap, the permissions of the lookup files, port 25 (mailbox, alias, alias
+domain, unknown recipient, relaying from outside and from `mynetworks`),
+delivery into the Maildir over LMTP, local mail to `root`, `postmaster`
+replacing the entry of the package alias file (and the package entry restored
+in side effect), submission on 587 and 465 (`AUTH` before STARTTLS refused,
+wrong password, sender of another user, alias, alias domain, shared mailbox
+with and without `postfix_sender_permissions`, no relaying from `mynetworks`
+without login), the removed or kept `Received` header, the quota-status
+rejection, TLS 1.1 refused and TLS 1.2 accepted on 465 and 587 (the TLS
+library of EL refuses TLS 1.1 on the client side; there the configuration is
+checked), the excluded cipher suites of 465 and 587 only (`postconf -P`), a
+TLS 1.2 handshake with only CBC suites or only static RSA with AES-GCM refused
+on 465 and 587 (CBC accepted on 25), one with ECDHE and AES-GCM accepted on
+465 and 587, a broken `postfix_extra_main_cf` rejected without touching
+`main.cf` or the master process, mail deferred with a 4xx reply while the
+milter is unreachable together with the warning, the relay host settings (in
+the same run `postfix_submission_tls_exclude_ciphers: []` excludes nothing)
+and their removal, the submission login and the LMTP delivery in the mail log,
+and the DNS report. `mariadb` also runs the lookups over TCP with TLS
+(`db.example.com`, `tls_verify_cert`) against a MariaDB server with the test
+certificate, for a user that may only connect with TLS.
 
 `split` reads the lookups over TCP with TLS (`verify-full`), delivers over
 the LMTP TCP listener, authenticates through the SASL TCP listener, and checks
