@@ -880,6 +880,86 @@
           AAAA mail.example.com: 'different'
           PTR 192.0.2.20: 'present'
           PTR 2001:db8::20: 'missing'
+          TLSA _25._tcp.mail.example.com: 'present'
+
+    # The role computes the hash with openssl; community.crypto computes it
+    # from the same certificate on its own
+    - name: Verify | Read the public key of the test certificate
+      community.crypto.x509_certificate_info:
+        path: /etc/molecule-tls/mail.pem
+      register: __verify_mail_certificate
+
+    # The test resolver serves a second TLSA record of another key, as
+    # during a key rollover: the record stays present, both are found
+    - name: Verify | Assert the TLSA record matches the test certificate
+      ansible.builtin.assert:
+        that:
+          - >-
+            __verify_tlsa | map(attribute='record') | list
+            == ['_25._tcp.mail.example.com. IN TLSA 3 1 1 ' ~ __verify_hash]
+          - __verify_tlsa | map(attribute='found') | map('sort') | list
+            == [['3 1 1 ' ~ __verify_hash, '3 1 1 ' ~ __verify_other_hash] | sort]
+        fail_msg: '{{ __verify_tlsa | to_json }}'
+      vars:
+        __verify_tlsa: "{{ __postfix_dns_report | selectattr('type', 'eq', 'TLSA') | list }}"
+        __verify_hash: "{{ __verify_mail_certificate.public_key_fingerprints.sha256 | replace(':', '') }}"
+        __verify_other_hash: '{{ "ab" * 32 }}'
+
+    # A certbot certificate (below /etc/letsencrypt/live, here a fixture
+    # directory) is checked for reuse_key in its renewal configuration
+    - name: Verify | Create the certbot fixture directories
+      ansible.builtin.file:
+        path: '/root/molecule-letsencrypt/{{ item }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+      loop:
+        - 'live/mail.example.com'
+        - 'renewal'
+
+    - name: Verify | Plant the certbot fixture certificate
+      ansible.builtin.copy:
+        src: /etc/molecule-tls/mail.pem
+        dest: /root/molecule-letsencrypt/live/mail.example.com/fullchain.pem
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Verify | Check the key reuse of a certbot certificate
+      ansible.builtin.include_tasks: tasks/tlsa_reuse_key.yml
+      loop:
+        - {line: '', rc: 1}
+        - {line: 'reuse_key = True', rc: 0}
+      loop_control:
+        loop_var: __verify_reuse_key
+
+    - name: Verify | Remove the certbot fixture
+      ansible.builtin.file:
+        path: /root/molecule-letsencrypt
+        state: absent
+
+    # A certificate whose key cannot be read leaves the TLSA record out, the
+    # run goes on
+    - name: Verify | Run DNS check with an unreadable certificate  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: dns.yml
+      vars:
+        mta_enabled: false
+        postfix_dns_check_enabled: false
+        postfix_tls_cert_file: '/etc/molecule-tls/missing.pem'
+
+    # The failed hash is what the warning of the role reports
+    - name: Verify | Assert the TLSA record was left out
+      ansible.builtin.assert:
+        that:
+          - __postfix_dns_report | selectattr('type', 'eq', 'TLSA') | list | length == 0
+          - __postfix_dns_report | length == 10
+          - __postfix_dns_tlsa_hash.rc != 0
+          - __postfix_dns_tlsa_hash.stderr is search('missing.pem')
+        fail_msg: '{{ __postfix_dns_report | to_json }}'
 
     # A resolver name that cannot be resolved makes the lookup itself fail
     # (RFC 6761 name). The role lists every record as unchecked with a
@@ -897,7 +977,7 @@
         that:
           - __postfix_dns_error is search("lookup plugin 'community.general.dig'")
           - __postfix_dns_report | map(attribute='status') | unique | list == ['unchecked']
-          - __postfix_dns_report | length == 10
+          - __postfix_dns_report | length == 11
         fail_msg: '{{ __postfix_dns_error }} {{ __postfix_dns_report }}'
 
     #

@@ -64,6 +64,7 @@ See [defaults/main.yml](defaults/main.yml) for all available variables.
 | `certbot_elliptic_curve`  | `'secp384r1'` | Curve for ECDSA keys                     |
 | `certbot_rsa_key_size`    | `4096`        | Key size for RSA keys                    |
 | `certbot_preferred_chain` | `''`          | Preferred CA chain (e.g. `ISRG Root X1`) |
+| `certbot_reuse_key`       | `false`       | Keep the private key on renewal (DANE)   |
 
 The role passes `certbot_key_type` and, for that type, `certbot_rsa_key_size`
 (`rsa`) or `certbot_elliptic_curve` (`ecdsa`) on the command line when it
@@ -184,10 +185,56 @@ certbot_certificates:
     authenticator: 'webroot' # optional; defaults to certbot_authenticator
     webroot: '/var/www/letsencrypt' # optional; defaults to certbot_webroot_path
     key_type: 'ecdsa' # optional per-cert overrides
+    reuse_key: true # keep the private key on renewal (DANE)
     staging: false
     force_renewal: false
     deploy_hook: 'systemctl reload apache2'
 ```
+
+#### Key Reuse
+
+certbot creates a new private key at every renewal. A DANE TLSA record of the
+usual type `3 1 1` (for example the one the
+[`marcstraube.server.postfix`](https://github.com/marcstraube/ansible-collection-server/blob/main/roles/postfix/README.md)
+role prints) pins the public key, so it stops matching after the first
+renewal and DANE-validating senders defer all mail to the host. `reuse_key`
+on a certificate (or `certbot_reuse_key` for all) passes `--reuse-key` to a
+new certificate, and certbot keeps the key at every renewal.
+
+certbot saves the setting in the renewal configuration
+(`<certbot_config_dir>/renewal/<name>.conf`) only when it issues a certificate.
+For a certificate that already exists the role sets `reuse_key = True` in
+its `[renewalparams]` itself (a symlinked file stays a link), so the setting
+applies at the next renewal without a new request.
+`certbot reconfigure --reuse-key` would do the same, but only after a test
+renewal against the staging server with the challenge and the hooks of the
+certificate. A certificate whose live directory exists without a renewal
+configuration fails the run before any change, as certbot cannot renew it.
+
+The role-wide default `false` leaves the setting of an existing certificate
+as it is, also one set by hand; `reuse_key: false` on the entry removes it,
+and the next renewal creates a new key. The mail certificate has no entry:
+`certbot_reuse_key: true` sets the option there, but setting it back to
+`false` does not remove it. Remove the `reuse_key` line from
+`<certbot_config_dir>/renewal/mail.<domain>.conf` by hand for that.
+
+With the key kept, the key has no end of life: define a rollover interval
+(for example yearly, or with every change of the key type) and replace it
+the way the postfix role describes for DANE, with a second certificate
+entry for the new key, so that its TLSA record is published before the
+switch. certbot refuses to change the type, size or curve of a kept key.
+
+certbot reads `key-type`, `rsa-key-size` and `elliptic-curve` from the
+`cli.ini` of the role at every renewal, and they replace the options saved
+for the certificate. A certificate with `reuse_key` therefore needs the
+role-wide key options: the role fails before any change on an entry with
+`reuse_key` and another `key_type`, `rsa_key_size` or `elliptic_curve`.
+Changing `certbot_key_type`, `certbot_rsa_key_size` or
+`certbot_elliptic_curve` later makes the renewal of every certificate with a
+kept key fail; replace their keys with the rollover above first.
+`certbot renew --cert-name <name> --force-renewal --new-key` replaces the
+key of a certificate in place, `reuse_key` stays on for the new key; with
+DANE, senders defer mail until the new TLSA record has propagated.
 
 ### Renewal
 
@@ -320,7 +367,7 @@ Consequences of the mechanism:
   nothing. Renew through the unit instead, which also reloads:
   `systemctl start certbot-renew.service` (Debian: `certbot.service`). certbot
   saves the post hook of a renewal in the renewal configuration of each
-  certificate it renewed (`/etc/letsencrypt/renewal/<name>.conf`), so a manual
+  certificate it renewed (`<certbot_config_dir>/renewal/<name>.conf`), so a manual
   `certbot renew` does run the script for certificates the unit has renewed
   before; do not rely on it.
 - **Certificates issued outside the role:** a certificate issued with
@@ -456,6 +503,18 @@ renewal unit (drop-in or `CERTBOT_ARGS` on EL, which refuses a foreign value)
 and the cron job carry `--config`, and lose it again with the default
 directory.
 
+For the key reuse, verify checks the key options the role builds for the
+certonly command (`__certbot_key_args`) for certificate entries and
+role-wide values, and side effect records the certonly command lines with
+the stub (certificate entries and the mail certificate, with and without
+key reuse), and runs the certificate tasks against renewal configurations
+of existing certificates (fixtures, one symlinked, parsed with configobj
+afterwards): `reuse_key` set in `[renewalparams]` and removed, a setting
+made by hand kept, the link kept, the mail certificate set, nothing changed
+in check mode or by a second run, and a certificate without renewal
+configuration refused; a kept key with other key options than the
+role-wide ones is refused before any change.
+
 ## Notes
 
 - **Opt-in default:** `certbot_enabled` defaults to `false`. Set it to `true` in
@@ -474,6 +533,21 @@ directory.
   is preferable when the running vhost already exposes `/.well-known/acme-challenge/`.
 
 ## References
+
+Related roles:
+
+- [marcstraube.common.package_management](https://github.com/marcstraube/ansible-collection-common/blob/main/roles/package_management/README.md)
+  — enables EPEL on EL
+- [marcstraube.common.pki](https://github.com/marcstraube/ansible-collection-common/blob/main/roles/pki/README.md)
+  — notifies the same handler topic
+- [marcstraube.server.apache](https://github.com/marcstraube/ansible-collection-server/blob/main/roles/apache/README.md),
+  [marcstraube.server.nginx](https://github.com/marcstraube/ansible-collection-server/blob/main/roles/nginx/README.md),
+  [marcstraube.server.postgresql](https://github.com/marcstraube/ansible-collection-server/blob/main/roles/postgresql/README.md)
+  — subscribe to the handler topic
+- [marcstraube.server.postfix](https://github.com/marcstraube/ansible-collection-server/blob/main/roles/postfix/README.md)
+  — prints the DANE TLSA record that needs `reuse_key`
+
+External:
 
 - [Certbot Documentation](https://eff-certbot.readthedocs.io/en/stable/)
 - [Certbot User Guide](https://eff-certbot.readthedocs.io/en/stable/using.html)

@@ -327,6 +327,16 @@
     - (__postfix_packages_result | default({})) is changed
     - __postfix_version_before != __postfix_version_after
 
+# openssl computes the hash of the TLSA record (dns.yml); a dependency of
+# Postfix on Arch Linux only
+- name: Install | openssl for the TLSA record
+  ansible.builtin.package:
+    name: '{{ __postfix_dns_tlsa_packages }}'
+    state: present
+  retries: 3
+  delay: 5
+  when: postfix_dns_tlsa_enabled | bool
+
 # failed_when: false — the services of other MTAs may not be installed
 - name: Install | Disable conflicting services
   ansible.builtin.systemd_service:

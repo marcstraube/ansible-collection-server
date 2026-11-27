@@ -480,16 +480,18 @@ restart it by hand (`systemctl restart postfix`).
 
 ### DNS
 
-| Variable                    | Default            | Description                                     |
-| --------------------------- | ------------------ | ----------------------------------------------- |
-| `postfix_dns_check_enabled` | `true`             | Check the records (they are printed either way) |
-| `postfix_dns_resolver`      | `''`               | IPv4 address of the resolver; empty: system's   |
-| `postfix_dns_resolver_port` | `53`               | Port of the resolver                            |
-| `postfix_dns_domains`       | `[]`               | Mail domains for the MX and SPF records         |
-| `postfix_dns_addresses`     | `[]`               | Public addresses of the MTA; empty: default IPs |
-| `postfix_dns_spf`           | `'v=spf1 mx -all'` | Expected SPF record; `''` skips it              |
+| Variable                       | Default              | Description                                     |
+| ------------------------------ | -------------------- | ----------------------------------------------- |
+| `postfix_dns_check_enabled`    | `true`               | Check the records (they are printed either way) |
+| `postfix_dns_resolver`         | `''`                 | IPv4 address of the resolver; empty: system's   |
+| `postfix_dns_resolver_port`    | `53`                 | Port of the resolver                            |
+| `postfix_dns_domains`          | `[]`                 | Mail domains for the MX and SPF records         |
+| `postfix_dns_addresses`        | `[]`                 | Public addresses of the MTA; empty: default IPs |
+| `postfix_dns_spf`              | `'v=spf1 mx -all'`   | Expected SPF record; `''` skips it              |
+| `postfix_dns_tlsa_enabled`     | `false`              | Print and check the DANE TLSA record of port 25 |
+| `postfix_dns_tlsa_certbot_dir` | `'/etc/letsencrypt'` | `certbot_config_dir` of the certbot role        |
 
-See [DNS Records](#dns-records).
+See [DNS Records](#dns-records) and [DANE](#dane).
 
 ## Tags
 
@@ -578,7 +580,10 @@ on 465 and 587 (CBC accepted on 25), one with ECDHE and AES-GCM accepted on
 milter is unreachable together with the warning, the relay host settings (in
 the same run `postfix_submission_tls_exclude_ciphers: []` excludes nothing)
 and their removal, the submission login and the LMTP delivery in the mail log,
-and the DNS report. `mariadb` also runs the lookups over TCP with TLS
+and the DNS report (the TLSA record of the test certificate, compared with
+the hash community.crypto computes, present next to a second record of
+another key, left out for a certificate that cannot be read, and the
+`reuse_key` check of a certbot certificate fixture). `mariadb` also runs the lookups over TCP with TLS
 (`db.example.com`, `tls_verify_cert`) against a MariaDB server with the test
 certificate, for a user that may only connect with TLS.
 
@@ -718,6 +723,7 @@ controller with `community.general.dig`, reported as `PRESENT`, `MISSING` or
 | `<domain>. IN TXT`            | `postfix_dns_spf` (only `v=spf1` records count)            |
 | `<myhostname>. IN A` / `AAAA` | Every address of `postfix_dns_addresses`                   |
 | PTR of every address          | `postfix_myhostname` (forward-confirmed reverse DNS)       |
+| `_25._tcp.<myhostname>. TLSA` | `3 1 1 <hash>` with `postfix_dns_tlsa_enabled`             |
 
 `postfix_dns_addresses` defaults to the default IPv4 and IPv6 address of the
 host, which is wrong behind NAT: set the public addresses there. The PTR
@@ -727,6 +733,70 @@ answer; when nothing at all is found the role warns about the resolver. When
 the lookup itself fails (no `dnspython`, a resolver name that does not
 resolve), the records are listed as unchecked with a warning and the run goes
 on. DKIM and DMARC belong to the rspamd role.
+
+### DANE
+
+With DNSSEC on the zone of the MX host, a TLSA record lets DANE-validating
+senders require TLS with the key of this server on port 25. With
+`postfix_dns_tlsa_enabled: true` the role prints and checks
+`_25._tcp.<myhostname>. IN TLSA 3 1 1 <hash>`: usage 3 (the server
+certificate itself, no CA), selector 1 (its public key), matching type 1
+(SHA-256). The role computes the hash on the host from the first certificate
+in `postfix_tls_cert_file`, with `openssl` (installed with the option):
+
+```bash
+openssl x509 -in <cert> -noout -pubkey | openssl pkey -pubin -outform DER | sha256sum
+```
+
+When the certificate cannot be read the record is left out with a warning.
+The report labels the line `(record only, DNSSEC not checked)`: the role
+checks the record, not the DNSSEC signature of the zone, and senders ignore
+a TLSA record in an unsigned zone. The zone of `postfix_myhostname` has to
+be signed (DNSSEC at the DNS provider and the DS record at the registrar).
+
+The record pins the key, not the certificate: it stays valid across
+renewals only while the key stays the same. certbot creates a new key at
+every renewal unless the certificate has `reuse_key` set in
+[`marcstraube.server.certbot`](https://github.com/marcstraube/ansible-collection-server/blob/main/roles/certbot/README.md);
+without it the record stops matching after the first renewal and
+DANE-validating senders defer all mail to this host. When
+`postfix_tls_cert_file` lies below `<postfix_dns_tlsa_certbot_dir>/live/<name>/`,
+the role reads `<postfix_dns_tlsa_certbot_dir>/renewal/<name>.conf` and warns
+while `reuse_key = True` is missing there. Set `postfix_dns_tlsa_certbot_dir`
+to the `certbot_config_dir` of the certbot role when that is not
+`/etc/letsencrypt`. A certificate elsewhere (a copy, or a link outside
+`live/`) is not checked: check its key reuse by hand.
+
+A kept key has no end of life: define a key rollover interval (for example
+yearly, and whenever the key type changes) and follow it. certbot creates a
+key only when it issues a certificate, so the rollover uses a second
+certificate for the new key; DANE-validating senders keep delivering
+throughout:
+
+1. Add a second entry to `certbot_certificates` with the same domains,
+   another `name` and `reuse_key: true`, and run the role. certbot issues
+   it with a new key; Postfix still uses the old certificate.
+2. Publish the TLSA record of the new key next to the old one (the command
+   above, run on `/etc/letsencrypt/live/<new name>/fullchain.pem`) and wait
+   at least two TTLs of the TLSA record, so that no resolver serves the old
+   record set alone any more.
+3. Point `postfix_tls_cert_file` and `postfix_tls_key_file` (and the
+   certificate files of other services that use the old certificate, such
+   as Dovecot or nginx) at the new certificate and run the roles; they
+   reload with it. The report shows the new record `PRESENT`.
+4. Remove the old record, move the old entry from `certbot_certificates` to
+   `certbot_remove_certificates` (its name) and run the certbot role.
+
+The shortcut `certbot renew --cert-name <name> --force-renewal --new-key`
+replaces the key in place. The record of the new key can only be published
+afterwards, and DANE-validating senders defer mail to this host until it
+has propagated (they retry later).
+
+A TLSA record of usage 2 (`2 1 1`, the public key of the issuing CA) needs
+no rollover for the server key, but follows the CA instead: Let's Encrypt
+issues from several intermediates and rotates them, so every possible
+issuer needs a record, kept up to date by hand. The role checks `3 1 1`
+only.
 
 ### Firewall
 

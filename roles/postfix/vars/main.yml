@@ -329,10 +329,35 @@ __postfix_dns_addresses: >-
      else ([ansible_facts['default_ipv4']['address'] | default('')]
            + [ansible_facts['default_ipv6']['address'] | default('')]) | select | list }}
 
+# Packages of the TLSA hash (postfix_dns_tlsa_enabled)
+__postfix_dns_tlsa_packages:
+  - 'openssl'
+
+# SHA-256 of the SubjectPublicKeyInfo of the server certificate (TLSA
+# '3 1 1', lowercase hex as the dig lookup returns it), from the hash task of
+# dns.yml; empty when TLSA is off or the hash failed
+__postfix_dns_tlsa_digest: >-
+  {{ (__postfix_dns_tlsa_hash.stdout | default('') | regex_search('^[0-9a-f]{64}(?=\s)') or '')
+     if postfix_dns_tlsa_enabled | bool and __postfix_dns_tlsa_hash.rc | default(1) == 0 else '' }}
+
+# Renewal configuration of a certbot certificate in postfix_tls_cert_file
+# (<postfix_dns_tlsa_certbot_dir>/live/<name>/...), checked for reuse_key;
+# empty for any other certificate. Without trailing slashes.
+__postfix_dns_tlsa_certbot_dir: "{{ postfix_dns_tlsa_certbot_dir | regex_replace('(?<=.)/+$', '') }}"
+__postfix_dns_tlsa_certbot_live_regex: '^{{ __postfix_dns_tlsa_certbot_dir | regex_escape }}/live/([^/]+)/[^/]+$'
+__postfix_dns_tlsa_certbot_renewal_file: >-
+  {{ (__postfix_dns_tlsa_certbot_dir ~ '/renewal/'
+      ~ postfix_tls_cert_file | regex_replace(__postfix_dns_tlsa_certbot_live_regex, '\1') ~ '.conf')
+     if postfix_tls_cert_file | default('') is match(__postfix_dns_tlsa_certbot_live_regex)
+     else '' }}
+
+# Marker of the TLSA line in the printed report
+__postfix_dns_tlsa_label: '(record only, DNSSEC not checked)'
+
 # Expected records with their zone file line. Computed without any lookup,
 # so they are printed even when the check is off or fails. 'value' is the
-# expected answer: the MX target, the address, the PTR target or the SPF
-# text.
+# expected answer: the MX target, the address, the PTR target, the SPF text
+# or the TLSA data.
 __postfix_dns_records: >-
   {%- set ns = namespace(records=[]) -%}
   {%- set host = postfix_myhostname | lower -%}
@@ -357,6 +382,12 @@ __postfix_dns_records: >-
         'name': address, 'type': 'PTR', 'query': address, 'value': host,
         'record': address ~ ' IN PTR ' ~ host ~ '.'}] -%}
   {%- endfor -%}
+  {%- if __postfix_dns_tlsa_digest | length > 0 -%}
+  {%- set name = '_25._tcp.' ~ host -%}
+  {%- set ns.records = ns.records + [{
+        'name': name, 'type': 'TLSA', 'query': name, 'value': '3 1 1 ' ~ __postfix_dns_tlsa_digest,
+        'record': name ~ '. IN TLSA 3 1 1 ' ~ __postfix_dns_tlsa_digest}] -%}
+  {%- endif -%}
   {{ ns.records }}
 
 # Arguments of the community.general.dig lookup. Missing records, empty

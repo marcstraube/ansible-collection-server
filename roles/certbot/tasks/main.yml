@@ -46,6 +46,24 @@
   tags:
     - always
 
+# certbot reads the role-wide key options from cli.ini at every renewal and
+# refuses to change the options of a kept key
+- name: Main | Assert no certificate keeps its key with other key options
+  ansible.builtin.assert:
+    that:
+      - __certbot_reuse_key_conflicts | length == 0
+    fail_msg: >-
+      certbot_certificates keeps the key of {{ __certbot_reuse_key_conflicts | join(', ') }}
+      (reuse_key) with a key_type, rsa_key_size or elliptic_curve other than
+      certbot_key_type, certbot_rsa_key_size and certbot_elliptic_curve. certbot
+      reads the role-wide options from cli.ini at every renewal and refuses to
+      change the options of a kept key, so the renewal would fail. Use the
+      role-wide key options for these certificates, or no reuse_key.
+    quiet: true
+  when: certbot_enabled | bool
+  tags:
+    - always
+
 # The renew command carries --config=<dir>/cli.ini unquoted: in systemd
 # ExecStart, the EL environment file and the cron job
 - name: Main | Assert certbot_config_dir is an absolute path of plain characters
