@@ -74,8 +74,7 @@ requests the mail certificate, and uses them as the defaults of `key_type`,
 `certbot_certificates` only; the mail certificate gets it from `cli.ini`.
 
 The role also writes these settings to `cli.ini` in `certbot_config_dir`:
-`key-type`, `rsa-key-size` (with `rsa`) or `elliptic-curve` (with `ecdsa`),
-`preferred-chain` (when set), next to `email`, `agree-tos`, `server`
+`preferred-chain` (when set), `email`, `agree-tos`, `server`
 (`certbot_staging`, `certbot_server`), `quiet`, `keep-until-expiring`,
 `max-log-backups`, `config-dir`, `work-dir`, `logs-dir` and
 `certbot_custom_config`. certbot reads that file on every run: the role's
@@ -83,20 +82,25 @@ commands, the renewal unit, the cron job and certbot run by hand (with
 another `certbot_config_dir` only with `--config`, see
 [Directories](#directories)).
 
-Settings in `cli.ini` take precedence over the settings certbot saved for a
-certificate in `renewal/<name>.conf`. Changing the key options therefore does
-not replace the key of an existing certificate right away, but its next
-renewal creates a key of the new type, size or curve. This includes entries of
-`certbot_certificates` with their own `key_type`, `rsa_key_size` or
-`elliptic_curve`: those apply when the role requests the certificate, and its
-renewals use the key options of `cli.ini`. A setting that `cli.ini` does not
-contain, such as the RSA key size of an `ecdsa` configuration, keeps the value
-certbot saved for the certificate.
+The key options are not in `cli.ini`: certbot reads that file at every
+renewal, and a setting there takes precedence over the one certbot saved for
+a certificate in `renewal/<name>.conf`. certbot saves the key options it gets
+on the certonly command line, and every renewal keeps them, also the own
+`key_type`, `rsa_key_size` or `elliptic_curve` of an entry of
+`certbot_certificates`. Changing the key options of the role or of an entry
+therefore applies to certificates the role requests from then on (and to an
+entry with `force_renewal` at its next run); an existing certificate keeps
+its key type, size and curve until it is renewed by hand with the new
+options. The role fails on key options in `certbot_custom_config`, as they
+would again replace the saved ones at every renewal; a
+`/etc/letsencrypt/cli.ini` left from another directory would do the same
+(see [Directories](#directories)).
 
 The role requests the mail certificate only while
 `<certbot_config_dir>/live/mail.<certbot_mail_domain>/fullchain.pem` is
-missing. To give it a new key before its next renewal, renew it by hand (with
-another `certbot_config_dir`, add `--config=<certbot_config_dir>/cli.ini`):
+missing. To give it or another existing certificate new key options, renew it
+by hand with the options (with another `certbot_config_dir`, add
+`--config=<certbot_config_dir>/cli.ini`):
 
 ```bash
 certbot renew --force-renewal --cert-name mail.example.com --key-type rsa --rsa-key-size 4096
@@ -137,8 +141,9 @@ certbot --config=/srv/letsencrypt/cli.ini certificates
 ```
 
 - certbot still reads `/etc/letsencrypt/cli.ini` when it exists, and every
-  setting there that the role's `cli.ini` does not contain applies as well.
-  Remove that file after moving away from the default directory.
+  setting there that the role's `cli.ini` does not contain applies as well,
+  the key options of earlier role versions included. Remove that file after
+  moving away from the default directory.
 - The role moves no certificates. certbot renews only the certificates in
   `certbot_config_dir`, so with another directory the role fails before any
   change while `/etc/letsencrypt/renewal` holds renewal configurations; this
@@ -224,14 +229,9 @@ the way the postfix role describes for DANE, with a second certificate
 entry for the new key, so that its TLSA record is published before the
 switch. certbot refuses to change the type, size or curve of a kept key.
 
-certbot reads `key-type`, `rsa-key-size` and `elliptic-curve` from the
-`cli.ini` of the role at every renewal, and they replace the options saved
-for the certificate. A certificate with `reuse_key` therefore needs the
-role-wide key options: the role fails before any change on an entry with
-`reuse_key` and another `key_type`, `rsa_key_size` or `elliptic_curve`.
-Changing `certbot_key_type`, `certbot_rsa_key_size` or
-`certbot_elliptic_curve` later makes the renewal of every certificate with a
-kept key fail; replace their keys with the rollover above first.
+A kept key keeps the key options saved for its certificate; changing them
+on the entry or role-wide does not touch it. Use the rollover above to move
+it to other key options, or add them to the command below.
 `certbot renew --cert-name <name> --force-renewal --new-key` replaces the
 key of a certificate in place, `reuse_key` stays on for the new key; with
 DANE, senders defer mail until the new TLSA record has propagated.
@@ -512,8 +512,8 @@ of existing certificates (fixtures, one symlinked, parsed with configobj
 afterwards): `reuse_key` set in `[renewalparams]` and removed, a setting
 made by hand kept, the link kept, the mail certificate set, nothing changed
 in check mode or by a second run, and a certificate without renewal
-configuration refused; a kept key with other key options than the
-role-wide ones is refused before any change.
+configuration refused. Verify checks that `cli.ini` carries no key options,
+and side effect that the role refuses them in `certbot_custom_config`.
 
 ## Notes
 
