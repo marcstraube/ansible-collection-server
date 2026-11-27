@@ -3,9 +3,10 @@
 # (marcstraube.common.clamav) and a Postfix that uses the milter, all on one
 # instance (prepare.yml). A check run precedes converge, another one follows
 # idempotence; side_effect runs the targeted package update; verify sends
-# GTUBE, a clean message, EICAR and a message from the signing network
-# through Postfix, trains Bayes through the controller, checks the password
-# handling, the rejected configuration and the DNS report. Each platform
+# GTUBE, a clean message, EICAR, a message that fails DMARC and a message
+# from the signing network through Postfix, trains Bayes through the
+# controller, checks the DMARC actions, the password handling, the rejected
+# settings and configuration and the DNS report. Each platform
 # publishes the test resolver of the instance (dnsmasq on port 53) on its
 # own controller port for the DNS check.
 driver:
@@ -95,6 +96,13 @@ provisioner:
             bucket:
               burst: 100
               rate: '1 / 1m'
+        # Every disposition, one action written with '_'; p=quarantine of
+        # example.com rejects, which the score alone never does (verify.yml
+        # sends a message that fails it)
+        rspamd_dmarc_actions:
+          reject: 'soft_reject'
+          quarantine: 'reject'
+          softfail: 'add header'
         rspamd_dmarc_reporting_enabled: true
         rspamd_dmarc_reporting_email: 'dmarc-reports@example.com'
         rspamd_dmarc_reporting_domain: 'example.com'

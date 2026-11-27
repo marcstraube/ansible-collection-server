@@ -51,6 +51,48 @@
           - __verify_configtest.stdout is search('syntax OK')
         fail_msg: '{{ __verify_configtest.stdout }}'
 
+    - name: Verify | Read the DMARC settings
+      ansible.builtin.command:
+        argv: [rspamadm, configdump, -c, /etc/rspamd/rspamd.conf, -j, dmarc]
+      register: __verify_dmarc
+      changed_when: false
+
+    # The actions with '_' written as ' '
+    - name: Verify | Assert the DMARC module has the actions and the reporting
+      ansible.builtin.assert:
+        that:
+          - (__verify_dmarc.stdout | from_json).actions | default({}) == __verify_dmarc_expected
+          - (__verify_dmarc.stdout | from_json).reporting.enabled | default(false)
+        fail_msg: '{{ __verify_dmarc.stdout }}'
+      vars:
+        __verify_dmarc_expected: >-
+          {{ dict(rspamd_dmarc_actions.keys()
+                  | zip(rspamd_dmarc_actions.values() | map('replace', '_', ' '))) }}
+
+    # The scenario sets its own actions; the default of the role has to
+    # pass the validation as well
+    - name: Verify | Read the defaults and the allowed DMARC actions
+      ansible.builtin.include_vars:
+        file: '{{ playbook_dir }}/../../{{ item.file }}'
+        name: '{{ item.name }}'
+      loop:
+        - file: defaults/main.yml
+          name: __verify_role_defaults
+        - file: vars/main.yml
+          name: __verify_role_vars
+      loop_control:
+        label: '{{ item.file }}'
+
+    - name: Verify | Assert the default DMARC actions are allowed
+      ansible.builtin.assert:
+        that:
+          - __verify_role_defaults.rspamd_dmarc_actions | length > 0
+          - __verify_role_defaults.rspamd_dmarc_actions.keys()
+            | reject('in', __verify_role_vars.__rspamd_dmarc_dispositions) | list | length == 0
+          - __verify_role_defaults.rspamd_dmarc_actions.values() | map('replace', '_', ' ')
+            | reject('in', __verify_role_vars.__rspamd_dmarc_action_names) | list | length == 0
+        fail_msg: '{{ __verify_role_defaults.rspamd_dmarc_actions | to_json }}'
+
     - name: Verify | Stat the files of the role
       ansible.builtin.stat:
         path: '/etc/rspamd/local.d/{{ item }}'
@@ -327,6 +369,54 @@
           - __verify_clean_text is search('spf=pass')
           - __verify_clean_text is not search('(?m)^DKIM-Signature:')
         fail_msg: '{{ __verify_clean_text }}'
+
+    # SPF passes for example.net, which is not the domain of the From
+    # header: DMARC of example.com (p=quarantine) fails without DKIM. The
+    # message is clean otherwise; only the DMARC action rejects it.
+    - name: Verify | Set the Message-ID of the DMARC message
+      ansible.builtin.set_fact:
+        __verify_dmarc_id: 'dmarc.{{ 999999 | random }}@example.com'
+
+    - name: Verify | Send a message that fails DMARC from outside
+      ansible.builtin.include_tasks: ../shared/tasks/send.yml
+      vars:
+        __send_name: __verify_spoofed
+        __send:
+          xclient: '{{ __verify_outside }}'
+          mail_from: 'bob@example.net'
+          rcpt: ['molecule@localhost']
+          data: |
+            From: Alice <alice@example.com>
+            To: Molecule <molecule@localhost>
+            Subject: molecule-dmarc
+            Date: {{ __verify_date }}
+            Message-ID: <{{ __verify_dmarc_id }}>
+            MIME-Version: 1.0
+            Content-Type: text/plain; charset=utf-8
+
+            {{ __verify_body }}
+
+    - name: Verify | Read the rspamd log after the DMARC failure
+      ansible.builtin.slurp:
+        src: /var/log/rspamd/rspamd.log
+      register: __verify_dmarc_log
+
+    # The pre-result line of the dmarc module and the result line of the
+    # message, both carrying its Message-ID
+    - name: Verify | Assert the DMARC action rejected the message
+      ansible.builtin.assert:
+        that:
+          - __verify_spoofed.rcpt[0][0] | default(0) == 250
+          - __verify_spoofed.error_code | default(0) >= 500
+          - __verify_spoofed.error_code | default(0) < 600
+          - __verify_dmarc_lines | select('search', "set pre-result to 'reject' .*'Action set by DMARC' from dmarc")
+            | list | length == 1
+          - __verify_dmarc_lines | select('search', 'DMARC_POLICY_QUARANTINE\(') | list | length == 1
+        fail_msg: '{{ __verify_spoofed | to_json }} {{ __verify_dmarc_lines | to_json }}'
+      vars:
+        __verify_dmarc_lines: >-
+          {{ (__verify_dmarc_log.content | b64decode).splitlines()
+             | select('search', '<' ~ __verify_dmarc_id | regex_escape ~ '>') | list }}
 
     - name: Verify | Send a message from the signing network
       ansible.builtin.include_tasks: ../shared/tasks/send.yml
@@ -692,6 +782,49 @@
           - __verify_zero_prefix_error is defined
           - "'must not contain a /0 network' in __verify_zero_prefix_error"
         fail_msg: '{{ __verify_zero_prefix_error | default("the run passed") }}'
+
+    - name: Verify | Run with an unknown DMARC disposition
+      block:
+        - name: Verify | Include rspamd role with the disposition none  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            rspamd_dmarc_actions:
+              none: 'reject'
+      rescue:
+        - name: Verify | Record the disposition failure
+          ansible.builtin.set_fact:
+            __verify_dmarc_key_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    # 'no action' is a valid rspamd action that the role refuses
+    - name: Verify | Run with a DMARC action that caps the result
+      block:
+        - name: Verify | Include rspamd role with the action no action  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            rspamd_dmarc_actions:
+              quarantine: 'no action'
+      rescue:
+        - name: Verify | Record the action failure
+          ansible.builtin.set_fact:
+            __verify_dmarc_action_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Assert the invalid DMARC actions failed the run
+      ansible.builtin.assert:
+        that:
+          - __verify_dmarc_key_error is defined
+          - "'rspamd_dmarc_actions must be a mapping' in __verify_dmarc_key_error"
+          - __verify_dmarc_key_got in __verify_dmarc_key_error
+          - __verify_dmarc_action_error is defined
+          - "'rspamd_dmarc_actions must be a mapping' in __verify_dmarc_action_error"
+          - __verify_dmarc_action_got in __verify_dmarc_action_error
+        fail_msg: >-
+          {{ __verify_dmarc_key_error | default('the run with none passed') }}
+          {{ __verify_dmarc_action_error | default('the run with no action passed') }}
+      vars:
+        __verify_dmarc_key_got: '(got ''{"none": "reject"}'')'
+        __verify_dmarc_action_got: '(got ''{"quarantine": "no action"}'')'
 
     - name: Verify | Read the main PID before the rejected configuration
       ansible.builtin.command:

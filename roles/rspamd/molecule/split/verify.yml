@@ -57,6 +57,19 @@
       vars:
         __verify_redis_text: '{{ __verify_redis.content | b64decode }}'
 
+    - name: Verify | Read the DMARC settings
+      ansible.builtin.command:
+        argv: [rspamadm, configdump, -c, /etc/rspamd/rspamd.conf, -j, dmarc]
+      register: __verify_dmarc
+      changed_when: false
+
+    - name: Verify | Assert the DMARC module has neither actions nor reporting
+      ansible.builtin.assert:
+        that:
+          - (__verify_dmarc.stdout | from_json).actions is not defined
+          - (__verify_dmarc.stdout | from_json).reporting is not defined
+        fail_msg: '{{ __verify_dmarc.stdout }}'
+
     # Bayes writes to the Valkey of the other host
     - name: Verify | Train Bayes with the enable password
       ansible.builtin.uri:
