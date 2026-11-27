@@ -70,7 +70,10 @@
 # which hands the message to postdrop (the child profile of
 # usr.lib.dovecot.dovecot-lda for Postfix only). Postfix reads its map
 # module definitions in dynamicmaps.cf.d at start; postdrop writes to the
-# pickup socket through a path AppArmor sees as disconnected.
+# pickup socket through a path AppArmor sees as disconnected. sendmail
+# inherits the files LMTP keeps open in the mail root (index, duplicate
+# database lock, Sieve script) and needs none of them: the deny rule keeps
+# them closed as before without a file_inherit line in the audit log.
 /usr/{bin,sbin}/sendmail Cx -> sendmail,
 signal (send) set=(term, kill) peer=dovecot-lmtp//sendmail,
 
@@ -87,6 +90,7 @@ profile sendmail flags=(attach_disconnected) {
   /etc/postfix/dynamicmaps.cf.d/* r,
   /var/spool/postfix/maildrop/* rwl,
   /var/spool/postfix/public/pickup w,
+  deny "{{ path(dovecot_mail_root) }}/**" rwkl,
 }
 {% endif %}
 {% elif __dovecot_apparmor_profile == 'usr.lib.dovecot.imap' %}
