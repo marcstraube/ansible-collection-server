@@ -15,6 +15,8 @@ heading or rename it to a concrete version — the workflow handles that.
 
 ## Unreleased
 
+## v1.1.5 - 2026-11-28
+
 ### `certbot` — a non-default `certbot_config_dir` now reaches certbot
 
 Only hosts with a `certbot_config_dir` other than `/etc/letsencrypt` are
