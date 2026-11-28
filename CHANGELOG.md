@@ -2,6 +2,19 @@
 
 All notable changes to this collection will be documented in this file.
 
+## 1.1.5 (2026-11-28)
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+## What's Changed
+### Bug Fixes
+* fix(nginx): check nginx.conf next to the real file by @marcstraube in https://github.com/marcstraube/ansible-collection-server/pull/230
+* fix(certbot): pass a non-default certbot_config_dir to certbot by @marcstraube in https://github.com/marcstraube/ansible-collection-server/pull/236
+* fix(nginx): keep the stream configuration out of the http block by @marcstraube in https://github.com/marcstraube/ansible-collection-server/pull/247
+
+
+**Full Changelog**: https://github.com/marcstraube/ansible-collection-server/compare/v1.1.4...v1.1.5
+
 ## 1.1.4 (2026-11-19)
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
