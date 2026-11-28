@@ -119,6 +119,6 @@ http {
 
 {% if nginx_stream_enabled | bool %}
 stream {
-    include {{ __nginx_conf_d_dir }}/stream.conf;
+    include {{ __nginx_stream_config_file }};
 }
 {% endif %}

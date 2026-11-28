@@ -45,6 +45,12 @@ See [defaults/main.yml](defaults/main.yml) for all available variables.
 | `nginx_mainline` | `false` | Use mainline instead of stable (Arch) |
 | `nginx_modules`  | `[]`    | Additional modules to install         |
 
+`nginx_modules` takes the module names `http_geoip`, `http_image_filter`,
+`stream` and `mail` on all platforms, and `http_perl` and
+`http_xslt_filter` on Debian and EL. On Arch Linux with `nginx_mainline` the
+role installs the mainline builds (`nginx-mainline-mod-*`); the stable
+module packages depend on `nginx` and conflict with `nginx-mainline`.
+
 ### Package Updates
 
 | Variable                 | Default     | Description                                                     |
@@ -209,6 +215,55 @@ the SSL sites, so the sites can share port 443 with it.
 
 Strategies: `round_robin` (default), `least_conn`, `ip_hash`, `hash`.
 
+### Stream (TCP/UDP)
+
+| Variable                 | Default | Description                         |
+| ------------------------ | ------- | ----------------------------------- |
+| `nginx_stream_enabled`   | `false` | Enable TCP/UDP proxying             |
+| `nginx_stream_upstreams` | `[]`    | Stream upstream backend definitions |
+| `nginx_stream_servers`   | `[]`    | Stream server definitions           |
+
+Keys of a stream upstream: `name` and `servers`, a list of `address` with
+optional `weight` (default `1`) and `backup` (default `false`). Stream
+upstreams have no balancing strategy and no `max_fails` or `fail_timeout`.
+Keys of a stream server: `listen` (port or `address:port`), `proxy_pass`
+(upstream name or `address:port`), optional `udp` (default `false`),
+`proxy_timeout` and `proxy_connect_timeout`.
+
+The role owns `/etc/nginx/stream.conf`: it writes the stream upstreams and
+servers there when `nginx_stream_enabled` is true and removes the file
+whenever it is false (the default), so a file made by hand at that path is
+deleted. Only the `stream` block of `nginx.conf` includes it; the `http`
+block includes `conf.d/*.conf`, where stream servers are not valid.
+
+Stream connections are not logged: the `stream` context of nginx has no
+access log by default and the role has no variable for one. Errors still go
+to the error log.
+
+The stream module is a dynamic module on all supported platforms. Install it
+with `nginx_modules: ['stream']` and load it with `nginx_extra_config`; the
+role's `nginx.conf` does not include the module snippets of the distribution
+packages. The module path is the same for stable and mainline on Arch Linux.
+Bind a stream server to the address it serves rather than to all interfaces;
+see [Firewall](#firewall) for opening its port.
+
+```yaml
+nginx_modules:
+  - 'stream'
+# Arch Linux and Debian; EL: /usr/lib64/nginx/modules/ngx_stream_module.so
+nginx_extra_config: 'load_module /usr/lib/nginx/modules/ngx_stream_module.so;'
+nginx_stream_enabled: true
+nginx_stream_upstreams:
+  - name: 'mysql_backend'
+    servers:
+      - address: '192.168.1.10:3306'
+      - address: '192.168.1.11:3306'
+        backup: true
+nginx_stream_servers:
+  - listen: '10.0.0.5:3306'
+    proxy_pass: 'mysql_backend'
+```
+
 ## Tags
 
 | Tag               | Scope                     |
@@ -263,7 +318,30 @@ molecule test
 
 Driver: `podman` | Platforms: Arch Linux, Debian Trixie, Rocky 9, Rocky 10
 
+## Notes
+
+### Firewall
+
+With `nginx_firewalld_enabled` (default `true`) the role opens only the
+`http` and `https` services. Open stream server ports through the
+[`marcstraube.common.firewalld`](https://github.com/marcstraube/ansible-collection-common/blob/main/roles/firewalld/README.md)
+inventory, and only those meant to be reachable from the network:
+
+```yaml
+firewalld_zone_ports:
+  - zone: internal
+    ports:
+      - '3306/tcp'
+```
+
 ## References
+
+Related roles:
+
+- [marcstraube.common.firewalld](https://github.com/marcstraube/ansible-collection-common/blob/main/roles/firewalld/README.md)
+  — firewall rules for stream server ports
+
+External:
 
 - [Nginx Documentation](https://nginx.org/en/docs/)
 - [Mozilla SSL Configuration Generator](https://ssl-config.mozilla.org/)

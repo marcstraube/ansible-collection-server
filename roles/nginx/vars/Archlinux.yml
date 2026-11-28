@@ -1,11 +1,23 @@
 ---
 __nginx_mainline_package: 'nginx-mainline'
 
-__nginx_module_packages:
+# The module packages of stable depend on nginx and conflict with
+# nginx-mainline, which has its own builds of every module.
+__nginx_module_packages: >-
+  {{ __nginx_module_packages_mainline if nginx_mainline | bool
+     else __nginx_module_packages_stable }}
+
+__nginx_module_packages_stable:
   http_geoip: 'nginx-mod-geoip'
   http_image_filter: 'nginx-mod-image-filter'
   stream: 'nginx-mod-stream'
   mail: 'nginx-mod-mail'
+
+__nginx_module_packages_mainline:
+  http_geoip: 'nginx-mainline-mod-geoip'
+  http_image_filter: 'nginx-mainline-mod-image-filter'
+  stream: 'nginx-mainline-mod-stream'
+  mail: 'nginx-mainline-mod-mail'
 
 __nginx_run_dir: '/run/nginx'
 __nginx_user: 'http'
