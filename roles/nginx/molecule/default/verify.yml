@@ -35,6 +35,40 @@
       register: __nginx_pkg_check
       failed_when: __nginx_pkg_check.changed
 
+    # The converge installs stable. The module packages must follow
+    # nginx_mainline: each package of a map exists in the sync database and
+    # depends on the nginx package of the same flavour.
+    - name: Verify | Read the module packages for stable and mainline (Archlinux)
+      ansible.builtin.command:
+        argv: "{{ ['pacman', '--sync', '--info'] + (__nginx_module_packages.values() | list) }}"
+      environment:
+        LC_ALL: C
+      vars:
+        nginx_mainline: '{{ item }}'
+      loop:
+        - false
+        - true
+      register: __verify_module_packages
+      changed_when: false
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Verify | Assert the module packages follow nginx_mainline (Archlinux)
+      ansible.builtin.assert:
+        that:
+          - __verify_depends | length == 4
+          - __verify_depends | select('search', __verify_nginx_dep) | list | length == 4
+        fail_msg: >-
+          Module packages for nginx_mainline={{ item.item }} do not all depend on
+          {{ __verify_nginx_dep }}: {{ __verify_depends }}
+        success_msg: 'The module packages for nginx_mainline={{ item.item }} depend on {{ __verify_nginx_dep }}'
+      vars:
+        __verify_depends: "{{ item.stdout | regex_findall('(?m)^Depends On *:.*$') }}"
+        __verify_nginx_dep: "{{ ' nginx-mainline=' if item.item else ' nginx=' }}"
+      loop: '{{ __verify_module_packages.results }}'
+      loop_control:
+        label: 'nginx_mainline={{ item.item }}'
+      when: ansible_facts['os_family'] == 'Archlinux'
+
     #
     # Configuration Verification
     #
@@ -145,6 +179,51 @@
         success_msg: "upstream-test_backend.conf exists"
 
     #
+    # Stream Verification
+    #
+
+    - name: Verify | Check stream config exists
+      ansible.builtin.stat:
+        path: '{{ __nginx_stream_config_file }}'
+      register: __nginx_stream_stat
+
+    # conf.d is included in the http block, where stream servers are invalid
+    - name: Verify | Check no stream config in conf.d
+      ansible.builtin.stat:
+        path: '{{ __nginx_conf_d_dir }}/stream.conf'
+      register: __nginx_stream_conf_d_stat
+
+    - name: Verify | Assert stream config location
+      ansible.builtin.assert:
+        that:
+          - __nginx_stream_stat.stat.exists
+          - not __nginx_stream_conf_d_stat.stat.exists
+        fail_msg: >-
+          {{ __nginx_stream_config_file }} exists: {{ __nginx_stream_stat.stat.exists }},
+          {{ __nginx_conf_d_dir }}/stream.conf exists: {{ __nginx_stream_conf_d_stat.stat.exists }}
+        success_msg: 'The stream config is outside conf.d'
+
+    - name: Verify | Read stream config content
+      ansible.builtin.slurp:
+        src: '{{ __nginx_stream_config_file }}'
+      register: __nginx_stream_content
+
+    - name: Verify | Assert stream config content
+      ansible.builtin.assert:
+        that:
+          - "'server 127.0.0.1:80;' in __nginx_stream_lines"
+          - "'server 127.0.0.1:8447 weight=2 backup;' in __nginx_stream_lines"
+          - "'listen 127.0.0.1:8446;' in __nginx_stream_lines"
+          - "'proxy_connect_timeout 1s;' in __nginx_stream_lines"
+          - "'listen 127.0.0.1:10053 udp;' in __nginx_stream_lines"
+          - "'proxy_pass 127.0.0.1:53;' in __nginx_stream_lines"
+          - "'proxy_timeout 1s;' in __nginx_stream_lines"
+        fail_msg: 'Unexpected stream config: {{ __nginx_stream_lines }}'
+        success_msg: 'The stream config carries weight, backup, udp and the timeouts'
+      vars:
+        __nginx_stream_lines: '{{ (__nginx_stream_content.content | b64decode).splitlines() | map("trim") | list }}'
+
+    #
     # Authentik Forward Auth Verification
     #
 
@@ -206,6 +285,24 @@
           - __nginx_svc_check.status.UnitFileState == 'enabled'
         fail_msg: "Nginx service is not active or enabled"
         success_msg: "Nginx service is active and enabled"
+
+    # The stream server forwards the TCP connection to port 80, so the
+    # static site answers through it
+    - name: Verify | Request the static site through the stream server
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1:8446/allowed.txt'
+        headers:
+          Host: 'static.example.com'
+        return_content: true
+        status_code: 200
+      register: __verify_stream_request
+
+    - name: Verify | Assert the stream server proxies to the static site
+      ansible.builtin.assert:
+        that:
+          - __verify_stream_request.content == 'fixture\n'
+        fail_msg: 'Unexpected response through port 8446: {{ __verify_stream_request.content }}'
+        success_msg: 'The stream server on port 8446 proxies to the static site'
 
     #
     # Ansible Managed Header Verification
@@ -319,14 +416,22 @@
           - __verify_selinux_boolean.stdout is search('--> on$')
           - __verify_selinux_http_ports is contains('8082')
           - __verify_selinux_http_ports is contains('8444')
+          - __verify_selinux_http_ports is contains('8446')
+          - __verify_selinux_http_udp_ports is contains('10053')
         fail_msg: >-
           httpd_can_network_connect: {{ __verify_selinux_boolean.stdout }},
-          http_port_t: {{ __verify_selinux_http_ports | join(', ') }}
-        success_msg: 'httpd_can_network_connect is on, ports 8082 and 8444 are labeled http_port_t'
+          http_port_t: tcp {{ __verify_selinux_http_ports | join(', ') }},
+          udp {{ __verify_selinux_http_udp_ports | join(', ') }}
+        success_msg: >-
+          httpd_can_network_connect is on, TCP ports 8082, 8444 and 8446 and
+          UDP port 10053 are labeled http_port_t
       vars:
         __verify_selinux_http_ports: >-
           {{ __verify_selinux_ports.stdout_lines | select('match', '^http_port_t +tcp ')
              | map('regex_replace', '^http_port_t +tcp +', '') | join(', ') | split(', ') }}
+        __verify_selinux_http_udp_ports: >-
+          {{ __verify_selinux_ports.stdout_lines | select('match', '^http_port_t +udp ')
+             | map('regex_replace', '^http_port_t +udp +', '') | join(', ') | split(', ') }}
       when:
         - ansible_facts['os_family'] == 'RedHat'
         - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
