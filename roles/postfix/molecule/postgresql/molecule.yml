@@ -1,0 +1,166 @@
+---
+# PostgreSQL scenario: database, PostfixAdmin, Dovecot and Postfix on one
+# instance, as on a single mail host (prepare: see shared/prepare.yml).
+# Postfix reads the lookups through proxymap with the read-only user of
+# postfixadmin_db_readers, delivers over the LMTP socket of Dovecot and
+# authenticates submission through its SASL socket. A check run precedes
+# converge, another one follows idempotence; side_effect runs the targeted
+# package update; verify checks the lookups, port 25, submission, the
+# quota-status rejection, TLS, the milter and relay host settings, the
+# rejected configuration and the DNS report. The playbooks are shared with
+# the mariadb scenario. Each platform publishes the test resolver of the
+# instance (dnsmasq on port 53) on its own controller port for the DNS check.
+driver:
+  name: podman
+platforms:
+  - name: postfix-postgresql-archlinux
+    image: docker.io/marcstraube/archlinux-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+    published_ports:
+      - '127.0.0.1:15411:53/udp'
+  - name: postfix-postgresql-debian-trixie
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+    published_ports:
+      - '127.0.0.1:15412:53/udp'
+  - name: postfix-postgresql-rocky-9
+    image: docker.io/geerlingguy/docker-rockylinux9-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+    published_ports:
+      - '127.0.0.1:15413:53/udp'
+  - name: postfix-postgresql-rocky-10
+    image: docker.io/geerlingguy/docker-rockylinux10-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+    published_ports:
+      - '127.0.0.1:15414:53/udp'
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: ../shared/prepare.yml
+    converge: ../shared/converge.yml
+    side_effect: ../shared/side_effect.yml
+    verify: ../shared/verify.yml
+  inventory:
+    group_vars:
+      all:
+        # Postfix
+        postfix_enabled: true
+        postfix_db_type: 'postgresql'
+        postfix_db_password: 'postfix-Reader-42'
+        postfix_myhostname: 'mail.example.com'
+        postfix_mydomain: 'example.com'
+        postfix_tls_cert_file: '/etc/molecule-tls/mail.pem'
+        postfix_tls_key_file: '/etc/molecule-tls/mail.key'
+        # No milter in the instance: verify points it to a closed port
+        postfix_milters: []
+        postfix_policy_services:
+          - 'inet:127.0.0.1:12340'
+        postfix_sender_permissions:
+          'support@example.com':
+            - 'alice@example.com'
+        # postmaster replaces the entry of the package alias file
+        postfix_aliases:
+          root: 'alice@example.com'
+          postmaster: 'bob@example.com'
+        postfix_submission_hide_client: true
+        # Mail for other domains (relayed for mynetworks, Sieve) stays in
+        # the queue, where verify finds it
+        postfix_extra_main_cf:
+          defer_transports: 'smtp'
+        postfix_dns_domains:
+          - 'example.com'
+          - 'example.org'
+          - 'missing.example.com'
+        postfix_dns_addresses:
+          - '192.0.2.20'
+          - '2001:db8::20'
+        postfix_dns_resolver: '127.0.0.1'
+        postfix_dns_tlsa_enabled: true
+        postfix_dns_resolver_port: '{{ molecule_dns_port }}'
+        # PostfixAdmin with the read-only users of Postfix and Dovecot; the
+        # accounts come from shared/vars/accounts.yml
+        postfixadmin_enabled: true
+        postfixadmin_db_type: 'postgresql'
+        postfixadmin_db_password: 'test-db-Password-42'
+        postfixadmin_db_create: true
+        postfixadmin_db_readers:
+          - name: 'postfix'
+            password: 'postfix-Reader-42'
+          - name: 'dovecot'
+            password: 'dovecot-Reader-42'
+        # Dovecot with the defaults of the mail stack contract: unix
+        # listeners in the Postfix queue directory (dovecot_postfix_local)
+        dovecot_enabled: true
+        dovecot_db_type: 'postgresql'
+        dovecot_db_password: 'dovecot-Reader-42'
+        dovecot_tls_cert_file: '/etc/molecule-tls/mail.pem'
+        dovecot_tls_key_file: '/etc/molecule-tls/mail.key'
+        dovecot_quota_status_listen: '127.0.0.1:12340'
+        # PostgreSQL on the instance, listening on localhost only
+        postgresql_enabled: true
+        postgresql_ssl_enabled: false
+        postgresql_firewalld_enabled: false
+        postgresql_shared_buffers: '64MB'
+        postgresql_effective_cache_size: '128MB'
+        postgresql_lc_messages: 'en_US.UTF-8'
+        postgresql_lc_monetary: 'en_US.UTF-8'
+        postgresql_lc_numeric: 'en_US.UTF-8'
+        postgresql_lc_time: 'en_US.UTF-8'
+    host_vars:
+      postfix-postgresql-archlinux:
+        ansible_python_interpreter: /usr/bin/python
+        molecule_dns_port: 15411
+      postfix-postgresql-debian-trixie:
+        ansible_python_interpreter: /usr/bin/python3
+        molecule_dns_port: 15412
+      postfix-postgresql-rocky-9:
+        ansible_python_interpreter: /usr/bin/python3
+        molecule_dns_port: 15413
+      postfix-postgresql-rocky-10:
+        ansible_python_interpreter: /usr/bin/python3
+        molecule_dns_port: 15414
+  config_options:
+    defaults:
+      allow_broken_conditionals: true
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - check
+    - converge
+    - idempotence
+    - check
+    - side_effect
+    - verify
+    - destroy

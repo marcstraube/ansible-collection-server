@@ -1,0 +1,87 @@
+{%- macro plist(value, indent) -%}
+{%- if value is boolean -%}
+{{ 'YES' if value else 'NO' }}
+{%- elif value is number -%}
+{{ value }}
+{%- elif value is mapping -%}
+{
+{% for key, item in value.items() %}
+{{ ' ' * (indent + 2) }}{{ key }} = {{ plist(item, indent + 2) }};
+{% endfor %}
+{{ ' ' * indent }}}
+{%- elif value is iterable and value is not string -%}
+(
+{% for item in value %}
+{{ ' ' * (indent + 2) }}{{ plist(item, indent + 2) }}{{ ',' if not loop.last else '' }}
+{% endfor %}
+{{ ' ' * indent }})
+{%- else -%}
+"{{ value | string | replace('\\', '\\\\') | replace('"', '\\"') }}"
+{%- endif -%}
+{%- endmacro -%}
+{{ ansible_managed | comment('c') }}
+//
+// SOGo configuration (marcstraube.server.sogo); readable by the sogo group
+// only, it holds the database passwords.
+{
+  // sogod
+  WOPort = "{{ sogo_bind }}";
+{% if __sogo_defaults_file | length == 0 %}
+  WOWorkersCount = {{ sogo_workers | int }};
+{% endif %}
+  SOGoMemcachedHost = "{{ sogo_memcached_host }}";
+
+  // Database: profiles, folders, sessions, e-mail alarms and the combined
+  // store, ACL and cache tables
+  SOGoProfileURL = "{{ __sogo_db_url }}/sogo_user_profile";
+  OCSFolderInfoURL = "{{ __sogo_db_url }}/sogo_folder_info";
+  OCSSessionsFolderURL = "{{ __sogo_db_url }}/sogo_sessions_folder";
+  OCSEMailAlarmsFolderURL = "{{ __sogo_db_url }}/sogo_alarms_folder";
+  OCSStoreURL = "{{ __sogo_db_url }}/sogo_store";
+  OCSAclURL = "{{ __sogo_db_url }}/sogo_acl";
+  OCSCacheFolderURL = "{{ __sogo_db_url }}/sogo_cache_folder";
+  OCSAdminURL = "{{ __sogo_db_url }}/sogo_admin";
+{% if sogo_db_tls | bool and sogo_db_type == 'mariadb' %}
+  MySQL4SSLEnabled = YES;
+  MySQL4SSLCaPath = "{{ __sogo_db_ca_path }}";
+{% endif %}
+
+  // Users
+  SOGoUserSources = {{ plist(sogo_user_sources if sogo_user_sources | length > 0 else __sogo_default_user_sources, 2) }};
+  SOGoPasswordChangeEnabled = {{ plist(sogo_password_change_enabled | bool, 2) }};
+
+  // Brute-force protection: the failed logins are counted in memcached;
+  // the cache cleanup keeps them at least min(interval, block), at least
+  // 300 seconds (the default), not longer than needed for cached passwords
+  SOGoMaximumFailedLoginCount = {{ sogo_failed_login_count | int }};
+  SOGoMaximumFailedLoginInterval = {{ sogo_failed_login_interval | int }};
+  SOGoFailedLoginBlockInterval = {{ sogo_failed_login_block_interval | int }};
+  SOGoCacheCleanupInterval = {{ [300, [sogo_failed_login_interval | int, sogo_failed_login_block_interval | int] | min] | max }};
+
+  // Mail
+  SOGoMailDomain = "{{ sogo_mail_domain }}";
+  SOGoIMAPServer = "{{ sogo_imap_server }}";
+  SOGoIMAPAclConformsToIMAPExt = YES;
+  SOGoMailingMechanism = smtp;
+  SOGoSMTPServer = "{{ sogo_smtp_server }}";
+  SOGoSMTPAuthenticationType = PLAIN;
+  SOGoMailSpoolPath = "{{ __sogo_spool_dir }}";
+{% if sogo_sieve_server | length > 0 %}
+  SOGoSieveServer = "{{ sogo_sieve_server }}";
+{% endif %}
+  SOGoSieveScriptsEnabled = {{ plist(sogo_sieve_scripts_enabled | bool and sogo_sieve_server | length > 0, 2) }};
+  SOGoForwardEnabled = {{ plist(sogo_forward_enabled | bool and sogo_sieve_server | length > 0, 2) }};
+  SOGoVacationEnabled = {{ plist(sogo_vacation_enabled | bool and sogo_sieve_server | length > 0, 2) }};
+  SOGoEnableEMailAlarms = {{ plist(sogo_ealarms_timer_enabled | bool, 2) }};
+
+  // Settings
+  SOGoTimeZone = "{{ sogo_timezone }}";
+  SOGoLanguage = "{{ sogo_language }}";
+{% if sogo_extra_config | length > 0 %}
+
+  // sogo_extra_config
+{% for key, value in sogo_extra_config.items() %}
+  {{ key }} = {{ plist(value, 2) }};
+{% endfor %}
+{% endif %}
+}

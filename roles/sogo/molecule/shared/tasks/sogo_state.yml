@@ -1,0 +1,52 @@
+---
+# State of SOGo for the update checks: on Debian and Arch Linux the version
+# of the package, the PID of sogod and its binary; on Rocky Linux the image
+# of the running container, the image of the tag and the image the web
+# resources were copied from. Sets __molecule_sogo_state.
+
+- name: Molecule | Read the SOGo package version
+  ansible.builtin.command:
+    argv: >-
+      {{ ['dpkg-query', '--show', '--showformat=${Version}', 'sogo']
+         if ansible_facts['os_family'] == 'Debian' else ['pacman', '--query', 'sogo'] }}
+  register: __molecule_sogo_version
+  changed_when: false
+  when: ansible_facts['os_family'] != 'RedHat'
+
+- name: Molecule | Read the PID of sogod
+  ansible.builtin.command:
+    argv: ['cat', '/run/sogo/sogo.pid']
+  register: __molecule_sogo_pid
+  changed_when: false
+  when: ansible_facts['os_family'] != 'RedHat'
+
+- name: Molecule | Read the binary of sogod
+  ansible.builtin.command:
+    argv: ['readlink', '/proc/{{ __molecule_sogo_pid.stdout | trim }}/exe']
+  register: __molecule_sogo_exe
+  changed_when: false
+  when: ansible_facts['os_family'] != 'RedHat'
+
+- name: Molecule | Read the images of the SOGo container
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      printf '%s\n' "$(podman container inspect --format '{{ '{{' }}.Image{{ '}}' }}' sogo)"
+      printf '%s\n' "$(podman image inspect --format '{{ '{{' }}.Id{{ '}}' }}' localhost/sogo:latest)"
+      cat '{{ molecule_sogo_resources }}/.sogo-image-id'
+  become: true
+  become_user: sogo
+  environment:
+    XDG_RUNTIME_DIR: /run/sogo
+  register: __molecule_sogo_images
+  changed_when: false
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Molecule | Set the SOGo state
+  ansible.builtin.set_fact:
+    __molecule_sogo_state: >-
+      {{ {'version': __molecule_sogo_version.stdout | trim, 'pid': __molecule_sogo_pid.stdout | trim,
+          'exe': __molecule_sogo_exe.stdout | trim}
+         if ansible_facts['os_family'] != 'RedHat'
+         else {'running': __molecule_sogo_images.stdout_lines[0], 'image': __molecule_sogo_images.stdout_lines[1],
+               'resources': __molecule_sogo_images.stdout_lines[2]} }}

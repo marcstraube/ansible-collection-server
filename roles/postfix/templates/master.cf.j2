@@ -1,0 +1,77 @@
+{%- macro service(name, type, private, unpriv, wakeup, maxproc, command, args=[]) -%}
+{%- set chroot = 'n' if name in __postfix_never_chroot else __postfix_chroot -%}
+{%- set lines = ['%-10s %-5s %-7s %-7s %-7s %-7s %-7s %s' | format(name, type, private, unpriv, chroot, wakeup, maxproc, command)]
+                + (args | map('regex_replace', '^', '  -o ') | list) -%}
+{{ lines | join('\n') }}
+{%- endmacro -%}
+{%- set submission_args = [
+  'smtpd_tls_security_level=encrypt',
+  'smtpd_sasl_auth_enable=yes',
+  'smtpd_tls_auth_only=yes',
+  'smtpd_client_restrictions=permit_sasl_authenticated,reject',
+  'smtpd_helo_restrictions=',
+  'smtpd_sender_restrictions=reject_sender_login_mismatch,permit_sasl_authenticated,reject',
+  'smtpd_relay_restrictions=permit_sasl_authenticated,reject',
+  'milter_macro_daemon_name=ORIGINATING',
+] + (['smtpd_tls_mandatory_exclude_ciphers=' ~ postfix_submission_tls_exclude_ciphers | join(',')]
+     if postfix_submission_tls_exclude_ciphers | length > 0 else [])
+  + (['cleanup_service_name=submission-cleanup'] if postfix_submission_hide_client | bool else []) -%}
+{{ ansible_managed | comment }}
+#
+# master.cf of marcstraube.server.postfix: the services of the package, the
+# chroot column as the platform ships it, plus submission. Submission
+# listens on the port numbers: /etc/services of EL 9 has no name for 465.
+#
+# ==========================================================================
+# service type  private unpriv  chroot  wakeup  maxproc command + args
+#               (yes)   (yes)   (no)    (never) (100)
+# ==========================================================================
+{% if postfix_postscreen_enabled | bool %}
+{{ service('smtp', 'inet', 'n', '-', '-', '1', 'postscreen') }}
+{{ service('smtpd', 'pass', '-', '-', '-', '-', 'smtpd') }}
+{{ service('dnsblog', 'unix', '-', '-', '-', '0', 'dnsblog') }}
+{{ service('tlsproxy', 'unix', '-', '-', '-', '0', 'tlsproxy') }}
+{% else %}
+{{ service('smtp', 'inet', 'n', '-', '-', '-', 'smtpd') }}
+{% endif %}
+{% if postfix_submission_enabled | bool %}
+{{ service('587', 'inet', 'n', '-', '-', '-', 'smtpd', ['syslog_name=postfix/submission'] + submission_args) }}
+{% endif %}
+{% if postfix_submissions_enabled | bool %}
+{{ service('465', 'inet', 'n', '-', '-', '-', 'smtpd',
+           ['syslog_name=postfix/submissions', 'smtpd_tls_wrappermode=yes'] + submission_args) }}
+{% endif %}
+{% if postfix_submission_hide_client | bool %}
+{{ service('submission-cleanup', 'unix', 'n', '-', '-', '0', 'cleanup',
+           ['header_checks=regexp:' ~ __postfix_submission_header_checks_file]) }}
+{% endif %}
+{{ service('pickup', 'unix', 'n', '-', '60', '1', 'pickup') }}
+{{ service('cleanup', 'unix', 'n', '-', '-', '0', 'cleanup') }}
+{{ service('qmgr', 'unix', 'n', '-', '300', '1', 'qmgr') }}
+{{ service('tlsmgr', 'unix', '-', '-', '1000?', '1', 'tlsmgr') }}
+{{ service('rewrite', 'unix', '-', '-', '-', '-', 'trivial-rewrite') }}
+{{ service('bounce', 'unix', '-', '-', '-', '0', 'bounce') }}
+{{ service('defer', 'unix', '-', '-', '-', '0', 'bounce') }}
+{{ service('trace', 'unix', '-', '-', '-', '0', 'bounce') }}
+{{ service('verify', 'unix', '-', '-', '-', '1', 'verify') }}
+{{ service('flush', 'unix', 'n', '-', '1000?', '0', 'flush') }}
+{{ service('proxymap', 'unix', '-', '-', '-', '-', 'proxymap') }}
+{{ service('proxywrite', 'unix', '-', '-', '-', '1', 'proxymap') }}
+{{ service('smtp', 'unix', '-', '-', '-', '-', 'smtp') }}
+{{ service('relay', 'unix', '-', '-', '-', '-', 'smtp', ['syslog_name=postfix/$service_name']) }}
+{{ service('showq', 'unix', 'n', '-', '-', '-', 'showq') }}
+{{ service('error', 'unix', '-', '-', '-', '-', 'error') }}
+{{ service('retry', 'unix', '-', '-', '-', '-', 'error') }}
+{{ service('discard', 'unix', '-', '-', '-', '-', 'discard') }}
+{{ service('local', 'unix', '-', 'n', '-', '-', 'local') }}
+{{ service('virtual', 'unix', '-', 'n', '-', '-', 'virtual') }}
+{{ service('lmtp', 'unix', '-', '-', '-', '-', 'lmtp') }}
+{{ service('anvil', 'unix', '-', '-', '-', '1', 'anvil') }}
+{{ service('scache', 'unix', '-', '-', '-', '1', 'scache') }}
+{{ service('postlog', 'unix-dgram', 'n', '-', '-', '1', 'postlogd') }}
+{% if postfix_extra_master_cf | length > 0 %}
+#
+# Extra services (postfix_extra_master_cf)
+#
+{{ postfix_extra_master_cf | trim }}
+{% endif %}

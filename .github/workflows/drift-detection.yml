@@ -1,10 +1,24 @@
 ---
 name: Drift Detection
 
-# Probes Layer-1-no-op'd packages (see .github/drift-targets.yml) for
-# re-availability on their blocked platforms and opens an issue when a
-# package becomes installable again, so the corresponding vars/<OS>.yml
-# entry can be restored.
+# Weekly checks of the targets in .github/drift-targets.yml. Two kinds:
+#
+# - targets:  packages a role blocks on a platform (Layer-1 no-op). Each
+#             is probed for re-availability; an installable package opens
+#             an issue so the vars/<OS>.yml entry can be restored.
+# - profiles: AppArmor profiles (and the abstractions they include) of
+#             the Arch Linux packages that roles extend with local
+#             overrides. The packages are installed in the Arch Linux
+#             container and the SHA-256 of each file is compared with the
+#             recorded value. A changed or missing file opens one issue
+#             per role; resolving it means checking the overrides of the
+#             role against the new file and updating sha256 and version
+#             in drift-targets.yml. Only the Arch Linux package is
+#             watched: Debian's apparmor-profiles ships php-fpm in
+#             complain mode and is out of scope.
+#
+# A failed install or invalid entry fails the profile job without opening
+# issues. Issues are deduplicated by exact title against open issues.
 
 on:
   schedule:
@@ -14,9 +28,15 @@ on:
     - cron: '0 6 * * 1'
   workflow_dispatch:
 
+# Least privilege: only the jobs that open issues get issues: write.
 permissions:
-  issues: write
   contents: read
+
+# A manual run overlapping the scheduled one could pass the title dedupe
+# in both and open duplicate issues; queue runs instead.
+concurrency:
+  group: drift-detection
+  cancel-in-progress: false
 
 jobs:
   # =============================================================================
@@ -28,6 +48,7 @@ jobs:
     outputs:
       matrix: ${{ steps.parse.outputs.matrix }}
       has_targets: ${{ steps.parse.outputs.has_targets }}
+      has_profiles: ${{ steps.parse.outputs.has_profiles }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -39,23 +60,25 @@ jobs:
         id: parse
         run: |
           if [ ! -f .github/drift-targets.yml ]; then
-            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
-            echo 'has_targets=false' >> "$GITHUB_OUTPUT"
+            {
+              echo 'matrix={"include":[]}'
+              echo 'has_targets=false'
+              echo 'has_profiles=false'
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          MATRIX=$(python3 -c "
+          # Either list may be absent or empty; each kind is gated on its
+          # own flag so a file with only one kind still works.
+          python3 -c "
           import json, yaml
           with open('.github/drift-targets.yml') as f:
               data = yaml.safe_load(f) or {}
-          targets = data.get('targets', [])
-          print(json.dumps({'include': targets}))
-          ")
-          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-          if [ "$MATRIX" = '{"include":[]}' ]; then
-            echo 'has_targets=false' >> "$GITHUB_OUTPUT"
-          else
-            echo 'has_targets=true' >> "$GITHUB_OUTPUT"
-          fi
+          targets = data.get('targets') or []
+          profiles = data.get('profiles') or []
+          print('matrix=' + json.dumps({'include': targets}, separators=(',', ':')))
+          print('has_targets=' + ('true' if targets else 'false'))
+          print('has_profiles=' + ('true' if profiles else 'false'))
+          " >> "$GITHUB_OUTPUT"
 
   # =============================================================================
   # PROBE — one job per target (parallel, fail-fast disabled)
@@ -167,6 +190,9 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TITLE: "Drift detected: re-enable `${{ matrix.package }}` on `${{ matrix.platform }}` in ${{ matrix.vars_file }}"
         run: |
+          # pipefail: a failing gh issue list must fail the step instead of
+          # yielding an empty result and a duplicate issue.
+          set -o pipefail
           # Dedupe: skip if an open issue with this exact title already exists.
           EXISTING=$(gh issue list \
             --state open \
@@ -193,6 +219,116 @@ jobs:
           The probe used a downloadonly / makepkg dry-run, so this issue may still false-positive on packages that install metadata cleanly but fail at use time — verify locally before closing.
           EOF
           )
+
+          gh issue create \
+            --title "$TITLE" \
+            --label "bug,enhancement" \
+            --body "$BODY"
+
+  # =============================================================================
+  # PROFILE-CHECK — hash the AppArmor profiles roles extend (single job)
+  # =============================================================================
+  # One job for all entries: the packages are installed once in one
+  # container and every profile is hashed there; a matrix would repeat the
+  # install per entry. Runs without issues: write — the container executes
+  # package scripts, so the token that can write stays in profile-report.
+  profile-check:
+    name: Check AppArmor profiles
+    needs: load-targets
+    if: needs.load-targets.outputs.has_profiles == 'true'
+    runs-on: ubuntu-24.04
+    outputs:
+      drift: ${{ steps.compare.outputs.drift }}
+      has_drift: ${{ steps.compare.outputs.has_drift }}
+    env:
+      IMAGE: docker.io/marcstraube/archlinux-ansible:latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install PyYAML
+        run: pip install --quiet pyyaml
+
+      - name: Validate profile entries
+        id: plan
+        run: python3 .github/scripts/profile_drift.py plan .github/drift-targets.yml >> "$GITHUB_OUTPUT"
+
+      - name: Install packages and hash profiles
+        env:
+          PKGS: ${{ steps.plan.outputs.packages }}
+          FILES: ${{ steps.plan.outputs.files }}
+        # No continue-on-error: a failed pull or install fails the job
+        # visibly and no issue is opened.
+        run: |
+          docker pull --quiet "$IMAGE"
+          # Package output goes to stderr (job log); stdout carries only
+          # the PKG/SHA/NOTFILE/MISSING records parsed by the compare step.
+          docker run --rm -e PKGS="$PKGS" -e FILES="$FILES" "$IMAGE" bash -c '
+            set -euo pipefail
+            # Word splitting of $PKGS is intended; names are validated.
+            pacman -Syu --needed --noconfirm $PKGS >&2
+            for pkg in $PKGS; do
+              echo "PKG $(pacman -Q "$pkg")"
+            done
+            while IFS= read -r file; do
+              [ -n "$file" ] || continue
+              if [ -f "$file" ]; then
+                echo "SHA $(sha256sum "$file")"
+              elif [ -e "$file" ]; then
+                echo "NOTFILE $file"
+              else
+                echo "MISSING $file"
+              fi
+            done <<< "$FILES"
+          ' > "$RUNNER_TEMP/profile-probe.txt"
+          cat "$RUNNER_TEMP/profile-probe.txt"
+
+      - name: Compare with recorded SHA-256
+        id: compare
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 .github/scripts/profile_drift.py compare \
+            .github/drift-targets.yml "$RUNNER_TEMP/profile-probe.txt" >> "$GITHUB_OUTPUT"
+
+  # =============================================================================
+  # PROFILE-REPORT — one issue per role with a changed or missing profile
+  # =============================================================================
+  profile-report:
+    name: Report AppArmor drift for ${{ matrix.role }}
+    needs: profile-check
+    if: needs.profile-check.outputs.has_drift == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.profile-check.outputs.drift) }}
+    steps:
+      - name: Open drift issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # pragma: allowlist secret
+          GH_REPO: ${{ github.repository }}
+          ROLE: ${{ matrix.role }}
+          TITLE: ${{ matrix.title }}
+          BODY: ${{ matrix.body }}
+        run: |
+          # pipefail: a failing gh issue list must fail the step instead of
+          # yielding an empty result and a duplicate issue.
+          set -o pipefail
+          # Dedupe: skip if an open issue with this exact title already exists.
+          EXISTING=$(gh issue list \
+            --state open \
+            --search "in:title \"Drift detected: AppArmor profile changed\" \"$ROLE\"" \
+            --json number,title \
+            | jq -r --arg t "$TITLE" '.[] | select(.title == $t) | .number' \
+            | head -1)
+          if [ -n "$EXISTING" ]; then
+            echo "Existing open drift issue #$EXISTING — skipping"
+            exit 0
+          fi
 
           gh issue create \
             --title "$TITLE" \

@@ -1,0 +1,26 @@
+#!/bin/sh
+{{ ansible_managed | comment }}
+#
+# Builds the SOGo image for Rocky Linux (marcstraube.server.sogo): runs in a
+# container of {{ sogo_container_base_image }}
+# as the sogo user of the host (rootless podman), which the role then
+# commits as {{ __sogo_container_image }} with the sogod entry point.
+# sogo.conf and the other files of /etc/sogo come from the host at run time.
+
+set -eu
+
+# The sogo user with fixed IDs before the package creates it: the host user
+# maps onto them (podman --userns=keep-id)
+groupadd --system --gid {{ __sogo_container_gid }} {{ __sogo_group }}
+useradd --system --uid {{ __sogo_container_uid }} --gid {{ __sogo_group }} \
+  --home-dir {{ __sogo_home }} --create-home --shell /usr/sbin/nologin {{ __sogo_user }}
+
+# APT's download sandbox switches to the _apt user and the nogroup group;
+# the subordinate ID range of the sogo user may not contain nogroup (65534),
+# so the downloads run as the root of the user namespace, which is the
+# unprivileged sogo user on the host
+{{ __sogo_container_apt_mirrors }}
+apt-get -o APT::Sandbox::User=root update
+DEBIAN_FRONTEND=noninteractive apt-get -o APT::Sandbox::User=root install \
+  --yes --no-install-recommends ca-certificates sogo{{ ' sogo-activesync' if sogo_activesync_enabled | bool else '' }}
+rm -rf /var/lib/apt/lists/*

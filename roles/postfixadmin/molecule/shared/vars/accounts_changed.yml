@@ -1,0 +1,57 @@
+---
+# Accounts of the run in side_effect.yml: changed attributes, a new
+# password and entries removed with state: absent. Entries left out of a
+# list (example.net, helpdesk@, sales@) stay untouched, and so does an
+# entry with mode disabled (bob@, even with state: absent).
+
+# Unchanged from accounts.yml: config.local.php keeps the setting verify
+# checks
+postfixadmin_default_aliases:
+  abuse: 'postmaster@example.com'
+
+postfixadmin_domains:
+  - domain: 'example.com'
+    description: 'Example'
+    maxquota: 4096
+  - domain: 'example.org'
+    default_aliases: false
+  - domain: 'remove.example'
+    state: 'absent'
+
+postfixadmin_admins:
+  - username: 'admin@example.com'
+    password: 'admin-Secret-42'
+    superadmin: true
+  - username: 'remove-admin@example.com'
+    state: 'absent'
+  - username: 'ops@example.com'
+    password: 'ops-Changed-42'
+    superadmin: true
+
+postfixadmin_mailboxes:
+  - username: 'alice@example.com'
+    password: 'alice-Changed-42'
+    name: 'Alice'
+    quota: 2048
+  - username: 'bob@example.com'
+    mode: 'disabled'
+    state: 'absent'
+  - username: 'carol@example.com'
+    state: 'absent'
+  - username: 'inactive@example.com'
+    password: 'inactive-Secret-42'
+    name: 'Inactive'
+    quota: 256
+    active: false
+
+postfixadmin_aliases:
+  - address: 'info@example.com'
+    goto: ['alice@example.com', 'bob@example.com']
+  - address: 'remove@example.com'
+    state: 'absent'
+
+postfixadmin_alias_domains:
+  - alias_domain: 'example.org'
+    target_domain: 'example.net'
+  - alias_domain: 'remove.example'
+    state: 'absent'

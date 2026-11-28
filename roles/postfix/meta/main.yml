@@ -1,0 +1,29 @@
+---
+galaxy_info:
+  author: Marc Straube
+  description: Postfix MTA with PostfixAdmin lookups, Dovecot LMTP and SASL, submission and a milter
+  license: MIT
+  min_ansible_version: '2.19'
+
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+
+    - name: Debian
+      versions:
+        - trixie
+
+    - name: EL
+      versions:
+        - all
+
+  galaxy_tags:
+    - mail
+    - postfix
+    - smtp
+    - mta
+    - postfixadmin
+    - dovecot
+
+dependencies: []

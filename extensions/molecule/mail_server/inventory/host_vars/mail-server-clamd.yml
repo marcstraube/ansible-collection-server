@@ -1,0 +1,13 @@
+---
+# clamd host: marcstraube.common.clamav of the base system on TCP for rspamd
+# on the mail host, on the test signature database of prepare. No mail
+# role.
+ansible_python_interpreter: /usr/bin/python3
+
+clamav_enabled: true
+clamav_daemon_enabled: true
+clamav_freshclam_enabled: false
+clamav_firewalld_enabled: false
+clamav_apparmor_enabled: false
+clamav_tcp_socket: '3310'
+clamav_tcp_addr: '0.0.0.0'

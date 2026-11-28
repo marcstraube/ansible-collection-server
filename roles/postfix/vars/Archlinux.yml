@@ -1,0 +1,41 @@
+---
+# Compatibility level of the Postfix release in the repository when this role
+# version was released (postfix 3.11); the default of
+# postfix_compatibility_level
+__postfix_compatibility_level: '3.11'
+
+# Directories and programs as compiled into the package (postconf -d)
+__postfix_command_directory: '/usr/bin'
+__postfix_daemon_directory: '/usr/lib/postfix/bin'
+__postfix_shlib_directory: '/usr/lib/postfix'
+__postfix_sendmail_path: '/usr/bin/sendmail'
+__postfix_newaliases_path: '/usr/bin/newaliases'
+__postfix_mailq_path: '/usr/bin/mailq'
+__postfix_sample_directory: '/etc/postfix'
+__postfix_readme_directory: '/usr/share/doc/postfix'
+__postfix_html_directory: 'no'
+
+# Alias file of the package
+__postfix_alias_file: '/etc/postfix/aliases'
+
+# CA bundle of the system trust store (ca-certificates)
+__postfix_ca_bundle: '/etc/ssl/certs/ca-certificates.crt'
+
+# Chroot column of the shipped master.cf: no service is chrooted
+__postfix_chroot: 'n'
+
+# The package provides /usr/bin/sendmail itself, without an alternatives
+# group
+__postfix_alternatives_path: ''
+
+# Other MTAs that would hold port 25
+__postfix_conflicting_services:
+  - 'exim'
+  - 'opensmtpd'
+
+# Socket of a local MariaDB server ('localhost' with postfix_db_type mariadb)
+__postfix_mariadb_socket: '/run/mysqld/mysqld.sock'
+
+# Postfix 3.6 and later accept protocol ranges (">=TLSv1.2") besides the
+# exclusion syntax
+__postfix_tls_protocol_ranges: true

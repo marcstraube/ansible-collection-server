@@ -1,0 +1,41 @@
+---
+# Settings of every host of the stack scenario. A real inventory takes the
+# passwords from the vault.
+
+# Host names on the podman network
+__molecule_mail_host: 'mail-server-mail'
+__molecule_db_host: 'mail-server-db'
+__molecule_web_host: 'mail-server-web'
+__molecule_clamd_host: 'mail-server-clamd'
+
+# The test CA of prepare, where marcstraube.common.pki puts it into the trust
+# store (Debian)
+__molecule_ca_file: '/usr/local/share/ca-certificates/molecule-mail-ca.crt'
+
+# Database users: the owners of the PostfixAdmin, Roundcube and SOGo
+# databases and the read-only users of the PostfixAdmin tables
+__molecule_db_passwords:
+  postfixadmin: 'pfa-db-Password-42'
+  roundcube: 'rc-db-Password-42'
+  sogo: 'sogo-db-Password-42'
+  postfix: 'postfix-Reader-42'
+  dovecot: 'dovecot-Reader-42'
+  sogo_view: 'sogo-Reader-42'
+
+# Mailboxes of PostfixAdmin
+__molecule_passwords:
+  alice@example.com: 'alice-Secret-42'
+  bob@example.com: 'bob-Secret-42'
+  support@example.com: 'support-Secret-42'
+
+# Base system: the hosts turn on what they need (host_vars)
+php_enabled: false
+clamav_enabled: false
+
+# pki on every host of the database and mail plays: the test CA in the
+# trust store, no DH parameters (none of the services needs them)
+pki_enabled: true
+pki_dhparam_enabled: false
+pki_trusted_cas:
+  - name: 'molecule-mail-ca'
+    src: "{{ lookup('env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/mail-server-ca.pem"

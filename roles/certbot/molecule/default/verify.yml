@@ -41,6 +41,25 @@
         fail_msg: '/etc/letsencrypt does not exist'
         success_msg: '/etc/letsencrypt exists'
 
+    - name: Verify | Check the log directory
+      ansible.builtin.stat:
+        path: /var/log/letsencrypt
+      register: __verify_log_dir
+      failed_when: __verify_log_dir.stat.mode != '0700' or __verify_log_dir.stat.pw_name != 'root'
+
+    # The package of Arch Linux ships the mode in tmpfiles.d
+    - name: Verify | Apply the tmpfiles of the package (Arch)
+      ansible.builtin.command:
+        cmd: systemd-tmpfiles --create certbot.conf
+      changed_when: false
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Verify | Check the log directory after the tmpfiles
+      ansible.builtin.stat:
+        path: /var/log/letsencrypt
+      register: __verify_log_dir_tmpfiles
+      failed_when: __verify_log_dir_tmpfiles.stat.mode != __verify_log_dir.stat.mode
+
     - name: Verify | Check webroot directory
       ansible.builtin.stat:
         path: /var/www/letsencrypt
@@ -113,8 +132,9 @@
         that:
           - "'email = test@example.com' in (__certbot_cli_ini_content.content | b64decode)"
           - "'agree-tos = true' in (__certbot_cli_ini_content.content | b64decode)"
-          - "'key-type = ecdsa' in (__certbot_cli_ini_content.content | b64decode)"
-          - "'elliptic-curve = secp384r1' in (__certbot_cli_ini_content.content | b64decode)"
+          - "'key-type' not in (__certbot_cli_ini_content.content | b64decode)"
+          - "'elliptic-curve' not in (__certbot_cli_ini_content.content | b64decode)"
+          - "'rsa-key-size' not in (__certbot_cli_ini_content.content | b64decode)"
           - "'staging' in (__certbot_cli_ini_content.content | b64decode)"
         fail_msg: 'cli.ini does not contain expected settings'
         success_msg: 'cli.ini contains expected settings'
@@ -659,3 +679,47 @@
           - __verify_lock_wait.stdout | int >= 2000
         fail_msg: 'The second run waited {{ __verify_lock_wait.stdout }} ms'
         quiet: true
+
+# The scenario requests no certificate, so the key options of the certonly
+# command are checked where the role builds them (__certbot_key_args in
+# vars/main.yml), for certificate entries and role-wide values as the
+# inventory sets them. A play of its own: the shared variables of the role
+# stay out of the checks above.
+- name: Verify — Key options of a certificate
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Verify | Load the shared variables of the role
+      ansible.builtin.include_vars:
+        file: '{{ playbook_dir }}/../../vars/main.yml'
+
+    - name: Verify | Assert the key options of the certonly command
+      ansible.builtin.assert:
+        that:
+          - __certbot_key_args == item.args
+        fail_msg: '{{ item.cert }}: {{ __certbot_key_args }}'
+        quiet: true
+      vars:
+        __certbot_cert: '{{ item.cert }}'
+        certbot_key_type: 'ecdsa'
+        certbot_elliptic_curve: 'secp384r1'
+        certbot_rsa_key_size: 4096
+        certbot_reuse_key: '{{ item.reuse_key_default | default(false) }}'
+      loop:
+        # Role defaults: a new key at every renewal
+        - cert: {domains: ['default.example.com']}
+          args: ['--key-type', 'ecdsa', '--elliptic-curve', 'secp384r1']
+        - cert: {domains: ['reuse.example.com'], reuse_key: true}
+          args: ['--key-type', 'ecdsa', '--elliptic-curve', 'secp384r1', '--reuse-key']
+        - cert: {domains: ['rsa.example.com'], key_type: 'rsa', rsa_key_size: 3072, reuse_key: true}
+          args: ['--key-type', 'rsa', '--rsa-key-size', '3072', '--reuse-key']
+        # certbot_reuse_key for every certificate, turned off for one
+        - cert: {domains: ['all.example.com']}
+          reuse_key_default: true
+          args: ['--key-type', 'ecdsa', '--elliptic-curve', 'secp384r1', '--reuse-key']
+        - cert: {domains: ['off.example.com'], reuse_key: false}
+          reuse_key_default: true
+          args: ['--key-type', 'ecdsa', '--elliptic-curve', 'secp384r1']
+      loop_control:
+        label: '{{ item.cert.domains[0] }}'

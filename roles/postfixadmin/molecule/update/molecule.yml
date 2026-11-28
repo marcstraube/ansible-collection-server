@@ -1,0 +1,77 @@
+---
+# Update scenario: prepare installs the previous release (schema 1851) with
+# accounts, leaves a replaced release of an interrupted run and older
+# pre-update dumps behind. A check run reports the update without changing
+# anything; converge updates to the role default, which dumps the
+# database, replaces the release, keeps config.local.php and upgrades the
+# schema. verify checks the result, the dump rotation and the refusal of a
+# downgrade; side_effect then rolls back as the README describes it
+# (restore the pre-update dump, remove the installation directory, run the
+# role with the previous release) and checks release and schema. One
+# platform only.
+driver:
+  name: podman
+platforms:
+  - name: postfixadmin-update-debian-trixie
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: prepare.yml
+    converge: ../shared/converge.yml
+    verify: verify.yml
+    side_effect: side_effect.yml
+  inventory:
+    group_vars:
+      all:
+        # Shared by prepare, converge and verify
+        postfixadmin_enabled: true
+        postfixadmin_db_type: 'postgresql'
+        postfixadmin_db_password: 'test-db-Password-42'
+        postfixadmin_db_create: true
+        postfixadmin_backup_update_keep: 2
+        # The test domains under .example have no DNS records, which
+        # PostfixAdmin checks for every domain and address by default
+        postfixadmin_extra_config:
+          emailcheck_resolve_domain: 'NO'
+        # Release installed by prepare; converge updates to the role default.
+        # The version bump workflow leaves it pinned, so the scenario keeps
+        # testing a schema upgrade (prepare asserts it is older).
+        __molecule_previous_version: '4.0.5'
+        __molecule_previous_checksum: 'sha256:88a55e04dad4f5a2b7729c696cb997ad3a5afb39e31cae1627fa024e7649d70b'
+        postgresql_enabled: true
+        postgresql_ssl_enabled: false
+        postgresql_firewalld_enabled: false
+        postgresql_shared_buffers: '64MB'
+        postgresql_effective_cache_size: '128MB'
+        postgresql_lc_messages: 'en_US.UTF-8'
+        postgresql_lc_monetary: 'en_US.UTF-8'
+        postgresql_lc_numeric: 'en_US.UTF-8'
+        postgresql_lc_time: 'en_US.UTF-8'
+    host_vars:
+      postfixadmin-update-debian-trixie:
+        ansible_python_interpreter: /usr/bin/python3
+  config_options:
+    defaults:
+      allow_broken_conditionals: true
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - check
+    - converge
+    - idempotence
+    - verify
+    - side_effect
+    - destroy

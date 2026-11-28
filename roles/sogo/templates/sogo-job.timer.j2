@@ -1,0 +1,12 @@
+{{ ansible_managed | comment }}
+# Schedule of {{ __sogo_job.name }}.service (marcstraube.server.sogo)
+
+[Unit]
+Description={{ __sogo_job.description }} (timer)
+
+[Timer]
+OnCalendar={{ __sogo_job.on_calendar }}
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

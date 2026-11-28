@@ -1,0 +1,168 @@
+---
+# Paths below mail_discovery_web_root, fixed by the clients
+__mail_discovery_mozilla_files:
+  - 'mail/config-v1.1.xml'
+  - '.well-known/autoconfig/mail/config-v1.1.xml'
+__mail_discovery_autodiscover_file: 'autodiscover/autodiscover.xml'
+__mail_discovery_apple_dir: 'apple'
+__mail_discovery_mta_sts_file: '.well-known/mta-sts.txt'
+
+# Directories below mail_discovery_web_root; the Apple profile directory is
+# handled on its own, it exists only while the profile is enabled
+__mail_discovery_directories:
+  - 'mail'
+  - '.well-known'
+  - '.well-known/autoconfig'
+  - '.well-known/autoconfig/mail'
+  - 'autodiscover'
+
+# Fully qualified host name: at least two labels of letters, digits and
+# hyphens (no leading or trailing hyphen, at most 63 characters each, 253 in
+# total), the last one starting with a letter. Internationalized names are
+# expected in their ACE form (xn--...). Anchored with \Z: '$' also accepts
+# a trailing newline.
+__mail_discovery_hostname_regex: >-
+  (?i)^(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])\Z
+
+# Report URI of TLS-RPT (RFC 8460): mailto: with an address, or https: with
+# a host name and an optional port and path. Printable ASCII only; quotes and
+# backslashes would break the TXT record, commas and exclamation marks
+# separate URIs in it (percent-encode them inside one).
+__mail_discovery_tls_rpt_uri_regex: >-
+  (?i)^(?=[\x21-\x7e]+\Z)(?!.*["\\,;!])(?:mailto:[^@]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])|https://(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])(?::[0-9]{1,5})?(?:[/?#].*)?)\Z
+
+# MTA-STS policy (RFC 8461, section 3.2): one key per line, one mx line per
+# host, lines ending with CRLF. No comment header: the senders parse the file.
+# The line end comes from a YAML escape: Jinja keeps '\r\n' in a string
+# literal as backslashes.
+__mail_discovery_mta_sts_newline: "\r\n"
+__mail_discovery_mta_sts_policy: >-
+  {{
+    (['version: STSv1', 'mode: ' ~ mail_discovery_mta_sts_mode]
+     + (mail_discovery_mta_sts_mx | map('regex_replace', '^', 'mx: ') | list)
+     + ['max_age: ' ~ (mail_discovery_mta_sts_max_age | int)])
+    | join(__mail_discovery_mta_sts_newline) ~ __mail_discovery_mta_sts_newline
+  }}
+
+# Policy id of the _mta-sts TXT record (1 to 32 letters and digits): the
+# start of the SHA-256 of the policy, so it changes with every change of the
+# policy and senders fetch the new one
+__mail_discovery_mta_sts_id: "{{ (__mail_discovery_mta_sts_policy | hash('sha256'))[:20] }}"
+
+# Display names with their fallbacks
+__mail_discovery_display_name: >-
+  {{ mail_discovery_display_name if mail_discovery_display_name | length > 0
+     else mail_discovery_domains | first }}
+__mail_discovery_display_short_name: >-
+  {{ mail_discovery_display_short_name if mail_discovery_display_short_name | length > 0
+     else __mail_discovery_display_name }}
+
+# Submission in client order: implicit TLS first (RFC 8314), then STARTTLS
+__mail_discovery_submission: >-
+  {{
+    ([{'port': mail_discovery_submission_implicit_tls_port | int, 'socket': 'SSL',
+       'prefix': '_submissions._tcp'}]
+     if mail_discovery_submission_implicit_tls_enabled | bool else [])
+    + ([{'port': mail_discovery_submission_starttls_port | int, 'socket': 'STARTTLS',
+         'prefix': '_submission._tcp'}]
+       if mail_discovery_submission_starttls_enabled | bool else [])
+  }}
+
+# Records the clients look up, per mail domain: the prefix is joined with the
+# domain. The Autodiscover SRV record points at the web host itself: an SRV
+# target must have address records and must not be an alias (RFC 2782), so
+# autodiscover.<domain>, often a CNAME, cannot be the target. The target of a
+# TXT record is its expected text.
+__mail_discovery_dns_services: >-
+  {{
+    [{'prefix': 'autoconfig', 'type': 'host', 'port': 0, 'target': mail_discovery_web_host},
+     {'prefix': 'autodiscover', 'type': 'host', 'port': 0, 'target': mail_discovery_web_host},
+     {'prefix': '_imaps._tcp', 'type': 'srv', 'port': mail_discovery_imap_port | int,
+      'target': mail_discovery_imap_host}]
+    + (__mail_discovery_submission
+       | map('combine', {'type': 'srv', 'target': mail_discovery_submission_host}) | list)
+    + ([{'prefix': '_pop3s._tcp', 'type': 'srv', 'port': mail_discovery_pop3_port | int,
+         'target': mail_discovery_pop3_host}]
+       if mail_discovery_pop3_enabled | bool else [])
+    + [{'prefix': '_autodiscover._tcp', 'type': 'srv', 'port': 443, 'target': mail_discovery_web_host}]
+    + ([{'prefix': 'mta-sts', 'type': 'host', 'port': 0, 'target': mail_discovery_web_host},
+        {'prefix': '_mta-sts', 'type': 'txt', 'port': 0,
+         'target': 'v=STSv1; id=' ~ __mail_discovery_mta_sts_id}]
+       if mail_discovery_mta_sts_enabled | bool else [])
+    + ([{'prefix': '_smtp._tls', 'type': 'txt', 'port': 0,
+         'target': 'v=TLSRPTv1; rua=' ~ mail_discovery_tls_rpt_rua | join(',')}]
+       if mail_discovery_tls_rpt_rua | length > 0 else [])
+  }}
+
+# Expected records of all mail domains with their zone file line. Computed
+# without any lookup, so they are printed even when the check is off or fails.
+__mail_discovery_dns_records: >-
+  {%- set ns = namespace(records=[]) -%}
+  {%- for domain in mail_discovery_domains -%}
+  {%- for service in __mail_discovery_dns_services -%}
+  {%- set name = service.prefix ~ '.' ~ domain -%}
+  {%- set ns.records = ns.records + [{
+        'name': name, 'type': service.type, 'port': service.port, 'target': service.target,
+        'record': name ~ '. IN ' ~ ('CNAME ' ~ service.target ~ '.' if service.type == 'host'
+                                     else 'TXT "' ~ service.target ~ '"' if service.type == 'txt'
+                                     else 'SRV 0 1 ' ~ service.port ~ ' ' ~ service.target ~ '.')}] -%}
+  {%- endfor -%}
+  {%- endfor -%}
+  {{ ns.records }}
+
+# Arguments of the community.general.dig lookup. Missing records, empty
+# answers and a resolver that does not answer come back as values
+# ('NXDOMAIN', ''), never as a failure; the lookup only fails on its own
+# errors (dnspython missing, a resolver name that does not resolve). The port
+# option is only passed when it differs from 53, so community.general
+# releases older than 9.5.0 keep working with the default.
+__mail_discovery_dns_servers: >-
+  {{ ['@' ~ mail_discovery_dns_resolver] if mail_discovery_dns_resolver | length > 0 else [] }}
+__mail_discovery_dns_options: >-
+  {{
+    {'fail_on_error': false, 'real_empty': false}
+    | combine({'port': mail_discovery_dns_resolver_port | int}
+              if mail_discovery_dns_resolver_port | int != 53 else {})
+  }}
+
+# Requests of the HTTP check per mail domain, the way the clients send them:
+# GET on the Mozilla files of autoconfig.<domain>, POST on the Autodiscover
+# file of autodiscover.<domain> and, when enabled, GET on the Apple profile
+# and on the MTA-STS policy of mta-sts.<domain>. The type is the expected
+# content type: any XML type, or the exact type of the Apple profile and the
+# policy, which the devices and senders need. The content, when set, is the
+# expected body: a site that serves another policy (a stale copy, another web
+# root) is reported as well.
+__mail_discovery_http_requests: >-
+  {%- set ns = namespace(requests=[]) -%}
+  {%- for domain in mail_discovery_domains -%}
+  {%- for file in __mail_discovery_mozilla_files -%}
+  {%- set ns.requests = ns.requests + [{
+        'method': 'GET', 'url': 'https://autoconfig.' ~ domain ~ '/' ~ file, 'type': 'xml'}] -%}
+  {%- endfor -%}
+  {%- set ns.requests = ns.requests + [{
+        'method': 'POST', 'url': 'https://autodiscover.' ~ domain ~ '/' ~ __mail_discovery_autodiscover_file,
+        'type': 'xml', 'email': 'autoconfig-check@' ~ domain}] -%}
+  {%- if mail_discovery_apple_profile_enabled | bool -%}
+  {%- set ns.requests = ns.requests + [{
+        'method': 'GET',
+        'url': 'https://autoconfig.' ~ domain ~ '/' ~ __mail_discovery_apple_dir ~ '/' ~ domain ~ '.mobileconfig',
+        'type': 'application/x-apple-aspen-config'}] -%}
+  {%- endif -%}
+  {%- if mail_discovery_mta_sts_enabled | bool -%}
+  {%- set ns.requests = ns.requests + [{
+        'method': 'GET', 'url': 'https://mta-sts.' ~ domain ~ '/' ~ __mail_discovery_mta_sts_file,
+        'type': 'text/plain', 'content': __mail_discovery_mta_sts_policy}] -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {{ ns.requests }}
+
+# Minimal POX Autodiscover request as Outlook sends it
+__mail_discovery_http_autodiscover_request: |
+  <?xml version="1.0" encoding="utf-8"?>
+  <Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/requestschema/2006">
+    <Request>
+      <EMailAddress>{{ __mail_discovery_http_email }}</EMailAddress>
+      <AcceptableResponseSchema>http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a</AcceptableResponseSchema>
+    </Request>
+  </Autodiscover>

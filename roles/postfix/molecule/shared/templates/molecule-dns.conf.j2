@@ -1,0 +1,42 @@
+# Test resolver of the postfix scenarios: the resolver of the instance
+# (/etc/resolv.conf) and, published on molecule_dns_port, of the DNS check
+# of the role on the controller. Names below example.com, example.org and
+# example.net come from here; everything else goes to the resolver the
+# instance had before.
+port=53
+# The addresses of the interfaces only: systemd-resolved of the Arch Linux
+# image holds port 53 on 127.0.0.53 and 127.0.0.54
+bind-interfaces
+user=root
+no-resolv
+no-hosts
+{% for server in __prepare_upstream_resolvers %}
+server={{ server }}
+{% endfor %}
+local=/example.com/
+local=/example.org/
+local=/example.net/
+
+# The MTA (host-record also writes the PTR records)
+host-record=mail.example.com,192.0.2.20,2001:db8::21
+
+# TLSA record of port 25 (type 52: usage 3, selector 1, matching type 1,
+# the SHA-256 of the public key of the test certificate)
+dns-rr=_25._tcp.mail.example.com,52,030101{{ __prepare_mail_certificate.public_key_fingerprints.sha256 | replace(':', '') }}
+# and of another key, as during a key rollover
+dns-rr=_25._tcp.mail.example.com,52,030101{{ 'ab' * 32 }}
+
+# The MariaDB server of the instance for the lookups over TLS (mariadb)
+host-record=db.example.com,127.0.0.1
+
+# example.com: MX and SPF present
+mx-host=example.com,mail.example.com,10
+txt-record=example.com,"v=spf1 mx -all"
+
+# example.org: MX and SPF different
+mx-host=example.org,mx.example.net,10
+txt-record=example.org,"v=spf1 -all"
+
+# example.net: the outside world (senders and relay recipients of verify)
+mx-host=example.net,mx.example.net,10
+host-record=mx.example.net,192.0.2.25

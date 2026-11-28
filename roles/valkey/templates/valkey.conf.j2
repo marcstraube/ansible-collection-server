@@ -1,0 +1,71 @@
+{{ ansible_managed | comment }}
+# Valkey configuration. Directives not set here keep the compiled defaults,
+# see the valkey.conf shipped with the upstream sources.
+
+################################## NETWORK #####################################
+
+bind {{ valkey_bind }}
+protected-mode yes
+port {{ valkey_port }}
+{% if valkey_unix_socket | length > 0 %}
+unixsocket {{ valkey_unix_socket }}
+unixsocketperm {{ valkey_unix_socket_perm }}
+{% if valkey_unix_socket_group | length > 0 %}
+unixsocketgroup {{ valkey_unix_socket_group }}
+{% endif %}
+{% endif %}
+{% if valkey_tls_enabled | bool %}
+
+################################# TLS/SSL #####################################
+
+tls-port {{ valkey_tls_port }}
+tls-cert-file {{ valkey_tls_cert_file }}
+tls-key-file {{ valkey_tls_key_file }}
+{% if valkey_tls_ca_file | length > 0 %}
+tls-ca-cert-file {{ valkey_tls_ca_file }}
+{% endif %}
+tls-auth-clients {{ valkey_tls_auth_clients }}
+tls-protocols "{{ valkey_tls_protocols }}"
+{% endif %}
+
+################################# GENERAL #####################################
+
+daemonize no
+pidfile {{ __valkey_pid_file }}
+loglevel notice
+logfile "{{ __valkey_log_file }}"
+
+################################ SNAPSHOTTING  ################################
+
+{% if valkey_save | length > 0 %}
+save {{ valkey_save | join(' ') }}
+{% else %}
+save ""
+{% endif %}
+dbfilename {{ __valkey_rdb_file }}
+dir {{ __valkey_data_dir }}
+
+################################## SECURITY ###################################
+
+# ACL users: the user directives with the SHA-256 password hashes are in a
+# file of their own, deployed by the role, so this file holds no hash.
+include {{ __valkey_users_file }}
+
+############################## MEMORY MANAGEMENT ################################
+
+maxmemory {{ valkey_maxmemory }}
+maxmemory-policy {{ valkey_maxmemory_policy }}
+
+############################## APPEND ONLY MODE ###############################
+
+appendonly {{ valkey_appendonly | bool | ternary('yes', 'no') }}
+{% if valkey_extra_config | length > 0 %}
+
+################################### EXTRA #####################################
+
+{% for directive, value in valkey_extra_config.items() %}
+{% for item in ([value] | flatten) %}
+{{ directive }} {{ (item | bool | ternary('yes', 'no')) if item is boolean else item }}
+{% endfor %}
+{% endfor %}
+{% endif %}

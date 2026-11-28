@@ -1,0 +1,9 @@
+{{ ansible_managed | comment }}
+{% if rspamd_dkim_domains | length > 0 %}
+# ARC seal for mail to the mail domains (upstream selection), with the DKIM
+# keys of the recipient domain; no fallback to a global key
+try_fallback = false;
+domain = {{ __rspamd_dkim_domain_map | to_json }};
+{% else %}
+enabled = false;
+{% endif %}

@@ -46,6 +46,24 @@
   tags:
     - always
 
+# certbot reads cli.ini at every renewal; a key option there replaces the key
+# options saved for each certificate (certonly passes them per certificate).
+# configargparse takes 'key = value', 'key: value', 'key value' and '--key'.
+- name: Main | Assert certbot_custom_config sets no key options
+  ansible.builtin.assert:
+    that:
+      - certbot_custom_config is not search('(?m)^\s*(--)?(key-type|rsa-key-size|elliptic-curve)(\s|[:=]|$)')
+    fail_msg: >-
+      certbot_custom_config sets key-type, rsa-key-size or elliptic-curve.
+      certbot reads cli.ini at every renewal, where these replace the key
+      options saved for each certificate. Remove them and use
+      certbot_key_type, certbot_rsa_key_size and certbot_elliptic_curve or the
+      key options of the entries in certbot_certificates.
+    quiet: true
+  when: certbot_enabled | bool
+  tags:
+    - always
+
 # The renew command carries --config=<dir>/cli.ini unquoted: in systemd
 # ExecStart, the EL environment file and the cron job
 - name: Main | Assert certbot_config_dir is an absolute path of plain characters

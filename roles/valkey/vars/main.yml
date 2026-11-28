@@ -1,0 +1,101 @@
+---
+#
+# Shared Variables
+#
+
+# Configuration file, deployed in full by the role
+__valkey_config_file: '/etc/valkey/valkey.conf'
+
+# ACL users (user directives with the password hashes), deployed in full by
+# the role and pulled into valkey.conf with 'include'. A file of its own, so
+# valkey.conf shows a diff while this one stays no_log.
+__valkey_users_file: '/etc/valkey/users.conf'
+
+# Data directory (RDB snapshots, AOF)
+__valkey_data_dir: '/var/lib/valkey'
+
+# Runtime directory of the service unit (RuntimeDirectory=valkey), the only
+# place below /run the service user can create the unix socket in
+__valkey_run_dir: '/run/valkey'
+
+# Service user, created by the package
+__valkey_user: 'valkey'
+
+# RDB file in the data directory (dbfilename)
+__valkey_rdb_file: 'dump.rdb'
+
+# AOF directory and base name in the data directory (appenddirname,
+# appendfilename); valkey_extra_config may set other names
+__valkey_aof_dir: >-
+  {{ __valkey_data_dir }}/{{ valkey_extra_config['appenddirname'] | default('appendonlydir') | string | trim('"') }}
+__valkey_aof_name: >-
+  {{ valkey_extra_config['appendfilename'] | default('appendonly.aof') | string | trim('"') }}
+
+# Installed packages a targeted update moves along (server, tools, devel)
+__valkey_update_pattern: '^valkey(-.+)?$'
+
+# The service unit blocks the chown of the unix socket to another group
+# (overridden on Debian)
+__valkey_socket_group_dropin: false
+
+# The drop-in is deployed: a unix socket with a group of its own on a
+# platform that needs it
+__valkey_socket_group_dropin_active: >-
+  {{ __valkey_socket_group_dropin | bool
+     and valkey_unix_socket | length > 0
+     and valkey_unix_socket_group | length > 0 }}
+
+# The service unit runs with PrivateUsers=true: groups other than the
+# service user's own map to nobody (overridden on Debian; the socket group
+# drop-in sets PrivateUsers=false)
+__valkey_private_users: false
+
+# TCP ports the SELinux policy labels redis_port_t out of the box; other
+# ports get the label from the role
+__valkey_selinux_default_ports:
+  - '6379'
+  - '16379'
+  - '26379'
+
+#
+# Backup
+#
+
+# Backup script and the units that run it on a schedule
+__valkey_backup_script: '/usr/local/bin/valkey-backup'
+__valkey_backup_service_name: 'valkey-backup.service'
+__valkey_backup_timer_name: 'valkey-backup.timer'
+
+# Password of valkey_backup_user, root-only. Outside /etc/valkey: the EL
+# package resets the ownership below it to the service user on every boot
+# (tmpfiles.d), and outside valkey_backup_dir, which a host backup copies.
+__valkey_backup_auth_file: '/usr/local/etc/valkey-backup.auth'
+
+# Name of a snapshot written by the backup script
+__valkey_backup_set_regex: '^valkey-[0-9]{8}T[0-9]{6}[.]rdb$'
+
+# Local connection of the backup script and the restore: the unix socket
+# (root passes its permissions), else the plain port, else TLS. The first
+# address of valkey_bind is the host; a wildcard is reached on loopback.
+# Over TLS valkey-cli verifies the certificate chain against
+# valkey_tls_ca_file (or the system trust store), not the host name.
+__valkey_cli_host: >-
+  {{ {'0.0.0.0': '127.0.0.1', '*': '127.0.0.1', '::': '::1', '::*': '::1'}.get(
+       valkey_bind.split() | first | regex_replace('^-', ''),
+       valkey_bind.split() | first | regex_replace('^-', '')) }}
+__valkey_cli_connection: >-
+  {{ ['-s', valkey_unix_socket]
+     if valkey_unix_socket | length > 0
+     else (['-h', __valkey_cli_host, '-p', valkey_port | string]
+           if valkey_port | int > 0
+           else (['--tls', '-h', __valkey_cli_host, '-p', valkey_tls_port | string]
+                 + (['--cacert', valkey_tls_ca_file] if valkey_tls_ca_file | length > 0 else []))) }}
+
+# The backup script reads the password from __valkey_backup_auth_file and
+# hands it to valkey-cli in REDISCLI_AUTH, never on the command line
+__valkey_cli_user: "{{ ['--user', valkey_backup_user] if valkey_backup_user | length > 0 else [] }}"
+
+# A user name, ACL rule or pattern ends up as one token of a 'user' line in
+# users.conf: whitespace or a line break would split it or add a rule, and
+# the configuration parser treats quotes as string delimiters
+__valkey_acl_token_regex: '^[^\s"'']+$'

@@ -1,0 +1,27 @@
+---
+# Reads the rule files of every Dovecot profile into __verify_apparmor_rules
+# (profile: list of rule lines without comments, or none for a missing
+# file) and the calls of apparmor_parser into __verify_apparmor_calls.
+- name: Verify | Read the AppArmor rules of the Dovecot profiles
+  ansible.builtin.slurp:
+    src: '{{ __verify_apparmor_dir }}/{{ item }}'
+  loop: '{{ __verify_apparmor_profiles }}'
+  register: __verify_apparmor_raw
+  failed_when: false
+
+- name: Verify | Read the calls of apparmor_parser
+  ansible.builtin.slurp:
+    src: '{{ __verify_apparmor_log }}'
+  register: __verify_apparmor_log_raw
+
+- name: Verify | Record the AppArmor rules
+  ansible.builtin.set_fact:
+    __verify_apparmor_rules: >-
+      {%- set ns = namespace(rules={}) -%}
+      {%- for result in __verify_apparmor_raw.results -%}
+      {%- set ns.rules = ns.rules | combine({result.item:
+            ((result.content | b64decode).splitlines() | reject('match', '#') | select | list)
+            if result.content is defined else none}) -%}
+      {%- endfor -%}
+      {{ ns.rules }}
+    __verify_apparmor_calls: '{{ (__verify_apparmor_log_raw.content | b64decode).splitlines() }}'

@@ -1,0 +1,42 @@
+---
+# SOGo from the AUR. makepkg resolves no AUR dependencies, so sope and
+# libwbxml are built first; ActiveSync is part of the sogo package.
+__sogo_install_method: 'aur'
+__sogo_aur_packages:
+  dependencies:
+    - 'libwbxml'
+    - 'sope'
+  server:
+    - 'sogo'
+__sogo_packages:
+  - 'sogo'
+__sogo_activesync_packages: []
+
+# Not used: SOGo updates with the system upgrade
+__sogo_update_pattern: '^sogo$'
+
+# Programs of the package
+__sogo_tool: '/usr/bin/sogo-tool'
+__sogo_ealarms_notify: '/usr/bin/sogo-ealarms-notify'
+__sogo_command_prefix: []
+
+# Unit and PID file of the package (sogod -WOPidFile)
+__sogo_service_name: 'sogo.service'
+__sogo_pid_file: '/run/sogo/sogo.pid'
+
+# WOWorkersCount goes into sogo.conf
+__sogo_defaults_file: ''
+
+# WebServerResources of the package (GNUstep system domain)
+__sogo_web_resources_path: '/usr/lib/GNUstep/SOGo/WebServerResources'
+
+# Validates sogo.conf (gnustep-base, a dependency of the package)
+__sogo_config_validate: 'plparse %s'
+
+# memcached on this host (an optional dependency of the package)
+__sogo_memcached_packages:
+  - 'memcached'
+__sogo_memcached_service_name: 'memcached.service'
+
+# Socket of a local MariaDB server (sogo_db_create)
+__sogo_mariadb_socket: '/run/mysqld/mysqld.sock'

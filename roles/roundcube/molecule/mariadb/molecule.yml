@@ -1,0 +1,107 @@
+---
+# MariaDB scenario: the postgresql scenario with MariaDB from the
+# distribution packages. Roundcube connects over TCP with TLS (the
+# certificate of 127.0.0.1 verified against the test certificate, verify
+# requires TLS for the Roundcube user); Dovecot and the password plugin
+# connect through the socket of the server ('localhost').
+driver:
+  name: podman
+platforms:
+  - name: roundcube-mariadb-archlinux
+    image: docker.io/marcstraube/archlinux-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: roundcube-mariadb-debian-trixie
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: roundcube-mariadb-rocky-9
+    image: docker.io/geerlingguy/docker-rockylinux9-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: roundcube-mariadb-rocky-10
+    image: docker.io/geerlingguy/docker-rockylinux10-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: ../shared/prepare.yml
+    converge: ../shared/converge.yml
+    verify: ../shared/verify.yml
+  inventory:
+    group_vars:
+      all:
+        # Shared by prepare, converge and verify; the test data is in
+        # ../shared/vars/main.yml
+        __molecule_db_type: 'mariadb'
+        # AppArmor with the php-fpm profile on Arch Linux and Debian; the
+        # postgresql scenario has neither
+        __molecule_apparmor: true
+        # MariaDB through its socket
+        dovecot_db_host: 'localhost'
+        roundcube_password_db_host: 'localhost'
+        # MariaDB on the instance, from the distribution packages
+        mariadb_enabled: true
+        mariadb_repo: 'distro'
+        mariadb_version: '11.8'
+        mariadb_arch_package: 'mariadb'
+        mariadb_ssl_enabled: true
+        mariadb_ssl_cert_file: '/etc/molecule-tls/db.pem'
+        mariadb_ssl_key_file: '/etc/molecule-tls/db.key'
+        # Roundcube over TCP with TLS (also read by the failure cases)
+        __molecule_rc_db_host: '127.0.0.1'
+        __molecule_rc_db_tls: true
+        __molecule_rc_db_tls_ca_file: '/etc/molecule-tls/db.pem'
+        roundcube_db_host: '{{ __molecule_rc_db_host }}'
+        roundcube_db_tls: '{{ __molecule_rc_db_tls }}'
+        roundcube_db_tls_ca_file: '{{ __molecule_rc_db_tls_ca_file }}'
+    host_vars:
+      roundcube-mariadb-archlinux:
+        ansible_python_interpreter: /usr/bin/python
+      roundcube-mariadb-debian-trixie:
+        ansible_python_interpreter: /usr/bin/python3
+      roundcube-mariadb-rocky-9:
+        ansible_python_interpreter: /usr/bin/python3
+      roundcube-mariadb-rocky-10:
+        ansible_python_interpreter: /usr/bin/python3
+  config_options:
+    defaults:
+      allow_broken_conditionals: true
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - check
+    - converge
+    - idempotence
+    - check
+    - verify
+    - destroy

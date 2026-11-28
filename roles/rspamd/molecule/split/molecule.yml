@@ -1,0 +1,112 @@
+---
+# Split scenario: rspamd in one container, Valkey, clamd and Postfix in a
+# second one on a podman network. rspamd reaches Valkey over TLS (verified
+# against the test CA and the container name) and clamd over TCP; the
+# Postfix of the second container uses the milter of the first one. The
+# rspamd container has no policy-rc.d of the image, like a Debian host, and
+# the role installs rspamd there for the first time. Both containers run in
+# one job: the scenario needs both platforms at once.
+driver:
+  name: podman
+platforms:
+  - name: rspamd-split-filter
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    network: rspamd-split
+    groups:
+      - filter
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: rspamd-split-backend
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    network: rspamd-split
+    groups:
+      - backend
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: prepare.yml
+    converge: converge.yml
+    side_effect: side_effect.yml
+    verify: verify.yml
+  inventory:
+    group_vars:
+      all:
+        __molecule_filter: 'rspamd-split-filter'
+        __molecule_backend: 'rspamd-split-backend'
+      filter:
+        rspamd_enabled: true
+        rspamd_controller_password: 'split-Read-42'
+        rspamd_controller_enable_password: 'split-Enable-42'
+        # The milter for the Postfix of the other container, on the
+        # address of this one
+        rspamd_milter_bind: "{{ ansible_facts['default_ipv4']['address'] }}:11332"
+        # Valkey over TLS on the other container
+        rspamd_redis_servers:
+          - 'rspamd-split-backend:6380'
+        rspamd_redis_password: 'split-Valkey-42'
+        rspamd_redis_tls: true
+        rspamd_redis_tls_ca_file: '/etc/molecule-tls/ca.crt'
+        # clamd over TCP on the other container
+        rspamd_antivirus_enabled: true
+        rspamd_clamd_address: 'rspamd-split-backend:3310'
+        rspamd_dkim_domains:
+          - domain: 'example.com'
+            selector: 'split'
+        # The DNS report is tested in the default scenario
+        rspamd_dns_check_enabled: false
+        # DMARC adds its symbols only, without reports
+        rspamd_dmarc_actions: {}
+      backend:
+        # Valkey offers TLS only to the network
+        valkey_enabled: true
+        valkey_bind: '0.0.0.0'
+        valkey_port: 0
+        valkey_tls_enabled: true
+        valkey_tls_port: 6380
+        valkey_tls_cert_file: '/etc/molecule-tls/server.crt'
+        valkey_tls_key_file: '/etc/molecule-tls/server.key'
+        valkey_users:
+          - name: 'rspamd'
+            password: 'split-Valkey-42'
+        # clamd on TCP for the rspamd container
+        clamav_enabled: true
+        clamav_daemon_enabled: true
+        clamav_freshclam_enabled: false
+        clamav_firewalld_enabled: false
+        clamav_apparmor_enabled: false
+        clamav_tcp_socket: '3310'
+        clamav_tcp_addr: '0.0.0.0'
+    host_vars:
+      rspamd-split-filter:
+        ansible_python_interpreter: /usr/bin/python3
+      rspamd-split-backend:
+        ansible_python_interpreter: /usr/bin/python3
+  config_options:
+    defaults:
+      allow_broken_conditionals: true
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - side_effect
+    - verify
+    - destroy

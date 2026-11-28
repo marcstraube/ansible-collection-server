@@ -1,0 +1,100 @@
+---
+# PostgreSQL scenario: PostgreSQL (role of this collection) and PostfixAdmin
+# with the test mailboxes on the instance; Dovecot connects over TCP
+# (127.0.0.1, which needs the SELinux module on EL). A check run on the
+# prepared instance precedes converge, another one follows idempotence;
+# side_effect rolls the packages back (Debian) and runs the targeted update.
+# The playbooks are shared with the mariadb scenario.
+driver:
+  name: podman
+platforms:
+  - name: dovecot-postgresql-archlinux
+    image: docker.io/marcstraube/archlinux-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: dovecot-postgresql-debian-trixie
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: dovecot-postgresql-rocky-9
+    image: docker.io/geerlingguy/docker-rockylinux9-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+  - name: dovecot-postgresql-rocky-10
+    image: docker.io/geerlingguy/docker-rockylinux10-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: ../shared/prepare.yml
+    converge: ../shared/converge.yml
+    side_effect: ../shared/side_effect.yml
+    verify: ../shared/verify.yml
+  inventory:
+    group_vars:
+      all:
+        # Shared by prepare, converge and verify; the test data is in
+        # ../shared/vars/main.yml
+        dovecot_db_type: 'postgresql'
+        dovecot_db_host: '127.0.0.1'
+        # PostgreSQL on the instance, listening on localhost only
+        postgresql_enabled: true
+        postgresql_ssl_enabled: false
+        postgresql_firewalld_enabled: false
+        postgresql_shared_buffers: '64MB'
+        postgresql_effective_cache_size: '128MB'
+        postgresql_lc_messages: 'en_US.UTF-8'
+        postgresql_lc_monetary: 'en_US.UTF-8'
+        postgresql_lc_numeric: 'en_US.UTF-8'
+        postgresql_lc_time: 'en_US.UTF-8'
+    host_vars:
+      dovecot-postgresql-archlinux:
+        ansible_python_interpreter: /usr/bin/python
+      dovecot-postgresql-debian-trixie:
+        ansible_python_interpreter: /usr/bin/python3
+      dovecot-postgresql-rocky-9:
+        ansible_python_interpreter: /usr/bin/python3
+      dovecot-postgresql-rocky-10:
+        ansible_python_interpreter: /usr/bin/python3
+  config_options:
+    defaults:
+      allow_broken_conditionals: true
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - check
+    - converge
+    - idempotence
+    - check
+    - side_effect
+    - verify
+    - destroy

@@ -321,3 +321,13 @@
   retries: 3
   delay: 5
   when: nginx_htpasswd_files | length > 0
+
+- name: Install | SELinux management tools (RedHat)
+  ansible.builtin.package:
+    name: '{{ __nginx_selinux_packages }}'
+    state: present
+  retries: 3
+  delay: 5
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - __nginx_selinux_packages is defined

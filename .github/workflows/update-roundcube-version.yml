@@ -1,0 +1,167 @@
+---
+name: Update Roundcube Version
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly Monday 6:00 UTC
+  workflow_dispatch:       # Manual trigger
+
+# The job only reads the repository; the pull request is pushed and opened
+# with the release bot app token.
+permissions:
+  contents: read
+
+jobs:
+  update-roundcube:
+    name: Check for new Roundcube release
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      # The role installs roundcubemail-<version>-complete.tar.gz and
+      # verifies its SHA-256 checksum. The role default follows the release
+      # GitHub marks as latest, the stable series; the LTS series (1.6.x) is
+      # released on the same day and never becomes latest. Tags have no 'v'.
+      # The bump waits until the complete archive and its signature are
+      # attached.
+      - name: Get latest Roundcube release
+        id: roundcube
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RELEASE=$(gh api repos/roundcube/roundcubemail/releases/latest)
+          LATEST=$(jq -r '.tag_name' <<< "$RELEASE")
+          if ! [[ "$LATEST" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Unexpected latest release tag from GitHub: '$LATEST'"
+            exit 1
+          fi
+          CURRENT=$(grep '^roundcube_version:' roles/roundcube/defaults/main.yml \
+            | sed "s/.*'\(.*\)'/\1/")
+          NEWER=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | tail -n 1)
+          if [[ "$LATEST" != "$CURRENT" && "$NEWER" == "$LATEST" ]]; then
+            UPDATE=true
+          else
+            UPDATE=false
+          fi
+          ASSET="roundcubemail-${LATEST}-complete.tar.gz"
+          DIGEST=$(jq -r --arg name "$ASSET" \
+            '.assets[] | select(.name == $name) | .digest // empty' <<< "$RELEASE")
+          SIGNATURE=$(jq -r --arg name "$ASSET.asc" \
+            '.assets[] | select(.name == $name) | .name' <<< "$RELEASE")
+          if [[ "$UPDATE" == "true" && ( -z "$DIGEST" || -z "$SIGNATURE" ) ]]; then
+            UPDATE=false
+            echo "::warning::Release ${LATEST} has no ${ASSET} with a digest and a signature yet"
+          fi
+          {
+            echo "latest=$LATEST"
+            echo "current=$CURRENT"
+            echo "update=$UPDATE"
+            echo "asset=$ASSET"
+            echo "digest=$DIGEST"
+          } >> "$GITHUB_OUTPUT"
+          echo "Current: $CURRENT, Latest: $LATEST, update: $UPDATE"
+
+      # Roundcube signs every archive with the key of the Roundcube
+      # developers (published on roundcube.net, the .asc next to the
+      # archive on GitHub). The fingerprint of the primary key is pinned
+      # here: the signature has to be valid and made by that key (or its
+      # signing subkey), and the archive has to match the digest GitHub
+      # reports for the asset.
+      - name: Verify the release archive and compute its checksum
+        id: checksum
+        if: steps.roundcube.outputs.update == 'true'
+        env:
+          LATEST: ${{ steps.roundcube.outputs.latest }}
+          ASSET: ${{ steps.roundcube.outputs.asset }}
+          DIGEST: ${{ steps.roundcube.outputs.digest }}
+          KEY_URL: 'https://roundcube.net/download/pubkey.asc'
+          KEY_FINGERPRINT: 'F3E4C04BB3DB5D4215C45F7F5AB2BAA141C4F7D5'
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/roundcube"
+          export GNUPGHOME="$WORK/gnupg"
+          mkdir -p "$GNUPGHOME"
+          chmod 0700 "$GNUPGHOME"
+          BASE="https://github.com/roundcube/roundcubemail/releases/download/${LATEST}"
+          curl -fsSL -o "$WORK/$ASSET" "$BASE/$ASSET"
+          curl -fsSL -o "$WORK/$ASSET.asc" "$BASE/$ASSET.asc"
+          curl -fsSL -o "$WORK/pubkey.asc" "$KEY_URL"
+          gpg --batch --import "$WORK/pubkey.asc"
+          if ! gpg --batch --with-colons --fingerprint "$KEY_FINGERPRINT" > /dev/null 2>&1; then
+            echo "::error::The key from ${KEY_URL} is not ${KEY_FINGERPRINT}"
+            exit 1
+          fi
+          # gpg exits non-zero on a bad signature; the status lines decide:
+          # a good signature (GOODSIG), made by the pinned key (VALIDSIG
+          # names the primary key fingerprint last), and no bad, expired or
+          # revoked one
+          STATUS=$(gpg --batch --status-fd 1 --verify "$WORK/$ASSET.asc" "$WORK/$ASSET" 2> /dev/null || true)
+          if ! grep -q '^\[GNUPG:\] GOODSIG ' <<< "$STATUS" \
+              || ! grep -Eq "^\[GNUPG:\] VALIDSIG .* ${KEY_FINGERPRINT}$" <<< "$STATUS" \
+              || grep -Eq '^\[GNUPG:\] (BADSIG|EXPSIG|EXPKEYSIG|REVKEYSIG|ERRSIG) ' <<< "$STATUS"; then
+            echo "::error::${ASSET} has no valid signature of ${KEY_FINGERPRINT}"
+            echo "$STATUS"
+            exit 1
+          fi
+          SHA256=$(sha256sum "$WORK/$ASSET" | cut -d' ' -f1)
+          if [[ "sha256:$SHA256" != "$DIGEST" ]]; then
+            echo "::error::${ASSET} checksum sha256:${SHA256} differs from the published ${DIGEST}"
+            exit 1
+          fi
+          tar -tzf "$WORK/$ASSET" "roundcubemail-${LATEST}/bin/updatedb.sh" > /dev/null
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+      # Only the role default moves. The update scenario keeps installing
+      # the release pinned in molecule/update/molecule.yml
+      # (__molecule_previous_version), which stays older than every new
+      # default, so the bump PR tests the update and the schema upgrade
+      # from that release to the new one.
+      - name: Update defaults/main.yml
+        if: steps.roundcube.outputs.update == 'true'
+        run: |
+          sed -i \
+            -e "s/^roundcube_version: '.*'/roundcube_version: '${{ steps.roundcube.outputs.latest }}'/" \
+            -e "s/^roundcube_checksum: '.*'/roundcube_checksum: 'sha256:${{ steps.checksum.outputs.sha256 }}'/" \
+            roles/roundcube/defaults/main.yml
+
+      # Pull requests opened with github.token do not trigger the CI
+      # workflow; the release bot app token lets the bump PR run the
+      # roundcube molecule matrix.
+      - name: Generate release bot token
+        if: steps.roundcube.outputs.update == 'true'
+        uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
+      - name: Create Pull Request
+        if: steps.roundcube.outputs.update == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          commit-message: >-
+            chore(roundcube): update Roundcube version
+            ${{ steps.roundcube.outputs.current }} →
+            ${{ steps.roundcube.outputs.latest }}
+          branch: chore/update-roundcube-${{ steps.roundcube.outputs.latest }}
+          title: >-
+            chore(roundcube): update Roundcube version to
+            ${{ steps.roundcube.outputs.latest }}
+          body: |
+            Automated update of `roundcube_version` and `roundcube_checksum` in `roles/roundcube/defaults/main.yml`.
+
+            - **Previous:** `${{ steps.roundcube.outputs.current }}`
+            - **New:** `${{ steps.roundcube.outputs.latest }}`
+            - **SHA-256:** `${{ steps.checksum.outputs.sha256 }}` (`${{ steps.roundcube.outputs.asset }}`, signature of the Roundcube release key `F3E4 C04B B3DB 5D42 15C4 5F7F 5AB2 BAA1 41C4 F7D5` verified, matches the digest GitHub publishes for the asset)
+
+            Release notes: https://github.com/roundcube/roundcubemail/releases/tag/${{ steps.roundcube.outputs.latest }}
+
+            The role runs `bin/updatedb.sh` of the new release on the next run; the `update` molecule scenario covers the step from the release pinned in `roles/roundcube/molecule/update/molecule.yml`.
+
+            ---
+            This PR was created automatically by the `update-roundcube-version` workflow.
+          labels: dependencies
+          delete-branch: true

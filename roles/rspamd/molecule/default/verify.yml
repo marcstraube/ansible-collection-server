@@ -1,0 +1,975 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __verify_user: "{{ 'rspamd' if ansible_facts['os_family'] == 'Archlinux' else '_rspamd' }}"
+    __verify_controller: 'http://127.0.0.1:11334'
+    __verify_hash_regex: '^[$][0-9]+[$][a-z0-9]+[$][a-z0-9]+$'
+    __verify_marker: '# Managed by Ansible: rspamd_local_config of marcstraube.server.rspamd'
+    # RFC 5322 date, independent of the locale of the controller
+    __verify_date: >-
+      {{ __verify_weekdays[now(utc=true).weekday()] }},
+      {{ now(utc=true).strftime('%d') }}
+      {{ __verify_months[now(utc=true).month - 1] }}
+      {{ now(utc=true).strftime('%Y %H:%M:%S') }} +0000
+    __verify_weekdays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+    __verify_months: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    # An outside client: SPF of example.net passes for it (test resolver)
+    __verify_outside:
+      ADDR: '192.0.2.25'
+      NAME: 'mx.example.net'
+      HELO: 'mx.example.net'
+    __verify_body: |
+      Hello Molecule,
+
+      here are the notes from the project review of yesterday. The team agreed
+      on the schedule for the next release, the documentation will be updated
+      by the end of the week and the open questions go to the next meeting.
+
+      Best regards,
+      Bob
+    # The EICAR test file
+    __verify_eicar_base64: >-
+      WDVPIVAlQEFQWzRcUFpYNTQoUF4pN0NDKTd9JEVJQ0FSLVNUQU5EQVJELUFOVElWSVJVUy1URVNULUZJTEUhJEgrSCo=
+
+  tasks:
+    #
+    # Configuration
+    #
+
+    - name: Verify | Test the active configuration
+      ansible.builtin.command:
+        argv: [rspamadm, configtest, -c, /etc/rspamd/rspamd.conf]
+      register: __verify_configtest
+      changed_when: false
+
+    - name: Verify | Assert rspamadm configtest passes
+      ansible.builtin.assert:
+        that:
+          - __verify_configtest.stdout is search('syntax OK')
+        fail_msg: '{{ __verify_configtest.stdout }}'
+
+    - name: Verify | Read the DMARC settings
+      ansible.builtin.command:
+        argv: [rspamadm, configdump, -c, /etc/rspamd/rspamd.conf, -j, dmarc]
+      register: __verify_dmarc
+      changed_when: false
+
+    # The actions with '_' written as ' '
+    - name: Verify | Assert the DMARC module has the actions and the reporting
+      ansible.builtin.assert:
+        that:
+          - (__verify_dmarc.stdout | from_json).actions | default({}) == __verify_dmarc_expected
+          - (__verify_dmarc.stdout | from_json).reporting.enabled | default(false)
+        fail_msg: '{{ __verify_dmarc.stdout }}'
+      vars:
+        __verify_dmarc_expected: >-
+          {{ dict(rspamd_dmarc_actions.keys()
+                  | zip(rspamd_dmarc_actions.values() | map('replace', '_', ' '))) }}
+
+    # The scenario sets its own actions; the default of the role has to
+    # pass the validation as well
+    - name: Verify | Read the defaults and the allowed DMARC actions
+      ansible.builtin.include_vars:
+        file: '{{ playbook_dir }}/../../{{ item.file }}'
+        name: '{{ item.name }}'
+      loop:
+        - file: defaults/main.yml
+          name: __verify_role_defaults
+        - file: vars/main.yml
+          name: __verify_role_vars
+      loop_control:
+        label: '{{ item.file }}'
+
+    - name: Verify | Assert the default DMARC actions are allowed
+      ansible.builtin.assert:
+        that:
+          - __verify_role_defaults.rspamd_dmarc_actions | length > 0
+          - __verify_role_defaults.rspamd_dmarc_actions.keys()
+            | reject('in', __verify_role_vars.__rspamd_dmarc_dispositions) | list | length == 0
+          - __verify_role_defaults.rspamd_dmarc_actions.values() | map('replace', '_', ' ')
+            | reject('in', __verify_role_vars.__rspamd_dmarc_action_names) | list | length == 0
+        fail_msg: '{{ __verify_role_defaults.rspamd_dmarc_actions | to_json }}'
+
+    - name: Verify | Stat the files of the role
+      ansible.builtin.stat:
+        path: '/etc/rspamd/local.d/{{ item }}'
+      loop:
+        - worker-controller.inc
+        - redis.conf
+        - worker-proxy.inc
+        - dkim_signing.conf
+      register: __verify_files
+
+    - name: Verify | Assert owner and mode of the files
+      ansible.builtin.assert:
+        that:
+          - __verify_files.results[0].stat.mode == '0640'
+          - __verify_files.results[0].stat.gr_name == __verify_user
+          - __verify_files.results[0].stat.pw_name == 'root'
+          - __verify_files.results[1].stat.mode == '0640'
+          - __verify_files.results[1].stat.gr_name == __verify_user
+          - __verify_files.results[2].stat.mode == '0644'
+          - __verify_files.results[3].stat.mode == '0644'
+        fail_msg: "{{ __verify_files.results | map(attribute='stat') | list | to_json }}"
+
+    - name: Verify | Read the controller settings
+      ansible.builtin.slurp:
+        src: /etc/rspamd/local.d/worker-controller.inc
+      register: __verify_controller_file
+
+    - name: Verify | Set the password hashes
+      ansible.builtin.set_fact:
+        __verify_hashes:
+          password: >-
+            {{ (__verify_text | regex_findall('(?m)^password = "([^"]*)";$') + ['']) | first }}
+          enable_password: >-
+            {{ (__verify_text | regex_findall('(?m)^enable_password = "([^"]*)";$') + ['']) | first }}
+        __verify_controller_text: '{{ __verify_text }}'
+      vars:
+        __verify_text: '{{ __verify_controller_file.content | b64decode }}'
+
+    - name: Verify | Assert the controller keeps hashes only
+      ansible.builtin.assert:
+        that:
+          - __verify_hashes.password is match(__verify_hash_regex)
+          - __verify_hashes.enable_password is match(__verify_hash_regex)
+          - "'molecule-Read-42' not in __verify_controller_text"
+          - "'molecule-Enable-42' not in __verify_controller_text"
+          - __verify_controller_text is search('(?m)^secure_ip = \[\];$')
+        fail_msg: '{{ __verify_controller_text }}'
+
+    - name: Verify | Check the hashes against the passwords
+      ansible.builtin.command:
+        argv:
+          - sh
+          - -c
+          - 'RSPAMADM_PASSWORD="$(cat)" exec rspamadm pw --check --quiet --password "$1"'
+          - sh
+          - '{{ __verify_hashes[item.key] }}'
+        stdin: '{{ item.value }}'
+        stdin_add_newline: false
+      loop:
+        - key: password
+          value: 'molecule-Read-42'
+        - key: enable_password
+          value: 'molecule-Enable-42'
+      loop_control:
+        label: '{{ item.key }}'
+      changed_when: false
+
+    - name: Verify | Read the extra file
+      ansible.builtin.slurp:
+        src: /etc/rspamd/local.d/phishing.conf
+      register: __verify_extra
+
+    - name: Verify | Assert the extra file carries the marker
+      ansible.builtin.assert:
+        that:
+          - (__verify_extra.content | b64decode).splitlines()[0] == __verify_marker
+          - (__verify_extra.content | b64decode) is search('openphish_enabled = false;')
+        fail_msg: '{{ __verify_extra.content | b64decode }}'
+
+    - name: Verify | Stat the DKIM keys
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+        - /var/lib/rspamd/dkim
+        - /var/lib/rspamd/dkim/example.com.molecule.key
+        - /var/lib/rspamd/dkim/example.org.2026.key
+        - /var/lib/rspamd/dkim/example.com.molecule.txt
+      register: __verify_dkim
+
+    - name: Verify | Assert the DKIM keys belong to the service user only
+      ansible.builtin.assert:
+        that:
+          - __verify_dkim.results[0].stat.mode == '0750'
+          - __verify_dkim.results[0].stat.gr_name == __verify_user
+          - __verify_dkim.results[1].stat.mode == '0600'
+          - __verify_dkim.results[1].stat.pw_name == __verify_user
+          - __verify_dkim.results[2].stat.mode == '0600'
+          - __verify_dkim.results[3].stat.exists
+        fail_msg: "{{ __verify_dkim.results | map(attribute='stat') | list | to_json }}"
+
+    - name: Verify | Gather service facts
+      ansible.builtin.service_facts:
+
+    - name: Verify | Assert rspamd runs and the DMARC report timer is active
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['services']['rspamd.service']['state'] == 'running'
+          - ansible_facts['services']['rspamd.service']['status'] == 'enabled'
+        fail_msg: "{{ ansible_facts['services']['rspamd.service'] | to_json }}"
+
+    - name: Verify | Read the DMARC report timer state
+      ansible.builtin.command:
+        argv: [systemctl, is-active, rspamd-dmarc-report.timer]
+      register: __verify_timer
+      changed_when: false
+
+    - name: Verify | Assert the DMARC report timer is active
+      ansible.builtin.assert:
+        that:
+          - __verify_timer.stdout == 'active'
+
+    # The report runs as the service user with the hardening of the unit;
+    # without collected data it ends without sending anything
+    - name: Verify | Run the DMARC report once
+      ansible.builtin.systemd_service:
+        name: rspamd-dmarc-report.service
+        state: started
+
+    - name: Verify | Read the result of the DMARC report
+      ansible.builtin.command:
+        argv: [systemctl, show, --property=Result, --property=ExecMainStatus, rspamd-dmarc-report.service]
+      register: __verify_dmarc_report
+      changed_when: false
+
+    - name: Verify | Read the log of the DMARC report
+      ansible.builtin.command:
+        argv: [journalctl, --unit=rspamd-dmarc-report.service, --no-pager, --lines=20]
+      register: __verify_dmarc_report_log
+      changed_when: false
+
+    - name: Verify | Assert the DMARC report ran successfully
+      ansible.builtin.assert:
+        that:
+          - __verify_dmarc_report.stdout is search('(?m)^Result=success$')
+          - __verify_dmarc_report.stdout is search('(?m)^ExecMainStatus=0$')
+        fail_msg: '{{ __verify_dmarc_report.stdout }} {{ __verify_dmarc_report_log.stdout }}'
+
+    - name: Verify | Wait for the milter and the controller
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: '{{ item }}'
+        timeout: 60
+      loop:
+        - 11332
+        - 11334
+
+    #
+    # Mail through the Milter
+    #
+
+    - name: Verify | Send GTUBE from outside
+      ansible.builtin.include_tasks: ../shared/tasks/send.yml
+      vars:
+        __send_name: __verify_gtube
+        __send:
+          xclient: '{{ __verify_outside }}'
+          mail_from: 'bob@example.net'
+          rcpt: ['molecule@localhost']
+          data: |
+            From: Bob <bob@example.net>
+            To: molecule@localhost
+            Subject: molecule-gtube
+            Date: {{ __verify_date }}
+            Message-ID: <gtube.{{ 999999 | random }}@example.net>
+
+            XJS*C4JDBQADN1.NSBN3*2IDNEN*GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X
+
+    - name: Verify | Assert GTUBE was rejected
+      ansible.builtin.assert:
+        that:
+          - __verify_gtube.error_code | default(0) >= 500
+          - __verify_gtube.error_code | default(0) < 600
+        fail_msg: '{{ __verify_gtube | to_json }}'
+
+    - name: Verify | Send EICAR from outside
+      ansible.builtin.include_tasks: ../shared/tasks/send.yml
+      vars:
+        __send_name: __verify_eicar
+        __send:
+          xclient: '{{ __verify_outside }}'
+          mail_from: 'bob@example.net'
+          rcpt: ['molecule@localhost']
+          data: |
+            From: Bob <bob@example.net>
+            To: molecule@localhost
+            Subject: molecule-eicar
+            Date: {{ __verify_date }}
+            Message-ID: <eicar.{{ 999999 | random }}@example.net>
+            MIME-Version: 1.0
+            Content-Type: multipart/mixed; boundary="molecule-boundary"
+
+            --molecule-boundary
+            Content-Type: text/plain; charset=utf-8
+
+            {{ __verify_body }}
+            --molecule-boundary
+            Content-Type: application/octet-stream; name="eicar.com"
+            Content-Disposition: attachment; filename="eicar.com"
+            Content-Transfer-Encoding: base64
+
+            {{ __verify_eicar_base64 }}
+            --molecule-boundary--
+
+    - name: Verify | Assert EICAR was rejected
+      ansible.builtin.assert:
+        that:
+          - __verify_eicar.error_code | default(0) >= 500
+          - __verify_eicar.error_code | default(0) < 600
+        fail_msg: '{{ __verify_eicar | to_json }}'
+
+    # The result line of the scan names the symbols
+    - name: Verify | Read the rspamd log
+      ansible.builtin.slurp:
+        src: /var/log/rspamd/rspamd.log
+      register: __verify_log
+
+    - name: Verify | Assert clamd found EICAR
+      ansible.builtin.assert:
+        that:
+          - __verify_log_text is search('CLAM_VIRUS\(')
+          - __verify_log_text is search('Eicar-Test-Signature')
+          - __verify_log_text is not search('NOPERM')
+        fail_msg: "{{ __verify_log_text.splitlines() | select('search', 'CLAM|clam|NOPERM|redis') | list | to_json }}"
+      vars:
+        __verify_log_text: '{{ __verify_log.content | b64decode }}'
+
+    - name: Verify | Send a clean message from outside
+      ansible.builtin.include_tasks: ../shared/tasks/send.yml
+      vars:
+        __send_name: __verify_clean
+        __send:
+          xclient: '{{ __verify_outside }}'
+          mail_from: 'bob@example.net'
+          rcpt: ['molecule@localhost']
+          data: |
+            From: Bob <bob@example.net>
+            To: Molecule <molecule@localhost>
+            Subject: molecule-clean
+            Date: {{ __verify_date }}
+            Message-ID: <clean.{{ 999999 | random }}@example.net>
+            MIME-Version: 1.0
+            Content-Type: text/plain; charset=utf-8
+
+            {{ __verify_body }}
+
+    - name: Verify | Assert the clean message was accepted
+      ansible.builtin.assert:
+        that:
+          - __verify_clean.data[0] | default(0) == 250
+        fail_msg: '{{ __verify_clean | to_json }}'
+
+    - name: Verify | Read the clean message
+      ansible.builtin.include_tasks: ../shared/tasks/delivered.yml
+      vars:
+        __delivered_subject: 'molecule-clean'
+        __delivered_name: __verify_clean_text
+
+    # skip_local of milter_headers: the headers go to mail from outside
+    - name: Verify | Assert the clean message passed with the spam headers and unsigned
+      ansible.builtin.assert:
+        that:
+          - __verify_clean_text is search('(?m)^X-Spam-Status:\sNo,\sscore=')
+          - __verify_clean_text is search('(?m)^Authentication-Results:\s')
+          - __verify_clean_text is search('spf=pass')
+          - __verify_clean_text is not search('(?m)^DKIM-Signature:')
+        fail_msg: '{{ __verify_clean_text }}'
+
+    # SPF passes for example.net, which is not the domain of the From
+    # header: DMARC of example.com (p=quarantine) fails without DKIM. The
+    # message is clean otherwise; only the DMARC action rejects it.
+    - name: Verify | Set the Message-ID of the DMARC message
+      ansible.builtin.set_fact:
+        __verify_dmarc_id: 'dmarc.{{ 999999 | random }}@example.com'
+
+    - name: Verify | Send a message that fails DMARC from outside
+      ansible.builtin.include_tasks: ../shared/tasks/send.yml
+      vars:
+        __send_name: __verify_spoofed
+        __send:
+          xclient: '{{ __verify_outside }}'
+          mail_from: 'bob@example.net'
+          rcpt: ['molecule@localhost']
+          data: |
+            From: Alice <alice@example.com>
+            To: Molecule <molecule@localhost>
+            Subject: molecule-dmarc
+            Date: {{ __verify_date }}
+            Message-ID: <{{ __verify_dmarc_id }}>
+            MIME-Version: 1.0
+            Content-Type: text/plain; charset=utf-8
+
+            {{ __verify_body }}
+
+    - name: Verify | Read the rspamd log after the DMARC failure
+      ansible.builtin.slurp:
+        src: /var/log/rspamd/rspamd.log
+      register: __verify_dmarc_log
+
+    # The pre-result line of the dmarc module and the result line of the
+    # message, both carrying its Message-ID
+    - name: Verify | Assert the DMARC action rejected the message
+      ansible.builtin.assert:
+        that:
+          - __verify_spoofed.rcpt[0][0] | default(0) == 250
+          - __verify_spoofed.error_code | default(0) >= 500
+          - __verify_spoofed.error_code | default(0) < 600
+          - __verify_dmarc_lines | select('search', "set pre-result to 'reject' .*'Action set by DMARC' from dmarc")
+            | list | length == 1
+          - __verify_dmarc_lines | select('search', 'DMARC_POLICY_QUARANTINE\(') | list | length == 1
+        fail_msg: '{{ __verify_spoofed | to_json }} {{ __verify_dmarc_lines | to_json }}'
+      vars:
+        __verify_dmarc_lines: >-
+          {{ (__verify_dmarc_log.content | b64decode).splitlines()
+             | select('search', '<' ~ __verify_dmarc_id | regex_escape ~ '>') | list }}
+
+    - name: Verify | Send a message from the signing network
+      ansible.builtin.include_tasks: ../shared/tasks/send.yml
+      vars:
+        __send_name: __verify_signed
+        __send:
+          mail_from: 'alice@example.com'
+          rcpt: ['molecule@localhost']
+          data: |
+            From: Alice <alice@example.com>
+            To: Molecule <molecule@localhost>
+            Subject: molecule-signed
+            Date: {{ __verify_date }}
+            Message-ID: <signed.{{ 999999 | random }}@example.com>
+            MIME-Version: 1.0
+            Content-Type: text/plain; charset=utf-8
+
+            {{ __verify_body }}
+
+    - name: Verify | Assert the message from the signing network was accepted
+      ansible.builtin.assert:
+        that:
+          - __verify_signed.data[0] | default(0) == 250
+        fail_msg: '{{ __verify_signed | to_json }}'
+
+    - name: Verify | Read the signed message
+      ansible.builtin.include_tasks: ../shared/tasks/delivered.yml
+      vars:
+        __delivered_subject: 'molecule-signed'
+        __delivered_name: __verify_signed_text
+
+    - name: Verify | Assert the message carries the DKIM signature of example.com
+      ansible.builtin.assert:
+        that:
+          - __verify_signed_text is search('(?m)^DKIM-Signature:\s')
+          - __verify_signed_text is search('d=example\.com;')
+          - __verify_signed_text is search('s=molecule;')
+        fail_msg: '{{ __verify_signed_text }}'
+
+    #
+    # DNS Records
+    #
+    # The test resolver publishes the record of the example.com key and the
+    # one of example.org without the optional v=DKIM1 tag (RFC 6376 3.6.1);
+    # the DMARC record of example.org differs, example.net has neither.
+    #
+
+    - name: Verify | Read the public records
+      ansible.builtin.slurp:
+        src: '/var/lib/rspamd/dkim/{{ item }}.txt'
+      loop:
+        - example.com.molecule
+        - example.org.2026
+      register: __verify_dkim_records
+
+    - name: Verify | Write the DKIM zone of the test resolver
+      ansible.builtin.copy:
+        content: |
+          port=5354
+          listen-address=127.0.0.1
+          bind-interfaces
+          user=root
+          no-resolv
+          no-hosts
+          local=/_domainkey.example.com/
+          local=/_domainkey.example.org/
+          txt-record=molecule._domainkey.example.com,{{ __verify_chunks[0] | map('to_json') | join(',') }}
+          txt-record=2026._domainkey.example.org,{{ __verify_chunks[1] | map('to_json') | join(',') }}
+        dest: /etc/dnsmasq.d/molecule-dkim.conf
+        owner: root
+        group: root
+        mode: '0644'
+      vars:
+        __verify_values:
+          - '{{ __verify_dkim_records.results[0].content | b64decode | trim }}'
+          - "{{ __verify_dkim_records.results[1].content | b64decode | trim | regex_replace('^v=DKIM1;\\s*', '') }}"
+        # TXT strings hold up to 255 characters each
+        __verify_chunks:
+          - "{{ __verify_values[0] | regex_findall('.{1,200}') }}"
+          - "{{ __verify_values[1] | regex_findall('.{1,200}') }}"
+
+    - name: Verify | Deploy the unit of the DKIM zone
+      ansible.builtin.copy:
+        content: |
+          [Unit]
+          Description=DKIM zone of the test resolver of the rspamd scenarios
+
+          [Service]
+          ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/etc/dnsmasq.d/molecule-dkim.conf
+        dest: /etc/systemd/system/molecule-dkim-dns.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Verify | Start the DKIM zone
+      ansible.builtin.systemd_service:
+        name: molecule-dkim-dns.service
+        state: started
+        daemon_reload: true
+
+    # The signature checks out against the published key (rspamd queries
+    # the test resolver). From the loopback interface rspamd skips the DKIM
+    # check, so the message is checked as from an outside client.
+    - name: Verify | Check the signed message with rspamd
+      ansible.builtin.command:
+        argv: [rspamc, --connect, '127.0.0.1:11333', --ip, '192.0.2.25', symbols]
+        stdin: '{{ __verify_signed_text }}'
+      register: __verify_rspamc
+      changed_when: false
+
+    - name: Verify | Assert the DKIM signature is valid
+      ansible.builtin.assert:
+        that:
+          - __verify_rspamc.stdout is search('R_DKIM_ALLOW')
+        fail_msg: '{{ __verify_rspamc.stdout }}'
+
+    - name: Verify | Run DNS check  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: dns.yml
+
+    - name: Verify | Assert DNS report
+      ansible.builtin.assert:
+        that:
+          - __rspamd_dns_error == ''
+          - __verify_report == __verify_expected
+        fail_msg: '{{ __rspamd_dns_report | to_json }}'
+      vars:
+        __verify_report: >-
+          {{ dict(__rspamd_dns_report | map(attribute='type')
+                  | zip(__rspamd_dns_report | map(attribute='name')) | map('join', ' ')
+                  | zip(__rspamd_dns_report | map(attribute='status'))) }}
+        __verify_expected:
+          DKIM molecule._domainkey.example.com: 'present'
+          DMARC _dmarc.example.com: 'present'
+          DKIM 2026._domainkey.example.org: 'present'
+          DMARC _dmarc.example.org: 'different'
+          DKIM missing._domainkey.example.net: 'missing'
+          DMARC _dmarc.example.net: 'missing'
+
+    # A resolver name that cannot be resolved makes the lookup itself fail
+    # (RFC 6761 name). The role lists every record as unchecked with a
+    # warning, and the run goes on.
+    - name: Verify | Run DNS check with a broken resolver  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: dns.yml
+      vars:
+        rspamd_dns_resolver: 'resolver.invalid'
+
+    - name: Verify | Assert the lookup failure was reported and the run went on
+      ansible.builtin.assert:
+        that:
+          - __rspamd_dns_error is search("lookup plugin 'community.general.dig'")
+          - __rspamd_dns_report | map(attribute='status') | unique | list == ['unchecked']
+          - __rspamd_dns_report | length == 6
+        fail_msg: '{{ __rspamd_dns_error }} {{ __rspamd_dns_report | to_json }}'
+
+    #
+    # Controller
+    #
+
+    - name: Verify | Train Bayes with the enable password
+      ansible.builtin.uri:
+        url: '{{ __verify_controller }}/learnspam'
+        method: POST
+        headers:
+          Password: 'molecule-Enable-42'
+        body: |
+          From: Spammer <offer@example.net>
+          To: molecule@localhost
+          Subject: molecule-learn
+          Date: {{ __verify_date }}
+          Message-ID: <learn.{{ 999999 | random }}@example.net>
+
+          Buy cheap watches and replica bags today, limited offer for all
+          customers, click the link below to claim your discount voucher now.
+        return_content: true
+        # 208: learned by an earlier verify run on the same instance
+        status_code: [200, 208]
+      register: __verify_learn
+
+    - name: Verify | Assert the controller learned the message
+      ansible.builtin.assert:
+        that:
+          - __verify_learn.json.success | default(false) or __verify_learn.status == 208
+        fail_msg: '{{ __verify_learn | to_json }}'
+
+    - name: Verify | Read the statistics with the read password
+      ansible.builtin.uri:
+        url: '{{ __verify_controller }}/stat'
+        headers:
+          Password: 'molecule-Read-42'
+        return_content: true
+        status_code: 200
+      register: __verify_stat
+
+    # Bayes keeps its counters and tokens in Valkey under the ACL user of
+    # rspamd (the statistics of the controller follow with a delay)
+    - name: Verify | Read the Bayes spam counter in Valkey
+      ansible.builtin.command:
+        argv: [valkey-cli, --user, rspamd, --pass, 'molecule-Valkey-42', --no-auth-warning, hget, RS, learns_spam]
+      register: __verify_bayes_learns
+      changed_when: false
+
+    - name: Verify | Count the Bayes tokens in Valkey
+      ansible.builtin.command:
+        argv: [valkey-cli, --user, rspamd, --pass, 'molecule-Valkey-42', --no-auth-warning, --scan, --pattern, 'RS_*']
+      register: __verify_bayes_keys
+      changed_when: false
+
+    - name: Verify | Assert Valkey holds the learned message
+      ansible.builtin.assert:
+        that:
+          - __verify_bayes_learns.stdout | int >= 1
+          - __verify_bayes_keys.stdout_lines | length > 0
+        fail_msg: '{{ __verify_bayes_learns.stdout }} {{ __verify_bayes_keys.stdout_lines | length }}'
+
+    - name: Verify | Send controller requests that must be refused
+      ansible.builtin.uri:
+        url: '{{ __verify_controller }}/{{ item.path }}'
+        method: '{{ item.method }}'
+        headers: "{{ {'Password': item.password} if item.password | length > 0 else {} }}"
+        body: "{{ 'Subject: x\n\nrefused\n' if item.method == 'POST' else omit }}"
+        status_code: [401, 403]
+      loop:
+        # Without a password: the loopback interface is not trusted
+        - {path: stat, method: GET, password: ''}
+        - {path: stat, method: GET, password: 'wrong-password'}
+        - {path: learnspam, method: POST, password: 'wrong-password'}
+        # The read password does not allow learning
+        - {path: learnspam, method: POST, password: 'molecule-Read-42'}
+      loop_control:
+        label: '{{ item.method }} /{{ item.path }} {{ item.password | default("(none)", true) }}'
+
+    #
+    # Second Run
+    #
+    # The hashes and the DKIM keys stay as they are.
+    #
+
+    - name: Verify | Checksum the keys before the second run
+      ansible.builtin.stat:
+        path: '/var/lib/rspamd/dkim/{{ item }}'
+        checksum_algorithm: sha256
+      loop:
+        - example.com.molecule.key
+        - example.org.2026.key
+      register: __verify_keys_before
+
+    # A key without its record file (e.g. placed by hand): the role rebuilds
+    # the record from the private key
+    - name: Verify | Remove the public record of example.com
+      ansible.builtin.file:
+        path: /var/lib/rspamd/dkim/example.com.molecule.txt
+        state: absent
+
+    - name: Verify | Run the role again  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+
+    - name: Verify | Checksum the keys after the second run
+      ansible.builtin.stat:
+        path: '/var/lib/rspamd/dkim/{{ item }}'
+        checksum_algorithm: sha256
+      loop:
+        - example.com.molecule.key
+        - example.org.2026.key
+      register: __verify_keys_after
+
+    - name: Verify | Read the rebuilt public record of example.com
+      ansible.builtin.slurp:
+        src: /var/lib/rspamd/dkim/example.com.molecule.txt
+      register: __verify_dkim_rebuilt
+
+    - name: Verify | Assert the rebuilt record matches the one of dkim_keygen
+      ansible.builtin.assert:
+        that:
+          - (__verify_dkim_rebuilt.content | b64decode | trim)
+            == (__verify_dkim_records.results[0].content | b64decode | trim)
+        fail_msg: >-
+          {{ __verify_dkim_rebuilt.content | b64decode }} /
+          {{ __verify_dkim_records.results[0].content | b64decode }}
+
+    - name: Verify | Read the controller settings after the second run
+      ansible.builtin.slurp:
+        src: /etc/rspamd/local.d/worker-controller.inc
+      register: __verify_controller_after
+
+    - name: Verify | Assert keys and hashes are unchanged
+      ansible.builtin.assert:
+        that:
+          - __verify_keys_before.results | map(attribute='stat.checksum') | list
+            == __verify_keys_after.results | map(attribute='stat.checksum') | list
+          - (__verify_controller_after.content | b64decode) == __verify_controller_text
+
+    #
+    # Rejected Settings
+    #
+
+    - name: Verify | Run without the controller passwords
+      block:
+        - name: Verify | Include rspamd role without passwords  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            rspamd_controller_password: ''
+            rspamd_controller_enable_password: ''
+      rescue:
+        - name: Verify | Record the password failure
+          ansible.builtin.set_fact:
+            __verify_password_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Assert the missing passwords failed the run
+      ansible.builtin.assert:
+        that:
+          - __verify_password_error is defined
+          - "'rspamd_controller_password and rspamd_controller_enable_password are required' in __verify_password_error"
+        fail_msg: '{{ __verify_password_error | default("the run passed without passwords") }}'
+
+    # The warning runs before the Valkey settings, which fail here before
+    # any change: a long IPv6 loopback, an IPv6 /32 network and a duplicate
+    - name: Verify | Run with controller addresses that warn
+      block:
+        - name: Verify | Include rspamd role with risky secure_ip entries  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            rspamd_controller_secure_ips:
+              - '0:0:0:0:0:0:0:1'
+              - '2001:db8::/32'
+              - '2001:db8::/32'
+              - '192.0.2.10/32'
+              - '2001:db8::10/128'
+            rspamd_redis_db: 'invalid'
+      rescue:
+        - name: Verify | Record the warning
+          ansible.builtin.set_fact:
+            __verify_secure_warning: '{{ __rspamd_secure_ips_warning.msg | default("") }}'
+
+    - name: Verify | Assert the warning names the risky entries once
+      ansible.builtin.assert:
+        that:
+          - __verify_secure_warning is search('trusts 0:0:0:0:0:0:0:1, 2001:db8::/32 without')
+        fail_msg: '{{ __verify_secure_warning }}'
+
+    - name: Verify | Run with a zero prefix written as /00
+      block:
+        - name: Verify | Include rspamd role with 0.0.0.0/00  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            rspamd_controller_secure_ips:
+              - '0.0.0.0/00'
+      rescue:
+        - name: Verify | Record the prefix failure
+          ansible.builtin.set_fact:
+            __verify_zero_prefix_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Assert the zero prefix failed the run
+      ansible.builtin.assert:
+        that:
+          - __verify_zero_prefix_error is defined
+          - "'must not contain a /0 network' in __verify_zero_prefix_error"
+        fail_msg: '{{ __verify_zero_prefix_error | default("the run passed") }}'
+
+    - name: Verify | Run with an unknown DMARC disposition
+      block:
+        - name: Verify | Include rspamd role with the disposition none  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            rspamd_dmarc_actions:
+              none: 'reject'
+      rescue:
+        - name: Verify | Record the disposition failure
+          ansible.builtin.set_fact:
+            __verify_dmarc_key_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    # 'no action' is a valid rspamd action that the role refuses
+    - name: Verify | Run with a DMARC action that caps the result
+      block:
+        - name: Verify | Include rspamd role with the action no action  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            rspamd_dmarc_actions:
+              quarantine: 'no action'
+      rescue:
+        - name: Verify | Record the action failure
+          ansible.builtin.set_fact:
+            __verify_dmarc_action_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Assert the invalid DMARC actions failed the run
+      ansible.builtin.assert:
+        that:
+          - __verify_dmarc_key_error is defined
+          - "'rspamd_dmarc_actions must be a mapping' in __verify_dmarc_key_error"
+          - __verify_dmarc_key_got in __verify_dmarc_key_error
+          - __verify_dmarc_action_error is defined
+          - "'rspamd_dmarc_actions must be a mapping' in __verify_dmarc_action_error"
+          - __verify_dmarc_action_got in __verify_dmarc_action_error
+        fail_msg: >-
+          {{ __verify_dmarc_key_error | default('the run with none passed') }}
+          {{ __verify_dmarc_action_error | default('the run with no action passed') }}
+      vars:
+        __verify_dmarc_key_got: '(got ''{"none": "reject"}'')'
+        __verify_dmarc_action_got: '(got ''{"quarantine": "no action"}'')'
+
+    - name: Verify | Read the main PID before the rejected configuration
+      ansible.builtin.command:
+        argv: [systemctl, show, --property=MainPID, --value, rspamd]
+      register: __verify_pid_before
+      changed_when: false
+
+    # phishing.conf is included by the phishing module; the value is a
+    # syntax error
+    - name: Verify | Run with a configuration rspamadm configtest rejects
+      block:
+        - name: Verify | Include rspamd role with a broken file  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            rspamd_local_config:
+              'phishing.conf': |
+                openphish_enabled = ;
+      rescue:
+        - name: Verify | Record the configtest failure
+          ansible.builtin.set_fact:
+            __verify_configtest_error: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Read the extra file after the rejected configuration
+      ansible.builtin.slurp:
+        src: /etc/rspamd/local.d/phishing.conf
+      register: __verify_extra_after
+
+    - name: Verify | Read the main PID after the rejected configuration
+      ansible.builtin.command:
+        argv: [systemctl, show, --property=MainPID, --value, rspamd]
+      register: __verify_pid_after
+      changed_when: false
+
+    - name: Verify | Assert the rejected configuration left the active one in place
+      ansible.builtin.assert:
+        that:
+          - __verify_configtest_error is defined
+          - "'rspamadm configtest rejects the new configuration' in __verify_configtest_error"
+          - (__verify_extra_after.content | b64decode) == (__verify_extra.content | b64decode)
+          - __verify_pid_after.stdout == __verify_pid_before.stdout
+        fail_msg: >-
+          {{ __verify_configtest_error | default('the run passed') }}
+          {{ __verify_extra_after.content | b64decode }}
+
+    # Two changes of the extra file: each activation keeps the previous
+    # file as backup, only the newest backup stays
+    - name: Verify | Change the extra file twice  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        rspamd_local_config:
+          'phishing.conf': "openphish_enabled = false;\n# change {{ item }}\n"
+      loop: [1, 2]
+
+    - name: Verify | Find the backups of the extra file
+      ansible.builtin.find:
+        paths: /etc/rspamd/local.d
+        patterns:
+          - 'phishing.conf.*~'
+      register: __verify_extra_backups
+
+    - name: Verify | Assert only the newest backup of the extra file is kept
+      ansible.builtin.assert:
+        that:
+          - __verify_extra_backups.matched == 1
+        fail_msg: "{{ __verify_extra_backups.files | map(attribute='path') | list | to_json }}"
+
+# A check run (ansible-playbook --check) without the extra file reports its
+# removal and keeps it; the json callback names the changed task per host
+- name: Verify — Check run without the extra file
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Verify | Run converge in check mode without the extra file
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python | dirname }}/ansible-playbook"
+          - '--inventory'
+          - '{{ ansible_inventory_sources | first }}'
+          - '--check'
+          - '--extra-vars'
+          - '{"rspamd_local_config": {}}'
+          - '{{ playbook_dir }}/converge.yml'
+      environment:
+        ANSIBLE_STDOUT_CALLBACK: 'ansible.builtin.json'
+        ANSIBLE_NOCOLOR: 'true'
+      register: __verify_check_run
+      changed_when: false
+
+    - name: Verify | Assert the check run reported the removal on every host
+      ansible.builtin.assert:
+        that:
+          - __verify_check_run.rc == 0
+          - __verify_removal_hosts | sort == groups['all'] | sort
+        fail_msg: '{{ __verify_removal_hosts }} {{ __verify_check_run.stderr }}'
+      vars:
+        __verify_removal_task: >-
+          {{ (__verify_check_run.stdout | from_json).plays
+             | map(attribute='tasks') | flatten
+             | selectattr('task.name', 'search', 'Report the removal of extra files in check mode')
+             | first }}
+        __verify_removal_hosts: >-
+          {{ __verify_removal_task.hosts | dict2items
+             | selectattr('value.changed', 'defined') | selectattr('value.changed')
+             | map(attribute='key') | list }}
+
+- name: Verify — Removal of the extra file
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Verify | Stat the extra file after the check run
+      ansible.builtin.stat:
+        path: /etc/rspamd/local.d/phishing.conf
+      register: __verify_extra_checked
+
+    - name: Verify | Assert the check run kept the file
+      ansible.builtin.assert:
+        that:
+          - __verify_extra_checked.stat.exists
+
+    # A file removed from rspamd_local_config is deleted
+    - name: Verify | Include rspamd role without the extra file  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        rspamd_local_config: {}
+
+    - name: Verify | Stat the removed extra file
+      ansible.builtin.stat:
+        path: /etc/rspamd/local.d/phishing.conf
+      register: __verify_extra_removed
+
+    - name: Verify | Find the backups of the removed extra file
+      ansible.builtin.find:
+        paths: /etc/rspamd/local.d
+        patterns:
+          - 'phishing.conf.*~'
+      register: __verify_extra_backups_removed
+
+    - name: Verify | Assert the extra file and its backups are gone
+      ansible.builtin.assert:
+        that:
+          - not __verify_extra_removed.stat.exists
+          - __verify_extra_backups_removed.matched == 0
+        fail_msg: "{{ __verify_extra_backups_removed.files | map(attribute='path') | list | to_json }}"

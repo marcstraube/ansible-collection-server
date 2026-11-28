@@ -1,0 +1,120 @@
+---
+# Restores the snapshot named by valkey_restore. main.yml has validated the
+# name, the running service and the backup user. The snapshot replaces the
+# whole instance: every database, while the server is stopped.
+#
+# With appendonly the server loads the AOF and ignores dump.rdb; without an
+# AOF directory it starts with an empty one. The snapshot therefore also
+# becomes the base of a new AOF directory, which the server loads (an RDB
+# base file is valid AOF since Valkey 7). dump.rdb gets the snapshot in
+# both cases.
+
+- name: Restore | Stat the snapshot to restore
+  ansible.builtin.stat:
+    path: '{{ valkey_backup_dir }}/{{ valkey_restore }}'
+  register: __valkey_restore_stat
+
+- name: Restore | Assert the snapshot exists
+  ansible.builtin.assert:
+    that:
+      - __valkey_restore_stat.stat.exists
+      - __valkey_restore_stat.stat.isreg
+    fail_msg: >-
+      {{ valkey_backup_dir }}/{{ valkey_restore }} does not exist.
+      valkey_restore names a snapshot in valkey_backup_dir.
+    quiet: true
+
+# The named snapshot is passed as the snapshot to keep, so the rotation
+# after the fresh snapshot never removes it.
+- name: Restore | Take a fresh snapshot
+  ansible.builtin.command:
+    argv:
+      - '{{ __valkey_backup_script }}'
+      - '{{ valkey_restore }}'
+  changed_when: true
+
+# The restored files get the owner and group of the data directory
+- name: Restore | Stat the data directory
+  ansible.builtin.stat:
+    path: '{{ __valkey_data_dir }}'
+  register: __valkey_restore_data_dir
+
+- name: Restore | Stop Valkey
+  ansible.builtin.systemd_service:
+    name: '{{ __valkey_service_name }}'
+    state: stopped
+
+- name: Restore | Remove the AOF directory
+  ansible.builtin.file:
+    path: '{{ __valkey_aof_dir }}'
+    state: absent
+  when: valkey_appendonly | bool
+
+- name: Restore | Create the AOF directory
+  ansible.builtin.file:
+    path: '{{ __valkey_aof_dir }}'
+    state: directory
+    owner: '{{ __valkey_restore_data_dir.stat.pw_name }}'
+    group: '{{ __valkey_restore_data_dir.stat.gr_name }}'
+    mode: '0750'
+  when: valkey_appendonly | bool
+
+- name: Restore | Copy the snapshot as AOF base
+  ansible.builtin.copy:
+    src: '{{ valkey_backup_dir }}/{{ valkey_restore }}'
+    dest: '{{ __valkey_aof_dir }}/{{ __valkey_aof_name }}.1.base.rdb'
+    remote_src: true
+    owner: '{{ __valkey_restore_data_dir.stat.pw_name }}'
+    group: '{{ __valkey_restore_data_dir.stat.gr_name }}'
+    mode: '0600'
+  when: valkey_appendonly | bool
+
+# The server adds the incremental file at the start
+- name: Restore | Write the AOF manifest
+  ansible.builtin.copy:
+    content: "file {{ __valkey_aof_name }}.1.base.rdb seq 1 type b\n"
+    dest: '{{ __valkey_aof_dir }}/{{ __valkey_aof_name }}.manifest'
+    owner: '{{ __valkey_restore_data_dir.stat.pw_name }}'
+    group: '{{ __valkey_restore_data_dir.stat.gr_name }}'
+    mode: '0600'
+  when: valkey_appendonly | bool
+
+- name: Restore | Copy the snapshot to the RDB file
+  ansible.builtin.copy:
+    src: '{{ valkey_backup_dir }}/{{ valkey_restore }}'
+    dest: '{{ __valkey_data_dir }}/{{ __valkey_rdb_file }}'
+    remote_src: true
+    owner: '{{ __valkey_restore_data_dir.stat.pw_name }}'
+    group: '{{ __valkey_restore_data_dir.stat.gr_name }}'
+    mode: '0600'
+
+# Type=notify: the start returns once the server has loaded the data
+- name: Restore | Start Valkey
+  ansible.builtin.systemd_service:
+    name: '{{ __valkey_service_name }}'
+    state: started
+
+# Health check over the connection of the backup script: 'valkey-backup
+# --ping' reads the password of the backup user on the host from the
+# root-only auth file, like a backup run. No secret passes through the
+# task (module arguments, command line, environment), so the reply and
+# the errors stay visible; the rescue reports them.
+- name: Restore | Health check
+  block:
+    - name: Restore | Wait for Valkey to answer PING
+      ansible.builtin.command:
+        argv:
+          - '{{ __valkey_backup_script }}'
+          - --ping
+      register: __valkey_restore_ping
+      changed_when: false
+      until: __valkey_restore_ping.stdout | default('') == 'PONG'
+      retries: 30
+      delay: 2
+  rescue:
+    - name: Restore | Report the failed health check
+      ansible.builtin.fail:
+        msg: >-
+          Valkey did not answer PING with PONG after the restore of
+          {{ valkey_restore }}: {{ __valkey_restore_ping.stdout | default('') }}
+          {{ __valkey_restore_ping.stderr | default('') }}

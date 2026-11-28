@@ -62,6 +62,13 @@ certbot_rsa_key_size: 4096
 # Elliptic curve for ECDSA keys
 certbot_elliptic_curve: 'secp384r1'
 
+# Keep the private key when a certificate is renewed (--reuse-key), so a
+# DANE TLSA record that pins the public key ('3 1 1') stays valid. Per
+# certificate: reuse_key. The role also sets it for existing certificates,
+# effective at their next renewal. false leaves the setting of an existing
+# certificate as it is; reuse_key: false on the entry turns it off.
+certbot_reuse_key: false
+
 # Preferred chain (e.g., 'ISRG Root X1' for better compatibility)
 certbot_preferred_chain: ''
 
@@ -151,6 +158,7 @@ certbot_certificates: []
 #     webroot: '/var/www/letsencrypt'
 #     key_type: 'ecdsa'
 #     elliptic_curve: 'secp384r1'
+#     reuse_key: false  # Keep the private key on renewal (DANE)
 #     staging: false
 #     force_renewal: false
 #     expand: false  # Expand existing cert with new domains
@@ -342,8 +350,8 @@ certbot_extra_args: []
 #   - '--debug'
 #   - '--non-interactive'
 
-# Custom configuration file content
+# Custom configuration file content, read by certbot at every run. No key
+# options: they would replace those saved for each certificate at renewal.
 certbot_custom_config: ''
 # Example: |
-#   rsa-key-size = 4096
-#   email = admin@example.com
+#   no-eff-email = true

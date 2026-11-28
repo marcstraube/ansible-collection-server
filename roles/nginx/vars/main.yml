@@ -28,3 +28,18 @@ __nginx_log_dir: '/var/log/nginx'
 # MIME types and PID file
 __nginx_mime_types_file: '/etc/nginx/mime.types'
 __nginx_pid_file: '/run/nginx.pid'
+
+# SELinux types an entry of nginx_writable_paths may carry: content httpd
+# reads and writes, append-only content, log files and the mod_cache store.
+__nginx_writable_path_types:
+  - 'httpd_sys_rw_content_t'
+  - 'httpd_sys_ra_content_t'
+  - 'httpd_log_t'
+  - 'httpd_cache_t'
+
+# Own ACME challenge location of a site or of nginx_global_locations: the
+# prefix itself, with or without the modifier ^~, or a regex that names it
+# outside a negative lookaround. An exact match (=) covers a single file only
+# and does not count.
+__nginx_acme_own_regex: >-
+  (?m)^[^#\n]*\blocation\s+(?:(?:\^~\s*)?["']?/\.well-known/acme-challenge/?["']?\s*(?:\{|$)|~(?:(?!\(\?<?!)[^{\n])*acme-challenge)

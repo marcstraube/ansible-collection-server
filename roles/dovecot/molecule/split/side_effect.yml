@@ -1,0 +1,140 @@
+---
+# A first run interrupted during the package install leaves the role's
+# policy-rc.d behind. The next run, with Dovecot installed by now, must
+# remove it; verify.yml checks that the file is not the role's and that
+# Dovecot still started only once. With a missing TLS key or without the
+# Postfix queue directory, a run with the role tag or a sub-tag fails with
+# the message of the check. A run with an unrelated tag passes, also on a host
+# without Dovecot (the database host). The release check stays part of the
+# runs with a single sub-tag.
+- name: Side Effect — Leftover policy-rc.d
+  hosts: mail
+  gather_facts: true
+
+  tasks:
+    - name: Side Effect | Leave the role's policy-rc.d behind
+      ansible.builtin.copy:
+        content: |
+          #!/bin/sh
+          # Managed by Ansible (marcstraube.server.dovecot): keeps the first
+          # install of Dovecot from starting it, removed right after
+          exit 101
+        dest: /usr/sbin/policy-rc.d
+        owner: root
+        group: root
+        mode: '0755'
+
+- name: Side Effect — Host without Dovecot
+  hosts: database
+  gather_facts: false
+
+  tasks:
+    - name: Side Effect | Gather package facts of the database host
+      ansible.builtin.package_facts:
+
+    - name: Side Effect | Assert Dovecot is not installed on the database host
+      ansible.builtin.assert:
+        that:
+          - "'dovecot-core' not in ansible_facts['packages']"
+
+# The TLS files, the Postfix queue directory and the installed release are
+# checked only in runs that select the role. There is no Postfix on the hosts,
+# so dovecot_postfix_local finds no queue directory.
+- name: Side Effect — Checks of the host
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    __side_effect_missing_key: '/etc/ssl/private/missing.key'
+    __side_effect_tls:
+      vars: {dovecot_tls_key_file: '{{ __side_effect_missing_key }}'}
+      task: 'Main | Assert the TLS files exist'
+      message: 'File(s) not found: {{ __side_effect_missing_key }}.'
+    __side_effect_postfix:
+      vars: {dovecot_postfix_local: true}
+      task: 'Main | Assert Postfix is installed for the local listeners'
+      message: '/var/spool/postfix/private does not exist: Postfix is not installed on this host.'
+    __side_effect_release:
+      vars: {dovecot_config_version: '2.4.99'}
+      task: 'Install | Assert the Dovecot release'
+      message: 'dovecot_config_version 2.4.99 is above the installed release'
+    # A host with the role enabled, before Postfix, Dovecot and the
+    # certificates are installed
+    __side_effect_new_host:
+      __converge_hosts: 'database'
+      dovecot_enabled: true
+      dovecot_db_type: 'postgresql'
+      dovecot_db_password: "{{ hostvars['dovecot-split-db']['__molecule_reader_password'] }}"
+      dovecot_tls_cert_file: '/etc/ssl/certs/missing.pem'
+      dovecot_tls_key_file: '{{ __side_effect_missing_key }}'
+    __side_effect_tags:
+      - 'dovecot'
+      - 'dovecot:install'
+      - 'dovecot:configure'
+      - 'dovecot:service'
+      - 'dovecot:shared'
+    # Sub-tags without the install tasks, which would remove the leftover
+    # policy-rc.d
+    __side_effect_release_tags:
+      - 'dovecot:configure'
+      - 'dovecot:service'
+      - 'dovecot:shared'
+
+  tasks:
+    - name: Side Effect | Run the role with the tag of the role or a sub-tag
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python | dirname }}/ansible-playbook"
+          - '--inventory'
+          - '{{ ansible_inventory_sources | first }}'
+          - '--tags'
+          - '{{ item.1 }}'
+          - '--extra-vars'
+          - '{{ item.0.vars | to_json }}'
+          - '{{ playbook_dir }}/converge_tagged.yml'
+      environment:
+        ANSIBLE_CALLBACK_RESULT_FORMAT: 'json'
+        ANSIBLE_DISPLAY_FAILED_STDERR: 'false'
+        ANSIBLE_FORCE_COLOR: 'false'
+        ANSIBLE_NOCOLOR: 'true'
+      loop: >-
+        {{ ([__side_effect_tls, __side_effect_postfix] | product(__side_effect_tags) | list)
+           + ([__side_effect_release] | product(__side_effect_release_tags) | list) }}
+      loop_control:
+        label: '{{ item.1 }}: {{ item.0.task }}'
+      register: __side_effect_selected
+      changed_when: false
+      failed_when: >-
+        __side_effect_selected.rc != 2
+        or item.0.task not in __side_effect_selected.stdout
+        or item.0.message not in __side_effect_selected.stdout
+
+    - name: Side Effect | Run the role with an unrelated tag
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python | dirname }}/ansible-playbook"
+          - '--inventory'
+          - '{{ ansible_inventory_sources | first }}'
+          - '--tags'
+          - 'base-system'
+          - '--extra-vars'
+          - '{{ item.vars | to_json }}'
+          - '{{ playbook_dir }}/converge_tagged.yml'
+      environment:
+        ANSIBLE_FORCE_COLOR: 'false'
+        ANSIBLE_NOCOLOR: 'true'
+      loop:
+        - host: 'dovecot-split-mail'
+          vars: '{{ __side_effect_tls.vars | combine(__side_effect_postfix.vars) }}'
+        - host: 'dovecot-split-db'
+          vars: '{{ __side_effect_new_host }}'
+      loop_control:
+        label: '{{ item.host }}'
+      register: __side_effect_unrelated
+      changed_when: false
+      failed_when: >-
+        __side_effect_unrelated.rc != 0
+        or __side_effect_unrelated.stdout is not search(item.host ~ ' +: ok=[1-9][0-9]* .*failed=0')
+
+- name: Side Effect — Run the role again
+  ansible.builtin.import_playbook: converge.yml

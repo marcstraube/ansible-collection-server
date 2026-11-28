@@ -1,0 +1,497 @@
+---
+- name: Main | Load OS-specific variables
+  ansible.builtin.include_vars: '{{ item }}'
+  with_first_found:
+    - files:
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}-{{ ansible_facts["distribution_major_version"] }}.yml'
+        - '{{ ansible_facts["distribution"] }}.yml'
+        - '{{ ansible_facts["os_family"] }}.yml'
+      paths:
+        - 'vars'
+  tags:
+    - always
+
+# marcstraube.common.mta configures the same Postfix instance (main.cf with
+# postconf); both roles on one host would overwrite each other. An unset
+# mta_enabled counts as true, the default of that role.
+- name: Main | Validate that marcstraube.common.mta is disabled
+  ansible.builtin.assert:
+    that:
+      - not (mta_enabled | default(true) | bool)
+    fail_msg: >-
+      marcstraube.common.mta and marcstraube.server.postfix both configure
+      Postfix and would overwrite each other. This role replaces
+      marcstraube.common.mta on the host (local mail and aliases included):
+      set mta_enabled: false for this host (an unset mta_enabled counts as
+      true). The README section "Migration from marcstraube.common.mta" maps
+      the mta_* variables to postfix_* and lists what changes (the listeners
+      move from loopback only to 25, 465 and 587).
+    quiet: true
+  when: postfix_enabled | bool
+  tags:
+    - always
+
+# Every validation collects one message per failed check, so a run names
+# exactly what is wrong. The checks run before any change.
+- name: Main | Validate package update settings
+  ansible.builtin.assert:
+    that:
+      - __postfix_errors | length == 0
+    fail_msg: '{{ __postfix_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __postfix_errors: >-
+      {{ [
+           ("postfix_packages_state must be 'present' or 'latest' (got '" ~ postfix_packages_state ~ "').")
+             if postfix_packages_state not in ['present', 'latest'] else '',
+           ("postfix_packages_minimum must be a version string, e.g. '3.10.13', or a mapping per platform (got '"
+            ~ postfix_packages_minimum ~ "').")
+             if not (postfix_packages_minimum is string or postfix_packages_minimum is mapping) else ''
+         ] | select | list }}
+  when: postfix_enabled | bool
+  tags:
+    - always
+
+# A mapping selects the minimum by '<os_family>-<major>', then
+# '<os_family>'. A host without a matching key fails here, before any
+# change, so a platform left out of the mapping cannot pass unchecked.
+- name: Main | Select the minimum version for this platform
+  ansible.builtin.set_fact:
+    __postfix_minimum: >-
+      {{ (postfix_packages_minimum[__postfix_minimum_key] if __postfix_minimum_key | length > 0 else '')
+         if postfix_packages_minimum is mapping
+         else postfix_packages_minimum }}
+    __postfix_minimum_key_found: '{{ postfix_packages_minimum is not mapping or __postfix_minimum_key | length > 0 }}'
+  vars:
+    __postfix_minimum_key: >-
+      {{ ([ansible_facts['os_family'] ~ '-' ~ ansible_facts['distribution_major_version'],
+           ansible_facts['os_family']]
+          | select('in', postfix_packages_minimum) | list + [''])
+         | first
+         if postfix_packages_minimum is mapping
+         else '' }}
+  when: postfix_enabled | bool
+  tags:
+    - always
+
+# The value reaches dpkg, rpm and vercmp as an argument; only characters of
+# a package version are accepted.
+- name: Main | Validate the minimum version for this platform
+  ansible.builtin.assert:
+    that:
+      - __postfix_minimum_key_found | bool
+      - __postfix_minimum | string is match('^[0-9A-Za-z.+~:_-]*$')
+    fail_msg: >-
+      {{ ('postfix_packages_minimum has no key for this host (expected '
+          ~ ansible_facts['os_family'] ~ '-' ~ ansible_facts['distribution_major_version']
+          ~ ' or ' ~ ansible_facts['os_family'] ~ ')')
+         if not (__postfix_minimum_key_found | bool)
+         else ('postfix_packages_minimum ' ~ __postfix_minimum ~ ' is not a package version') }}
+    quiet: true
+  when: postfix_enabled | bool
+  tags:
+    - always
+
+# Postfix 3.5 (EL 9) knows the levels 0, 1 and 2; from Postfix 3.6 on a
+# level is a release number. compatibility_level.yml compares it with the
+# installed release.
+- name: Main | Validate identity and network settings
+  ansible.builtin.assert:
+    that:
+      - __postfix_errors | length == 0
+    fail_msg: '{{ __postfix_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __postfix_errors: >-
+      {{ [
+           ("postfix_compatibility_level must be '0', '1', '2' or a release such as '3.10' (got '"
+            ~ __postfix_compatibility_level_effective ~ "').")
+             if __postfix_compatibility_level_effective is not match('^([012]|[3-9][.][0-9]+([.][0-9]+)?)$') else '',
+           ("postfix_myhostname must be a fully qualified host name, e.g. 'mail.example.com' (got '"
+            ~ postfix_myhostname | default('') ~ "').")
+             if not (postfix_myhostname | default('') is string
+                     and postfix_myhostname | default('') is match(__postfix_hostname_regex)) else '',
+           ("postfix_mydomain must be a domain name (got '" ~ postfix_mydomain ~ "').")
+             if not (postfix_mydomain is string and postfix_mydomain is match('^[A-Za-z0-9.-]+$')) else '',
+           "postfix_myorigin and postfix_smtpd_banner must be set, on one line."
+             if postfix_myorigin | string | length == 0 or postfix_smtpd_banner | string | length == 0
+                or postfix_myorigin | string is not match(__postfix_line_regex)
+                or postfix_smtpd_banner | string is not match(__postfix_line_regex) else '',
+           ("postfix_inet_interfaces and postfix_inet_protocols must be set (got '"
+            ~ postfix_inet_interfaces ~ "', '" ~ postfix_inet_protocols ~ "').")
+             if postfix_inet_interfaces | string | length == 0
+                or postfix_inet_protocols not in ['all', 'ipv4', 'ipv6', 'ipv4, ipv6'] else '',
+           "postfix_mynetworks must be a non-empty list of networks without whitespace (e.g. '192.0.2.10/32')."
+             if postfix_mynetworks is string or postfix_mynetworks is mapping
+                or postfix_mynetworks | length == 0
+                or postfix_mynetworks | map('string') | reject('match', '^\S+$') | list | length > 0 else '',
+           ("postfix_aliases must be a mapping of local names (lowercase letters, digits, '.', '_', '-')"
+            ~ " to a target or a list of targets.")
+             if postfix_aliases is not mapping
+                or postfix_aliases.keys() | map('string') | reject('match', '^[a-z0-9._-]+$') | list | length > 0
+                or postfix_aliases.values() | map('string') | reject('match', __postfix_line_regex) | list | length > 0
+             else ''
+         ] | select | list }}
+  when: postfix_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate the database settings
+  ansible.builtin.assert:
+    that:
+      - __postfix_errors | length == 0
+    fail_msg: '{{ __postfix_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __postfix_errors: >-
+      {{ [
+           ("postfix_db_type must be 'postgresql' or 'mariadb' (got '" ~ postfix_db_type ~ "').")
+             if postfix_db_type not in __postfix_db_map_types else '',
+           'postfix_db_host, postfix_db_user and postfix_db_password must be set (store the password in the vault).'
+             if postfix_db_host | length == 0 or postfix_db_user | length == 0
+                or postfix_db_password | length == 0 else '',
+           ("postfix_db_name must consist of letters, digits and '_' (got '" ~ postfix_db_name ~ "').")
+             if postfix_db_name is not match('^[A-Za-z0-9_]+$') else '',
+           ("postfix_db_port must be 1-65535 (got '" ~ postfix_db_port ~ "').")
+             if not (postfix_db_port | string is match('^[0-9]+$')
+                     and postfix_db_port | int > 0 and postfix_db_port | int <= 65535) else '',
+           'postfix_db_host, postfix_db_user, postfix_db_password and postfix_db_tls_ca_file must be on one line.'
+             if [postfix_db_host, postfix_db_user, postfix_db_password, postfix_db_tls_ca_file]
+                | map('string') | reject('match', __postfix_line_regex) | list | length > 0 else '',
+           'postfix_db_tls needs postfix_db_tls_ca_file.'
+             if postfix_db_tls | bool and postfix_db_tls_ca_file | length == 0 else '',
+           ("postfix_db_tls_ca_file must be an absolute path (got '" ~ postfix_db_tls_ca_file ~ "').")
+             if postfix_db_tls_ca_file | length > 0 and postfix_db_tls_ca_file is not match('^/\S+$') else '',
+           ("postfix_db_tls needs a TCP connection; '" ~ postfix_db_host ~ "' connects through the unix socket "
+            ~ __postfix_db_socket ~ " (use the host name of the server certificate).")
+             if postfix_db_tls | bool and __postfix_db_socket | length > 0 else '',
+           ("postfix_sql_queries must be a mapping with the keys "
+            ~ __postfix_sql_default_queries.keys() | join(', ') ~ ", each a query on one line or a folded block.")
+             if postfix_sql_queries is not mapping
+                or postfix_sql_queries.keys() | reject('in', __postfix_sql_default_queries) | list | length > 0
+                or postfix_sql_queries.values() | reject('string') | list | length > 0 else ''
+         ] | select | list }}
+  when: postfix_enabled | bool
+  no_log: true
+  tags:
+    - always
+
+# A unix socket and the loopback interface never leave the host
+- name: Main | Warn about a database connection without TLS over the network
+  ansible.builtin.debug:
+    msg: >-
+      postfix_db_tls is false: the connection to the database server
+      '{{ postfix_db_host }}' is not encrypted, the queries and the addresses
+      they return cross the network in cleartext. Reach it only over a
+      private network or WireGuard, or enable postfix_db_tls.
+  when:
+    - postfix_enabled | bool
+    - not postfix_db_tls | bool
+    - postfix_db_host is not match('/')
+    - postfix_db_host | lower not in ['localhost', '::1']
+    - postfix_db_host is not match('^127\.[0-9]+\.[0-9]+\.[0-9]+$')
+  tags:
+    - always
+
+- name: Main | Validate the Dovecot, milter and policy settings
+  ansible.builtin.assert:
+    that:
+      - __postfix_errors | length == 0
+    fail_msg: '{{ __postfix_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __postfix_errors: >-
+      {{ [
+           ("postfix_lmtp_address must be 'unix:<path>' or 'inet:<host>:<port>' (got '" ~ postfix_lmtp_address ~ "').")
+             if postfix_lmtp_address is not match(__postfix_endpoint_regex) else '',
+           ("postfix_sasl_path must be a socket path such as 'private/auth' or 'inet:<host>:<port>' (got '"
+            ~ postfix_sasl_path ~ "').")
+             if postfix_sasl_path is not match('^(inet:\S+:[0-9]{1,5}|[^:\s]+)$') else '',
+           "postfix_milters must be a list of 'inet:<host>:<port>' or 'unix:<path>'."
+             if postfix_milters is string or postfix_milters is mapping
+                or postfix_milters | map('string') | reject('match', __postfix_endpoint_regex) | list | length > 0
+             else '',
+           ("postfix_milter_default_action must be one of " ~ __postfix_milter_default_actions | join(', ')
+            ~ " (got '" ~ postfix_milter_default_action ~ "').")
+             if postfix_milter_default_action not in __postfix_milter_default_actions else '',
+           "postfix_policy_services must be a list of 'inet:<host>:<port>' or 'unix:<path>'."
+             if postfix_policy_services is string or postfix_policy_services is mapping
+                or postfix_policy_services | map('string')
+                   | reject('match', __postfix_endpoint_regex) | list | length > 0
+             else '',
+           ("postfix_postscreen_dnsbl_sites must be a list of DNS blocklist names (with optional weight,"
+            ~ " e.g. 'zen.spamhaus.org*2').")
+             if postfix_postscreen_dnsbl_sites is string or postfix_postscreen_dnsbl_sites is mapping
+                or postfix_postscreen_dnsbl_sites | map('string')
+                   | reject('match', '^[A-Za-z0-9.=_*;-]+$') | list | length > 0
+             else ''
+         ] | select | list }}
+  when: postfix_enabled | bool
+  tags:
+    - always
+
+# The logins of postfix_sender_permissions end up in an lmdb table: one line
+# per address, the logins separated by commas. The excluded ciphers end up
+# joined with commas in one '-o' argument of master.cf, which ends at
+# whitespace.
+- name: Main | Validate the submission settings
+  ansible.builtin.assert:
+    that:
+      - __postfix_errors | length == 0
+    fail_msg: '{{ __postfix_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __postfix_errors: >-
+      {{ [
+           ("postfix_sender_permissions must be a mapping of an address to a list of logins"
+            ~ " (without whitespace or commas).")
+             if postfix_sender_permissions is not mapping
+                or postfix_sender_permissions.keys() | map('string')
+                   | reject('match', '^[^\s,@]*@[^\s,@]+$') | list | length > 0
+                or postfix_sender_permissions.values() | select('string') | list | length > 0
+                or postfix_sender_permissions.values() | reject('string') | flatten | map('string')
+                   | reject('match', '^[^\s,]+$') | list | length > 0
+             else '',
+           ("postfix_submission_tls_exclude_ciphers must be a list of OpenSSL cipher names without whitespace"
+            ~ " or commas, e.g. ['SHA1', 'SHA256', 'SHA384'], or [] (got '"
+            ~ postfix_submission_tls_exclude_ciphers ~ "').")
+             if postfix_submission_tls_exclude_ciphers is string
+                or postfix_submission_tls_exclude_ciphers is mapping
+                or postfix_submission_tls_exclude_ciphers is not iterable
+                or postfix_submission_tls_exclude_ciphers | reject('string') | list | length > 0
+                or postfix_submission_tls_exclude_ciphers | reject('match', '^[A-Za-z0-9+._-]+\Z') | list | length > 0
+             else ''
+         ] | select | list }}
+  when: postfix_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate the TLS and relay host settings
+  ansible.builtin.assert:
+    that:
+      - __postfix_errors | length == 0
+    fail_msg: '{{ __postfix_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __postfix_errors: >-
+      {{ [
+           ('postfix_tls_cert_file and postfix_tls_key_file are required: STARTTLS on port 25 and submission'
+            ~ ' need a certificate.')
+             if postfix_tls_cert_file | length == 0 or postfix_tls_key_file | length == 0 else '',
+           'postfix_tls_cert_file, postfix_tls_key_file and postfix_tls_ca_file must be absolute paths.'
+             if [postfix_tls_cert_file, postfix_tls_key_file, postfix_tls_ca_file] | select
+                | reject('match', '^/\S+$') | list | length > 0 else '',
+           ("postfix_tls_protocols and postfix_tls_mandatory_protocols must be protocol lists,"
+            ~ " e.g. '!SSLv2, !SSLv3, !TLSv1, !TLSv1.1'.")
+             if [postfix_tls_protocols, postfix_tls_mandatory_protocols] | map('string')
+                | reject('match', '^[A-Za-z0-9.!>=<, ]*$') | list | length > 0 else '',
+           ("postfix_smtp_tls_security_level must be one of " ~ __postfix_smtp_tls_security_levels | join(', ')
+            ~ " (got '" ~ postfix_smtp_tls_security_level ~ "').")
+             if postfix_smtp_tls_security_level not in __postfix_smtp_tls_security_levels else '',
+           ("postfix_relayhost must be a host, '[host]' or '[host]:port' without whitespace (got '"
+            ~ postfix_relayhost ~ "').")
+             if postfix_relayhost is not match('^\S*$') else '',
+           ('postfix_relayhost_username and postfix_relayhost_password are set together,'
+            ~ ' and only with postfix_relayhost.')
+             if (postfix_relayhost_username | length > 0) != (postfix_relayhost_password | length > 0)
+                or (postfix_relayhost_password | length > 0 and postfix_relayhost | length == 0) else '',
+           ('postfix_relayhost_username must not contain whitespace or ":",'
+            ~ ' postfix_relayhost_password must be on one line.')
+             if postfix_relayhost_username is not match('^[^\s:]*$')
+                or postfix_relayhost_password is not match(__postfix_line_regex) else ''
+         ] | select | list }}
+  when: postfix_enabled | bool
+  no_log: true
+  tags:
+    - always
+
+# Postfix 3.5 (EL 9) does not know the ranges of Postfix 3.6 ('>=TLSv1.2');
+# postfix check accepts them, but every TLS service then logs "Invalid TLS
+# protocol list" and runs without TLS.
+- name: Main | Validate the TLS protocols for this Postfix release
+  ansible.builtin.assert:
+    that:
+      - >-
+        __postfix_tls_protocol_ranges | bool
+        or [postfix_tls_protocols, postfix_tls_mandatory_protocols] | map('string')
+           | select('search', '[<>]') | list | length == 0
+    fail_msg: >-
+      postfix_tls_protocols and postfix_tls_mandatory_protocols: Postfix 3.5
+      of EL 9 does not know protocol ranges such as '>=TLSv1.2' (Postfix 3.6
+      and later) and would turn TLS off. Use the exclusion syntax, e.g.
+      '!SSLv2, !SSLv3, !TLSv1, !TLSv1.1'.
+    quiet: true
+  when: postfix_enabled | bool
+  tags:
+    - always
+
+- name: Main | Validate limits, extra configuration and DNS settings
+  ansible.builtin.assert:
+    that:
+      - __postfix_errors | length == 0
+    fail_msg: '{{ __postfix_errors | join(" ") }}'
+    quiet: true
+  vars:
+    __postfix_limits:
+      postfix_message_size_limit: '{{ postfix_message_size_limit }}'
+      postfix_smtpd_recipient_limit: '{{ postfix_smtpd_recipient_limit }}'
+      postfix_smtpd_client_connection_rate_limit: '{{ postfix_smtpd_client_connection_rate_limit }}'
+      postfix_smtpd_client_message_rate_limit: '{{ postfix_smtpd_client_message_rate_limit }}'
+      postfix_smtpd_client_recipient_rate_limit: '{{ postfix_smtpd_client_recipient_rate_limit }}'
+    __postfix_errors: >-
+      {{ [
+           ("These limits must be numbers: "
+            ~ __postfix_limits | dict2items | rejectattr('value', 'match', '^[0-9]+$')
+              | map(attribute='key') | join(', ') ~ ".")
+             if __postfix_limits | dict2items | rejectattr('value', 'match', '^[0-9]+$') | list | length > 0 else '',
+           "postfix_extra_main_cf must be a mapping of main.cf parameter names to values on one line."
+             if postfix_extra_main_cf is not mapping
+                or postfix_extra_main_cf.keys() | map('string') | reject('match', '^[A-Za-z0-9_]+$') | list | length > 0
+                or postfix_extra_main_cf.values() | map('string')
+                   | reject('match', __postfix_line_regex) | list | length > 0
+             else '',
+           "postfix_extra_master_cf must be a string of master.cf lines."
+             if postfix_extra_master_cf is not string else '',
+           ("postfix_dns_resolver_port must be 1-65535 (got '" ~ postfix_dns_resolver_port ~ "').")
+             if not (postfix_dns_resolver_port | string is match('^[0-9]+$')
+                     and postfix_dns_resolver_port | int > 0 and postfix_dns_resolver_port | int <= 65535) else '',
+           "postfix_dns_domains must be a list of domain names (e.g. ['example.com'])."
+             if postfix_dns_domains is string or postfix_dns_domains is mapping
+                or postfix_dns_domains | map('string') | reject('match', __postfix_hostname_regex) | list | length > 0
+             else '',
+           "postfix_dns_addresses must be a list of IPv4 and IPv6 addresses."
+             if postfix_dns_addresses is string or postfix_dns_addresses is mapping
+                or postfix_dns_addresses | map('string')
+                   | reject('match', __postfix_address_regex) | list | length > 0
+             else '',
+           "postfix_dns_spf must be on one line without double quotes."
+             if postfix_dns_spf is not match('^[^\r\n"]*$') else '',
+           ("postfix_dns_tlsa_enabled must be true or false (got '" ~ postfix_dns_tlsa_enabled ~ "').")
+             if postfix_dns_tlsa_enabled | string | lower not in ['true', 'false', 'yes', 'no', '1', '0'] else '',
+           "postfix_dns_tlsa_enabled needs postfix_tls_cert_file, the certificate the TLSA record pins."
+             if postfix_dns_tlsa_enabled | string | lower in ['true', 'yes', '1']
+                and postfix_tls_cert_file | default('', true) | length == 0 else '',
+           ("postfix_dns_tlsa_certbot_dir must be an absolute path (got '" ~ postfix_dns_tlsa_certbot_dir ~ "').")
+             if postfix_dns_tlsa_certbot_dir is not string
+                or postfix_dns_tlsa_certbot_dir is not match('^/[^\r\n]*$') else ''
+         ] | select | list }}
+  when: postfix_enabled | bool
+  tags:
+    - always
+
+# Postfix reads the TLS files when a service starts; postfix check does not
+# open them. A missing file is named here, before any change: the run would
+# otherwise succeed and every TLS service fail at its start. Check mode
+# skips the assertion, as the role that deploys the files writes nothing
+# then. Both tasks carry the tags that change the host instead of always: a
+# run without them, also postfix:dns (a report), passes without the files.
+- name: Main | Check the TLS files
+  ansible.builtin.stat:
+    path: '{{ item }}'
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  loop: >-
+    {{ [postfix_tls_cert_file, postfix_tls_key_file]
+       + ([postfix_tls_ca_file] if postfix_tls_ca_file | length > 0 else [])
+       + ([postfix_db_tls_ca_file] if postfix_db_tls | bool else []) }}
+  register: __postfix_tls_stat
+  when: postfix_enabled | bool
+  tags:
+    - postfix
+    - postfix:install
+    - postfix:maps
+    - postfix:configure
+    - postfix:service
+
+- name: Main | Assert the TLS files exist
+  ansible.builtin.assert:
+    that:
+      - __postfix_tls_missing | length == 0
+    fail_msg: >-
+      File(s) not found: {{ __postfix_tls_missing | join(', ') }}. Deploy
+      certificate, key and CA files (e.g. with marcstraube.common.pki) before
+      the postfix role.
+    quiet: true
+  vars:
+    __postfix_tls_missing: >-
+      {{ __postfix_tls_stat.results | rejectattr('stat.exists') | map(attribute='item') | list }}
+  when:
+    - postfix_enabled | bool
+    - not ansible_check_mode
+  tags:
+    - postfix
+    - postfix:install
+    - postfix:maps
+    - postfix:configure
+    - postfix:service
+
+# An installed Postfix is compared with the compatibility level here, before
+# any change. postconf is missing before the first install; configure.yml
+# then checks the release the install brought, before main.cf is written.
+- name: Main | Read the installed Postfix release
+  ansible.builtin.command:
+    argv:
+      - postconf
+      - '-d'
+      - '-h'
+      - mail_version
+  register: __postfix_mail_version_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: postfix_enabled | bool
+  tags:
+    - always
+
+- name: Main | Check the compatibility level against the installed release
+  ansible.builtin.include_tasks:
+    file: compatibility_level.yml
+    apply:
+      tags:
+        - always
+  vars:
+    __postfix_level_stage: 'pre'
+    __postfix_mail_version_value: '{{ __postfix_mail_version_installed.stdout | trim }}'
+  when:
+    - postfix_enabled | bool
+    - (__postfix_mail_version_installed.rc | default(1)) == 0
+  tags:
+    - always
+
+- name: Main | Import install tasks
+  ansible.builtin.import_tasks: install.yml
+  when: postfix_enabled | bool
+  tags:
+    - postfix
+    - postfix:install
+
+- name: Main | Import maps tasks
+  ansible.builtin.import_tasks: maps.yml
+  when: postfix_enabled | bool
+  tags:
+    - postfix
+    - postfix:maps
+
+- name: Main | Import configure tasks
+  ansible.builtin.import_tasks: configure.yml
+  when: postfix_enabled | bool
+  tags:
+    - postfix
+    - postfix:configure
+
+- name: Main | Import service tasks
+  ansible.builtin.import_tasks: service.yml
+  when: postfix_enabled | bool
+  tags:
+    - postfix
+    - postfix:service
+
+- name: Main | Import DNS tasks
+  ansible.builtin.import_tasks: dns.yml
+  when: postfix_enabled | bool
+  tags:
+    - postfix
+    - postfix:dns

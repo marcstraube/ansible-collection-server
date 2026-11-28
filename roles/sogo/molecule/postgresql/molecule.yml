@@ -1,0 +1,105 @@
+---
+# PostgreSQL scenario: database, PostfixAdmin, Postfix, Dovecot, nginx and
+# SOGo on one instance, as on a single mail host (prepare: see
+# shared/prepare.yml, test data: shared/vars/main.yml). SOGo authenticates
+# against the SOGo view of PostfixAdmin, reaches Dovecot and Postfix with
+# TLS by the name in their certificate and runs with ActiveSync. A check
+# run precedes converge (a new host), another one follows idempotence;
+# side_effect runs the minimum checks and the targeted update; verify checks
+# the web interface, the logins, the password change, mail, CalDAV,
+# CardDAV, Sieve, the timers and the update.
+driver:
+  name: podman
+platforms:
+  - name: sogo-postgresql-archlinux
+    image: docker.io/marcstraube/archlinux-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+      /var/tmp: rw,nosuid,nodev
+  - name: sogo-postgresql-debian-trixie
+    image: docker.io/geerlingguy/docker-debian13-ansible:latest
+    pre_build_image: true
+    command: /lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+      /var/tmp: rw,nosuid,nodev
+  - name: sogo-postgresql-rocky-9
+    image: docker.io/geerlingguy/docker-rockylinux9-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+      /var/tmp: rw,nosuid,nodev
+  - name: sogo-postgresql-rocky-10
+    image: docker.io/geerlingguy/docker-rockylinux10-ansible:latest
+    pre_build_image: true
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      /run: rw,nosuid,nodev,size=65536k
+      /tmp: rw,nosuid,nodev
+      /var/tmp: rw,nosuid,nodev
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: ../shared/prepare.yml
+    converge: ../shared/converge.yml
+    side_effect: ../shared/side_effect.yml
+    verify: ../shared/verify.yml
+  inventory:
+    group_vars:
+      all:
+        molecule_db_type: 'postgresql'
+        sogo_activesync_enabled: true
+        # PostgreSQL on the instance, listening on localhost only
+        postgresql_enabled: true
+        postgresql_ssl_enabled: false
+        postgresql_firewalld_enabled: false
+        postgresql_shared_buffers: '64MB'
+        postgresql_effective_cache_size: '128MB'
+        postgresql_lc_messages: 'en_US.UTF-8'
+        postgresql_lc_monetary: 'en_US.UTF-8'
+        postgresql_lc_numeric: 'en_US.UTF-8'
+        postgresql_lc_time: 'en_US.UTF-8'
+    host_vars:
+      sogo-postgresql-archlinux:
+        ansible_python_interpreter: /usr/bin/python
+      sogo-postgresql-debian-trixie:
+        ansible_python_interpreter: /usr/bin/python3
+      sogo-postgresql-rocky-9:
+        ansible_python_interpreter: /usr/bin/python3
+      sogo-postgresql-rocky-10:
+        ansible_python_interpreter: /usr/bin/python3
+  config_options:
+    defaults:
+      allow_broken_conditionals: true
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - check
+    - converge
+    - idempotence
+    - check
+    - side_effect
+    - verify
+    - destroy

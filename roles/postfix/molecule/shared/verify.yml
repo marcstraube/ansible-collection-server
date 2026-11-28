@@ -1,0 +1,1028 @@
+---
+# Shared by the postgresql and mariadb scenarios. The SMTP sessions run in
+# the instance: from 127.0.0.1 (mynetworks) or from the address of the
+# instance itself, which is not in mynetworks and stands for a client on the
+# internet.
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - vars/accounts.yml
+
+  vars:
+    __verify_run: "{{ ansible_facts['date_time']['epoch'] }}"
+    __verify_external: "{{ ansible_facts['default_ipv4']['address'] }}"
+    __verify_map_type: "{{ 'pgsql' if postfix_db_type == 'postgresql' else 'mysql' }}"
+    __verify_sql: '/etc/postfix/sql'
+    __verify_proxy: 'proxy:{{ __verify_map_type }}:{{ __verify_sql }}'
+    __verify_alias_file: "{{ '/etc/postfix/aliases' if ansible_facts['os_family'] == 'Archlinux' else '/etc/aliases' }}"
+    __verify_compatibility_level:
+      Archlinux: '3.11'
+      Debian: '3.10'
+      RedHat-10: '3.8'
+      RedHat-9: '2'
+    __verify_platform: >-
+      {{ ansible_facts['os_family'] ~ ('-' ~ ansible_facts['distribution_major_version']
+                                       if ansible_facts['os_family'] == 'RedHat' else '') }}
+    # CBC suites with HMAC-SHA1, -SHA256 and -SHA384 for the RSA test
+    # certificate, which submission refuses up to TLS 1.2
+    __verify_cbc_ciphers: 'ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384'
+    # Settings of the role run that changes the milter, the relay host and
+    # the cipher suites of submission (the Postfix default)
+    __verify_variant:
+      postfix_milters:
+        - 'inet:127.0.0.1:11332'
+      postfix_relayhost: '[relay.example.net]:587'
+      postfix_relayhost_username: 'mailer@example.net'
+      postfix_relayhost_password: 'relay-Secret-42'
+      postfix_submission_tls_exclude_ciphers: []
+
+  tasks:
+    #
+    # Early failures
+    #
+
+    # mta_enabled is unset in this play (converge sets it): the role stops
+    # before any change and points to the migration section of the README
+    - name: Verify | Run the role with mta_enabled unset
+      block:
+        - name: Verify | Include postfix role without mta_enabled  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+      rescue:
+        - name: Verify | Record the mta_enabled failure
+          ansible.builtin.set_fact:
+            __verify_mta_failure:
+              task: '{{ ansible_failed_task.name }}'
+              msg: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Assert the role refuses to run next to marcstraube.common.mta
+      ansible.builtin.assert:
+        that:
+          - __verify_mta_failure is defined
+          - __verify_mta_failure.task == 'Main | Validate that marcstraube.common.mta is disabled'
+          - "'Migration from marcstraube.common.mta' in __verify_mta_failure.msg"
+          - "'mta_enabled: false' in __verify_mta_failure.msg"
+        fail_msg: '{{ __verify_mta_failure | default("the role ran without mta_enabled") | to_json }}'
+
+    - name: Verify | Run the role with a compatibility level above the release
+      block:
+        - name: Verify | Include postfix role with compatibility level 9.9  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            mta_enabled: false
+            postfix_compatibility_level: '9.9'
+      rescue:
+        - name: Verify | Record the compatibility level failure
+          ansible.builtin.set_fact:
+            __verify_level_failure:
+              task: '{{ ansible_failed_task.name }}'
+              msg: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Read the active compatibility level
+      ansible.builtin.command:
+        argv: [postconf, '-h', compatibility_level]
+      register: __verify_level
+      changed_when: false
+
+    - name: Verify | Assert the compatibility level
+      ansible.builtin.assert:
+        that:
+          - __verify_level.stdout == __verify_compatibility_level[__verify_platform]
+          - __verify_level_failure is defined
+          - __verify_level_failure.task == 'Compatibility Level | Assert the level fits the installed release'
+          - "'is above the installed Postfix' in __verify_level_failure.msg"
+          - "'nothing was changed' in __verify_level_failure.msg"
+        fail_msg: '{{ __verify_level.stdout }} {{ __verify_level_failure | default("level 9.9 accepted") }}'
+
+    # A missing key is named before any change
+    - name: Verify | Run the role with a missing TLS key
+      block:
+        - name: Verify | Include postfix role with a missing TLS key  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            mta_enabled: false
+            postfix_tls_key_file: '/etc/molecule-tls/missing.key'
+      rescue:
+        - name: Verify | Record the TLS file failure
+          ansible.builtin.set_fact:
+            __verify_tls_failure:
+              task: '{{ ansible_failed_task.name }}'
+              msg: '{{ ansible_failed_result.msg | default("") }}'
+
+    - name: Verify | Assert the missing TLS key fails the run
+      ansible.builtin.assert:
+        that:
+          - __verify_tls_failure is defined
+          - __verify_tls_failure.task == 'Main | Assert the TLS files exist'
+          - "'/etc/molecule-tls/missing.key' in __verify_tls_failure.msg"
+        fail_msg: '{{ __verify_tls_failure | default("the role ran with a missing TLS key") | to_json }}'
+
+    #
+    # Configuration and lookups
+    #
+
+    - name: Verify | Read Postfix parameters
+      ansible.builtin.command:
+        argv:
+          - postconf
+          - '-h'
+          - mydestination
+          - virtual_transport
+          - smtpd_sasl_path
+          - smtpd_tls_auth_only
+          - smtpd_tls_mandatory_protocols
+          - milter_default_action
+          - smtp_sasl_auth_enable
+          - smtpd_sender_login_maps
+          - default_database_type
+      register: __verify_postconf
+      changed_when: false
+
+    - name: Verify | Assert the main.cf settings
+      ansible.builtin.assert:
+        that:
+          - __verify_postconf.stdout_lines[0] == '$myhostname, localhost.$mydomain, localhost'
+          - __verify_postconf.stdout_lines[1] == 'lmtp:unix:private/dovecot-lmtp'
+          - __verify_postconf.stdout_lines[2] == 'private/auth'
+          - __verify_postconf.stdout_lines[3] == 'yes'
+          - __verify_postconf.stdout_lines[4] == '!SSLv2, !SSLv3, !TLSv1, !TLSv1.1'
+          - __verify_postconf.stdout_lines[5] == 'tempfail'
+          - __verify_postconf.stdout_lines[6] == 'no'
+          - __verify_postconf.stdout_lines[7] is match('^unionmap:\{proxy:')
+          - __verify_postconf.stdout_lines[8] == 'lmdb'
+        fail_msg: '{{ __verify_postconf.stdout_lines | to_json }}'
+
+    - name: Verify | Read the master.cf parameters
+      ansible.builtin.command:
+        argv: [postconf, '-P']
+      register: __verify_postconf_master
+      changed_when: false
+
+    # Only submission and submissions exclude cipher suites, port 25 keeps
+    # the Postfix default
+    - name: Verify | Assert the excluded cipher suites of submission
+      ansible.builtin.assert:
+        that:
+          - >-
+            __verify_postconf_master.stdout_lines | select('search', 'smtpd_tls_mandatory_exclude_ciphers') | sort
+            == ['465/inet/smtpd_tls_mandatory_exclude_ciphers = SHA1,SHA256,SHA384,kRSA',
+                '587/inet/smtpd_tls_mandatory_exclude_ciphers = SHA1,SHA256,SHA384,kRSA']
+        fail_msg: '{{ __verify_postconf_master.stdout_lines | to_json }}'
+
+    - name: Verify | Stat the SQL lookup files
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+        - '{{ __verify_sql }}'
+        - '{{ __verify_sql }}/virtual_mailbox_maps.cf'
+        - '{{ __verify_sql }}/sender_login_maps.cf'
+        - '/var/lib/postfix/pgpass'
+      register: __verify_sql_stat
+
+    # The database password is readable by root and Postfix only; for
+    # PostgreSQL it is in the libpq password file, not in the lookup files
+    - name: Verify | Assert the permissions of the lookup files
+      ansible.builtin.assert:
+        that:
+          - __verify_sql_stat.results[0].stat.mode == '0750'
+          - __verify_sql_stat.results[0].stat.gr_name == 'postfix'
+          - __verify_sql_stat.results[1:3] | map(attribute='stat.mode') | unique == ['0640']
+          - __verify_sql_stat.results[1:3] | map(attribute='stat.pw_name') | unique == ['root']
+          - __verify_sql_stat.results[1:3] | map(attribute='stat.gr_name') | unique == ['postfix']
+          - >-
+            (__verify_sql_stat.results[3].stat.exists and __verify_sql_stat.results[3].stat.mode == '0400'
+             and __verify_sql_stat.results[3].stat.pw_name == 'postfix')
+            if postfix_db_type == 'postgresql' else not __verify_sql_stat.results[3].stat.exists
+        fail_msg: "{{ __verify_sql_stat.results | map(attribute='stat') | list | to_json }}"
+
+    - name: Verify | Read the lookup files
+      ansible.builtin.slurp:
+        src: '{{ __verify_sql }}/virtual_mailbox_maps.cf'
+      register: __verify_sql_file
+
+    - name: Verify | Assert the password stays out of the PostgreSQL lookup files
+      ansible.builtin.assert:
+        that:
+          - "'postfix-Reader-42' not in (__verify_sql_file.content | b64decode)"
+          - "'passfile=' in (__verify_sql_file.content | b64decode)"
+      when: postfix_db_type == 'postgresql'
+
+    # Through proxymap, as Postfix reads them
+    - name: Verify | Query the lookup tables
+      ansible.builtin.command:
+        argv:
+          - postmap
+          - '-q'
+          - '{{ item.key }}'
+          - '{{ item.table }}'
+      loop:
+        - {table: '{{ __verify_proxy }}/virtual_mailbox_domains.cf', key: 'example.com', expect: 'example.com'}
+        - {table: '{{ __verify_proxy }}/virtual_mailbox_domains.cf', key: 'example.net', expect: ''}
+        - {table: '{{ __verify_proxy }}/virtual_mailbox_maps.cf', key: 'alice@example.com', expect: 'alice/'}
+        - {table: '{{ __verify_proxy }}/virtual_mailbox_maps.cf', key: 'nobody@example.com', expect: ''}
+        - {table: '{{ __verify_proxy }}/virtual_alias_maps.cf', key: 'info@example.com', expect: 'alice@example.com'}
+        - table: '{{ __verify_proxy }}/virtual_alias_domain_maps.cf'
+          key: 'alice@example.org'
+          expect: 'alice@example.com'
+        - {table: '{{ __verify_proxy }}/sender_login_maps.cf', key: 'info@example.com', expect: 'alice@example.com'}
+        - {table: '{{ __verify_postconf.stdout_lines[7] }}', key: 'support@example.com', expect: 'alice@example.com'}
+        - {table: '{{ __verify_postconf.stdout_lines[7] }}', key: 'alice@example.org', expect: 'alice@example.com'}
+        - {table: 'lmdb:{{ __verify_alias_file }}', key: 'root', expect: 'alice@example.com'}
+        - {table: 'lmdb:{{ __verify_alias_file }}', key: 'postmaster', expect: 'bob@example.com'}
+      loop_control:
+        label: '{{ item.key }}'
+      register: __verify_lookups
+      changed_when: false
+      # Exit status 1: not found
+      failed_when: >-
+        __verify_lookups.rc not in [0, 1]
+        or (item.expect | length > 0 and item.expect not in __verify_lookups.stdout)
+        or (item.expect | length == 0 and __verify_lookups.rc != 1)
+
+    # postalias skips a second entry of a name with a warning: the package
+    # entry of postmaster is commented out, the table builds without one
+    - name: Verify | Copy the alias file for a test build
+      ansible.builtin.copy:
+        src: '{{ __verify_alias_file }}'
+        dest: /root/aliases-check
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+      changed_when: false
+
+    - name: Verify | Build the copy of the alias file
+      ansible.builtin.command:
+        argv: [postalias, 'lmdb:/root/aliases-check']
+      register: __verify_postalias
+      changed_when: false
+
+    - name: Verify | Read the alias file
+      ansible.builtin.slurp:
+        src: '{{ __verify_alias_file }}'
+      register: __verify_aliases
+
+    - name: Verify | Assert the package entry of postmaster is replaced
+      ansible.builtin.assert:
+        that:
+          - __verify_postalias.stderr is not search('(?i)duplicate')
+          - __verify_aliases_text is search('(?m)^# marcstraube[.]server[.]postfix:[ ]postmaster:')
+          - __verify_aliases_text is not search('(?m)^postmaster:\s*root')
+        fail_msg: '{{ __verify_postalias.stderr }} {{ __verify_aliases_text }}'
+      vars:
+        __verify_aliases_text: '{{ __verify_aliases.content | b64decode }}'
+
+    - name: Verify | Assert the shared mailbox keeps its own login
+      ansible.builtin.assert:
+        that:
+          - "'support@example.com' in __verify_lookups.results[7].stdout"
+        fail_msg: '{{ __verify_lookups.results[7].stdout }}'
+
+    #
+    # SMTP
+    #
+
+    - name: Verify | Wait for the listeners
+      ansible.builtin.wait_for:
+        host: '127.0.0.1'
+        port: '{{ item }}'
+        timeout: 30
+      loop: [25, 465, 587]
+
+    - name: Verify | Run the SMTP sessions
+      ansible.builtin.include_tasks: tasks/smtp.yml
+      vars:
+        __verify_message: |
+          From: {sender}
+          To: {rcpt}
+          Subject: {subject}
+
+          Test message of the postfix molecule scenario.
+        __verify_sessions:
+          # Port 25 from the internet: existing mailbox, alias, alias domain,
+          # unknown recipient, relaying
+          inbound:
+            host: '{{ __verify_external }}'
+            port: 25
+            mail_from: 'carol@example.net'
+            rcpt:
+              - 'alice@example.com'
+              - 'info@example.com'
+              - 'alice@example.org'
+              - 'unknown@example.com'
+              - 'dave@example.net'
+            data: "{{ __verify_message | replace('{sender}', 'carol@example.net')
+                      | replace('{rcpt}', 'alice@example.com') | replace('{subject}', 'inbound-' ~ __verify_run) }}"
+          # Port 25 from mynetworks: relaying permitted
+          relay_mynetworks:
+            host: '127.0.0.1'
+            port: 25
+            mail_from: 'alice@example.com'
+            rcpt: ['dave@example.net']
+            data: "{{ __verify_message | replace('{sender}', 'alice@example.com')
+                      | replace('{rcpt}', 'dave@example.net') | replace('{subject}', 'relay-' ~ __verify_run) }}"
+          # quota-status: carol has 1 MB, alice no limit. Dovecot 2.4 lets a
+          # mailbox exceed its quota by quota_storage_grace (default 10M), so
+          # the announced size is above both
+          quota:
+            host: '{{ __verify_external }}'
+            port: 25
+            mail_from: 'carol@example.net'
+            mail_options: ['SIZE=20000000']
+            rcpt: ['carol@example.com', 'alice@example.com']
+          # Submission
+          auth_before_tls:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            auth_before_tls: true
+          noauth_relay:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            mail_from: 'alice@example.com'
+            rcpt: ['dave@example.net']
+          wrong_password:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            auth: ['alice@example.com', 'wrong-Password-1']
+            mail_from: 'alice@example.com'
+            rcpt: ['bob@example.com']
+          submission:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            auth: ['alice@example.com', "{{ __molecule_passwords['alice@example.com'] }}"]
+            mail_from: 'alice@example.com'
+            rcpt: ['bob@example.com', 'dave@example.net']
+            data: "{{ __verify_message | replace('{sender}', 'alice@example.com')
+                      | replace('{rcpt}', 'bob@example.com') | replace('{subject}', 'submission-' ~ __verify_run) }}"
+          submissions:
+            host: '127.0.0.1'
+            port: 465
+            mode: 'tls'
+            auth: ['alice@example.com', "{{ __molecule_passwords['alice@example.com'] }}"]
+            mail_from: 'alice@example.com'
+            rcpt: ['bob@example.com']
+            data: "{{ __verify_message | replace('{sender}', 'alice@example.com')
+                      | replace('{rcpt}', 'bob@example.com') | replace('{subject}', 'submissions-' ~ __verify_run) }}"
+          sender_foreign:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            auth: ['alice@example.com', "{{ __molecule_passwords['alice@example.com'] }}"]
+            mail_from: 'bob@example.com'
+            rcpt: ['bob@example.com']
+          sender_alias:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            auth: ['alice@example.com', "{{ __molecule_passwords['alice@example.com'] }}"]
+            mail_from: 'info@example.com'
+            rcpt: ['bob@example.com']
+          sender_alias_domain:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            auth: ['alice@example.com', "{{ __molecule_passwords['alice@example.com'] }}"]
+            mail_from: 'alice@example.org'
+            rcpt: ['bob@example.com']
+          sender_shared:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            auth: ['alice@example.com', "{{ __molecule_passwords['alice@example.com'] }}"]
+            mail_from: 'support@example.com'
+            rcpt: ['bob@example.com']
+          sender_shared_owner:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            auth: ['support@example.com', "{{ __molecule_passwords['support@example.com'] }}"]
+            mail_from: 'support@example.com'
+            rcpt: ['bob@example.com']
+          sender_shared_denied:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            auth: ['bob@example.com', "{{ __molecule_passwords['bob@example.com'] }}"]
+            mail_from: 'support@example.com'
+            rcpt: ['alice@example.com']
+          # TLS versions (the handshake only)
+          tls11_465:
+            host: '127.0.0.1'
+            port: 465
+            mode: 'tls'
+            tls_version: 'TLSv1_1'
+          tls11_587:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            tls_version: 'TLSv1_1'
+          tls12_465:
+            host: '127.0.0.1'
+            port: 465
+            mode: 'tls'
+            tls_version: 'TLSv1_2'
+          tls12_587:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            tls_version: 'TLSv1_2'
+          # TLS 1.2 cipher suites (the handshake only; RSA test certificate):
+          # only CBC suites with HMAC-SHA1, -SHA256 and -SHA384, only AES-GCM
+          # with static RSA key exchange, or AES-GCM with ECDHE
+          cbc_465:
+            host: '127.0.0.1'
+            port: 465
+            mode: 'tls'
+            tls_version: 'TLSv1_2'
+            tls_ciphers: '{{ __verify_cbc_ciphers }}'
+          cbc_587:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            tls_version: 'TLSv1_2'
+            tls_ciphers: '{{ __verify_cbc_ciphers }}'
+          cbc_25:
+            host: '127.0.0.1'
+            port: 25
+            mode: 'starttls'
+            tls_version: 'TLSv1_2'
+            tls_ciphers: '{{ __verify_cbc_ciphers }}'
+          rsa_465:
+            host: '127.0.0.1'
+            port: 465
+            mode: 'tls'
+            tls_version: 'TLSv1_2'
+            tls_ciphers: 'AES128-GCM-SHA256'
+          rsa_587:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            tls_version: 'TLSv1_2'
+            tls_ciphers: 'AES128-GCM-SHA256'
+          aead_465:
+            host: '127.0.0.1'
+            port: 465
+            mode: 'tls'
+            tls_version: 'TLSv1_2'
+            tls_ciphers: 'ECDHE-RSA-AES128-GCM-SHA256'
+          aead_587:
+            host: '127.0.0.1'
+            port: 587
+            mode: 'starttls'
+            tls_version: 'TLSv1_2'
+            tls_ciphers: 'ECDHE-RSA-AES128-GCM-SHA256'
+
+    - name: Verify | Assert port 25
+      ansible.builtin.assert:
+        that:
+          - __s.inbound.rcpt | map('first') | list == [250, 250, 250, 550, 554]
+          - __s.inbound.data[0] == 250
+          - __s.relay_mynetworks.rcpt[0][0] == 250
+          - __s.relay_mynetworks.data[0] == 250
+          - __s.quota.rcpt[0][0] == 552
+          - "'full' in __s.quota.rcpt[0][1] | lower"
+          - __s.quota.rcpt[1][0] == 250
+        fail_msg: >-
+          {{ {'inbound': __s.inbound, 'relay_mynetworks': __s.relay_mynetworks, 'quota': __s.quota} | to_json }}
+      vars:
+        __s: '{{ __verify_smtp }}'
+
+    # Every rejection happens at RCPT (smtpd_delay_reject)
+    - name: Verify | Assert submission
+      ansible.builtin.assert:
+        that:
+          - __s.auth_before_tls.auth[0] >= 500
+          - __s.noauth_relay.rcpt[0][0] >= 500
+          - __s.wrong_password.auth[0] == 535
+          - __s.submission.auth[0] == 235
+          - __s.submission.rcpt | map('first') | list == [250, 250]
+          - __s.submission.data[0] == 250
+          - __s.submissions.tls is match('TLSv1[.][23]')
+          - __s.submissions.auth[0] == 235
+          - __s.submissions.data[0] == 250
+          - __s.sender_foreign.rcpt[0][0] == 553
+          - __s.sender_alias.rcpt[0][0] == 250
+          - __s.sender_alias_domain.rcpt[0][0] == 250
+          - __s.sender_shared.rcpt[0][0] == 250
+          - __s.sender_shared_owner.rcpt[0][0] == 250
+          - __s.sender_shared_denied.rcpt[0][0] == 553
+        fail_msg: >-
+          {{ __s | dict2items | rejectattr('key', 'in', ['inbound', 'relay_mynetworks', 'quota'])
+             | items2dict | to_json }}
+      vars:
+        __s: '{{ __verify_smtp }}'
+
+    # The TLS libraries of EL refuse TLS 1.1 on the client side already (the
+    # handshake never reaches the server); there the configuration is
+    # checked above (smtpd_tls_mandatory_protocols)
+    - name: Verify | Assert TLS 1.1 is refused and TLS 1.2 works on 465 and 587
+      ansible.builtin.assert:
+        that:
+          - __s.tls12_465.tls == 'TLSv1.2'
+          - __s.tls12_587.tls == 'TLSv1.2'
+          - __s.tls11_465.error is defined
+          - __s.tls11_587.error is defined
+          - >-
+            ansible_facts['os_family'] == 'RedHat'
+            or not (__s.tls11_465.client_error | default(false) or __s.tls11_587.client_error | default(false))
+        fail_msg: "{{ __s | dict2items | selectattr('key', 'match', 'tls1') | items2dict | to_json }}"
+      vars:
+        __s: '{{ __verify_smtp }}'
+
+    # The client of EL offers the CBC suites as well (an explicit cipher
+    # list replaces the one of the crypto policy)
+    - name: Verify | Assert submission refuses CBC and static RSA suites and port 25 keeps them
+      ansible.builtin.assert:
+        that:
+          - __s.cbc_465.cipher_refused | default(false)
+          - __s.cbc_587.cipher_refused | default(false)
+          - __s.rsa_465.cipher_refused | default(false)
+          - __s.rsa_587.cipher_refused | default(false)
+          - >-
+            [__s.cbc_465, __s.cbc_587, __s.rsa_465, __s.rsa_587]
+            | selectattr('client_error', 'defined') | selectattr('client_error') | list | length == 0
+          - __s.aead_465.cipher == 'ECDHE-RSA-AES128-GCM-SHA256'
+          - __s.aead_587.cipher == 'ECDHE-RSA-AES128-GCM-SHA256'
+          - __s.cbc_25.tls == 'TLSv1.2'
+          - __s.cbc_25.cipher is match('ECDHE-RSA-AES(128|256)-SHA(256|384)?$')
+        fail_msg: "{{ __s | dict2items | selectattr('key', 'match', '(cbc|rsa|aead)_') | items2dict | to_json }}"
+      vars:
+        __s: '{{ __verify_smtp }}'
+
+    - name: Verify | Send local mail to root
+      ansible.builtin.command:
+        argv: [sendmail, '-i', 'root']
+        stdin: |
+          Subject: local-{{ __verify_run }}
+
+          Mail of the local system through the sendmail of Postfix.
+      changed_when: true
+
+    # LMTP into the Maildir: port 25 (mailbox, alias, alias domain),
+    # submission on 587 and 465, local mail through the root alias
+    - name: Verify | Wait for the delivered messages
+      ansible.builtin.include_tasks: tasks/mailbox.yml
+      vars:
+        __verify_mail:
+          - {user: 'alice@example.com', subject: 'inbound-{{ __verify_run }}'}
+          - {user: 'bob@example.com', subject: 'submission-{{ __verify_run }}'}
+          - {user: 'bob@example.com', subject: 'submissions-{{ __verify_run }}'}
+          - {user: 'alice@example.com', subject: 'local-{{ __verify_run }}'}
+
+    # Postfix logs through syslog into the journal (mail facility)
+    - name: Verify | Read the mail log
+      ansible.builtin.command:
+        argv: [journalctl, '--no-pager', '--output=short', 'SYSLOG_FACILITY=2']
+      register: __verify_mail_log
+      changed_when: false
+
+    - name: Verify | Assert the submission login and the LMTP delivery are logged
+      ansible.builtin.assert:
+        that:
+          - __verify_login_lines | length > 0
+          - __verify_lmtp_lines | length > 0
+        fail_msg: 'No submission login of alice@example.com or LMTP delivery to bob@example.com in the mail log'
+        success_msg: '{{ (__verify_login_lines[-1:] + __verify_lmtp_lines[-1:]) | join(" | ") }}'
+      vars:
+        __verify_login_lines: >-
+          {{ __verify_mail_log.stdout_lines
+             | select('search', 'postfix/submission/smtpd.[0-9]+.: [0-9A-Za-z]+: client=.*'
+                                ~ 'sasl_method=PLAIN, sasl_username=alice@example[.]com$')
+             | list }}
+        __verify_lmtp_lines: >-
+          {{ __verify_mail_log.stdout_lines
+             | select('search', 'postfix/lmtp.[0-9]+.: [0-9A-Za-z]+: to=<bob@example[.]com>, .*status=sent ')
+             | list }}
+
+    - name: Verify | Read the headers of the submitted message
+      ansible.builtin.command:
+        argv: [doveadm, fetch, '-u', 'bob@example.com', hdr, header, subject, 'submission-{{ __verify_run }}']
+      register: __verify_submitted_header
+      changed_when: false
+
+    - name: Verify | Assert the Received header of the client
+      ansible.builtin.assert:
+        that:
+          - >-
+            (__verify_submitted_header.stdout is not search('with (E|UTF8)SMTPS?A '))
+            if postfix_submission_hide_client | bool
+            else (__verify_submitted_header.stdout is search('with (E|UTF8)SMTPS?A '))
+        fail_msg: '{{ __verify_submitted_header.stdout }}'
+
+    # defer_transports keeps mail for other domains in the queue
+    - name: Verify | Read the queue
+      ansible.builtin.command:
+        argv: [postqueue, '-j']
+      register: __verify_queue
+      changed_when: false
+
+    - name: Verify | Assert relayed mail waits in the queue
+      ansible.builtin.assert:
+        that:
+          - __verify_queued | select('eq', 'dave@example.net') | list | length >= 2
+        fail_msg: '{{ __verify_queue.stdout }}'
+      vars:
+        __verify_queued: >-
+          {{ __verify_queue.stdout_lines | map('from_json') | map(attribute='recipients') | flatten
+             | map(attribute='address') | list }}
+
+    #
+    # Rejected configuration
+    #
+
+    - name: Verify | Stat main.cf before the broken runs
+      ansible.builtin.stat:
+        path: /etc/postfix/main.cf
+      register: __verify_main_cf_before
+
+    - name: Verify | Read the master PID before the broken runs
+      ansible.builtin.slurp:
+        src: /var/spool/postfix/pid/master.pid
+      register: __verify_pid_before
+
+    # A value postfix check rejects and a misspelt parameter name
+    - name: Verify | Run the role with a broken postfix_extra_main_cf
+      ansible.builtin.include_tasks: tasks/broken_config.yml
+      loop:
+        - {message_size_limit: 'abc'}
+        - {smtpd_tls_securty_level: 'may'}
+      loop_control:
+        loop_var: __verify_broken
+
+    - name: Verify | Stat main.cf after the broken runs
+      ansible.builtin.stat:
+        path: /etc/postfix/main.cf
+      register: __verify_main_cf_after
+
+    - name: Verify | Read the master PID after the broken runs
+      ansible.builtin.slurp:
+        src: /var/spool/postfix/pid/master.pid
+      register: __verify_pid_after
+
+    - name: Verify | Assert the broken settings never reached Postfix
+      ansible.builtin.assert:
+        that:
+          - __verify_broken_results | length == 2
+          - __verify_broken_results | map(attribute='task') | unique
+            == ['Configure | Check main.cf and master.cf in the staging directory']
+          - __verify_main_cf_after.stat.checksum == __verify_main_cf_before.stat.checksum
+          - __verify_pid_after.content == __verify_pid_before.content
+        fail_msg: '{{ __verify_broken_results | default([]) | to_json }}'
+
+    #
+    # Milter, relay host and MariaDB over TLS
+    #
+
+    # The milter port is closed in the instance. MariaDB: the lookups move
+    # from the socket to TCP with TLS (the server of prepare has the
+    # certificate of db.example.com, the Postfix user from 127.0.0.1
+    # requires TLS); PostgreSQL keeps its connection.
+    - name: Verify | Run the role with an unreachable milter and a relay host  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mta_enabled: false
+        postfix_milters: '{{ __verify_variant.postfix_milters }}'
+        postfix_relayhost: '{{ __verify_variant.postfix_relayhost }}'
+        postfix_relayhost_username: '{{ __verify_variant.postfix_relayhost_username }}'
+        postfix_relayhost_password: '{{ __verify_variant.postfix_relayhost_password }}'
+        postfix_submission_tls_exclude_ciphers: '{{ __verify_variant.postfix_submission_tls_exclude_ciphers }}'
+        postfix_db_host: "{{ 'db.example.com' if postfix_db_type == 'mariadb' else 'localhost' }}"
+        postfix_db_tls: "{{ postfix_db_type == 'mariadb' }}"
+        postfix_db_tls_ca_file: "{{ '/etc/molecule-tls/ca.pem' if postfix_db_type == 'mariadb' else '' }}"
+
+    - name: Verify | Apply the changed configuration
+      ansible.builtin.meta: flush_handlers
+
+    - name: Verify | Read a MariaDB lookup file
+      ansible.builtin.slurp:
+        src: '{{ __verify_sql }}/virtual_mailbox_maps.cf'
+      register: __verify_sql_tls_file
+      when: postfix_db_type == 'mariadb'
+
+    # REQUIRE SSL of the account: only a lookup over TLS answers
+    - name: Verify | Query a lookup table over TLS
+      ansible.builtin.command:
+        argv: [postmap, '-q', 'alice@example.com', '{{ __verify_proxy }}/virtual_mailbox_maps.cf']
+      register: __verify_lookup_tls
+      changed_when: false
+      when: postfix_db_type == 'mariadb'
+
+    - name: Verify | Assert the MariaDB lookup over TLS
+      ansible.builtin.assert:
+        that:
+          - "'hosts = inet:db.example.com:3306' in __verify_sql_tls"
+          - "'tls_CAfile = /etc/molecule-tls/ca.pem' in __verify_sql_tls"
+          - "'tls_verify_cert = yes' in __verify_sql_tls"
+          - "'alice/' in __verify_lookup_tls.stdout"
+        fail_msg: '{{ __verify_sql_tls }} {{ __verify_lookup_tls }}'
+      vars:
+        __verify_sql_tls: '{{ __verify_sql_tls_file.content | b64decode }}'
+      when: postfix_db_type == 'mariadb'
+
+    - name: Verify | Assert the warning about the milter
+      ansible.builtin.assert:
+        that:
+          - __postfix_milters_unreachable == ['inet:127.0.0.1:11332']
+        fail_msg: '{{ __postfix_milters_unreachable | default("no milter check") | to_json }}'
+
+    - name: Verify | Read the relay host settings
+      ansible.builtin.command:
+        argv:
+          - postconf
+          - '-h'
+          - relayhost
+          - smtp_tls_security_level
+          - smtp_sasl_auth_enable
+          - smtp_sasl_security_options
+          - smtp_sasl_tls_security_options
+          - smtp_sasl_password_maps
+          - smtp_tls_secure_cert_match
+          - smtp_tls_CAfile
+      register: __verify_relay
+      changed_when: false
+
+    # 'secure' verifies the relay host against this trust store
+    - name: Verify | Stat the CA bundle of the SMTP client
+      ansible.builtin.stat:
+        path: '{{ __verify_relay.stdout_lines[7] }}'
+        follow: true
+      register: __verify_relay_ca
+
+    - name: Verify | Stat the relay host password table
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+        - /etc/postfix/relay_password
+        - /etc/postfix/relay_password.lmdb
+      register: __verify_relay_files
+
+    - name: Verify | Query the relay host password table
+      ansible.builtin.command:
+        argv: [postmap, '-q', '[relay.example.net]:587', 'lmdb:/etc/postfix/relay_password']
+      register: __verify_relay_password
+      changed_when: false
+
+    - name: Verify | Assert the relay host settings
+      ansible.builtin.assert:
+        that:
+          - __verify_relay.stdout_lines[:6] == ['[relay.example.net]:587', 'secure', 'yes', 'noanonymous',
+                                                'noanonymous', 'lmdb:/etc/postfix/relay_password']
+          - __verify_relay.stdout_lines[6] == 'nexthop, dot-nexthop'
+          - __verify_relay_ca.stat.exists and __verify_relay_ca.stat.size > 100000
+          - __verify_relay_files.results | map(attribute='stat.mode') | unique == ['0600']
+          - __verify_relay_files.results | map(attribute='stat.pw_name') | unique == ['root']
+          - __verify_relay_password.stdout == 'mailer@example.net:relay-Secret-42'
+        fail_msg: >-
+          {{ __verify_relay.stdout_lines }}
+          {{ __verify_relay_files.results | map(attribute='stat.mode') | list }}
+
+    - name: Verify | Read the master.cf parameters without excluded cipher suites
+      ansible.builtin.command:
+        argv: [postconf, '-P']
+      register: __verify_postconf_master_default
+      changed_when: false
+
+    # postfix_submission_tls_exclude_ciphers: [] leaves the Postfix default
+    - name: Verify | Assert submission excludes no cipher suites
+      ansible.builtin.assert:
+        that:
+          - __verify_postconf_master_default.stdout_lines | select('search', 'smtpd_tls_mandatory_exclude_ciphers')
+            | list | length == 0
+          - __verify_postconf_master_default.stdout_lines | select('match', '(465|587)/inet/') | list | length > 0
+        fail_msg: '{{ __verify_postconf_master_default.stdout_lines | to_json }}'
+
+    - name: Verify | Send mail while the milter is unreachable
+      ansible.builtin.include_tasks: tasks/smtp.yml
+      vars:
+        __verify_sessions:
+          milter_down:
+            host: '{{ __verify_external }}'
+            port: 25
+            mail_from: 'carol@example.net'
+            rcpt: ['alice@example.com']
+            data: "Subject: milter-{{ __verify_run }}\n\nDeferred while the milter is down.\n"
+
+    # milter_default_action tempfail: a 4xx reply, nothing accepted
+    - name: Verify | Assert mail is deferred while the milter is unreachable
+      ansible.builtin.assert:
+        that:
+          - __codes | select('ge', 400) | select('lt', 500) | list | length > 0
+          - __s.data is not defined or __s.data[0] != 250
+        fail_msg: '{{ __s | to_json }}'
+      vars:
+        __s: '{{ __verify_smtp.milter_down }}'
+        __codes: >-
+          {{ ([__s.connect | default([0]), __s.ehlo | default([0]), __s.mail | default([0])] + __s.rcpt | default([]))
+             | map('first') | list + [__s.error_code | default(0)] }}
+
+    # Back to the settings of converge: own state of the relay host removed
+    - name: Verify | Run the role with the converge settings again  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mta_enabled: false
+
+    - name: Verify | Apply the converge configuration
+      ansible.builtin.meta: flush_handlers
+
+    - name: Verify | Stat the removed relay host password table
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+        - /etc/postfix/relay_password
+        - /etc/postfix/relay_password.lmdb
+      register: __verify_relay_removed
+
+    - name: Verify | Assert the relay host password is gone
+      ansible.builtin.assert:
+        that:
+          - __verify_relay_removed.results | map(attribute='stat.exists') | unique == [false]
+
+    #
+    # DNS report against the test resolver
+    #
+
+    - name: Verify | Run DNS check  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: dns.yml
+      vars:
+        mta_enabled: false
+
+    - name: Verify | Assert DNS report
+      ansible.builtin.assert:
+        that:
+          - __postfix_dns_error == ''
+          - __verify_report == __verify_expected
+        fail_msg: '{{ __postfix_dns_report | to_json }}'
+      vars:
+        __verify_report: >-
+          {{ dict(__postfix_dns_report | map(attribute='type')
+                  | zip(__postfix_dns_report | map(attribute='name')) | map('join', ' ')
+                  | zip(__postfix_dns_report | map(attribute='status'))) }}
+        __verify_expected:
+          MX example.com: 'present'
+          TXT example.com: 'present'
+          MX example.org: 'different'
+          TXT example.org: 'different'
+          MX missing.example.com: 'missing'
+          TXT missing.example.com: 'missing'
+          A mail.example.com: 'present'
+          AAAA mail.example.com: 'different'
+          PTR 192.0.2.20: 'present'
+          PTR 2001:db8::20: 'missing'
+          TLSA _25._tcp.mail.example.com: 'present'
+
+    # The role computes the hash with openssl; community.crypto computes it
+    # from the same certificate on its own
+    - name: Verify | Read the public key of the test certificate
+      community.crypto.x509_certificate_info:
+        path: /etc/molecule-tls/mail.pem
+      register: __verify_mail_certificate
+
+    # The test resolver serves a second TLSA record of another key, as
+    # during a key rollover: the record stays present, both are found
+    - name: Verify | Assert the TLSA record matches the test certificate
+      ansible.builtin.assert:
+        that:
+          - >-
+            __verify_tlsa | map(attribute='record') | list
+            == ['_25._tcp.mail.example.com. IN TLSA 3 1 1 ' ~ __verify_hash]
+          - __verify_tlsa | map(attribute='found') | map('sort') | list
+            == [['3 1 1 ' ~ __verify_hash, '3 1 1 ' ~ __verify_other_hash] | sort]
+        fail_msg: '{{ __verify_tlsa | to_json }}'
+      vars:
+        __verify_tlsa: "{{ __postfix_dns_report | selectattr('type', 'eq', 'TLSA') | list }}"
+        __verify_hash: "{{ __verify_mail_certificate.public_key_fingerprints.sha256 | replace(':', '') }}"
+        __verify_other_hash: '{{ "ab" * 32 }}'
+
+    # A certbot certificate (below /etc/letsencrypt/live, here a fixture
+    # directory) is checked for reuse_key in its renewal configuration
+    - name: Verify | Create the certbot fixture directories
+      ansible.builtin.file:
+        path: '/root/molecule-letsencrypt/{{ item }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+      loop:
+        - 'live/mail.example.com'
+        - 'renewal'
+
+    - name: Verify | Plant the certbot fixture certificate
+      ansible.builtin.copy:
+        src: /etc/molecule-tls/mail.pem
+        dest: /root/molecule-letsencrypt/live/mail.example.com/fullchain.pem
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Verify | Check the key reuse of a certbot certificate
+      ansible.builtin.include_tasks: tasks/tlsa_reuse_key.yml
+      loop:
+        - {line: '', rc: 1}
+        - {line: 'reuse_key = True', rc: 0}
+      loop_control:
+        loop_var: __verify_reuse_key
+
+    - name: Verify | Remove the certbot fixture
+      ansible.builtin.file:
+        path: /root/molecule-letsencrypt
+        state: absent
+
+    # A certificate whose key cannot be read leaves the TLSA record out, the
+    # run goes on
+    - name: Verify | Run DNS check with an unreadable certificate  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: dns.yml
+      vars:
+        mta_enabled: false
+        postfix_dns_check_enabled: false
+        postfix_tls_cert_file: '/etc/molecule-tls/missing.pem'
+
+    # The failed hash is what the warning of the role reports
+    - name: Verify | Assert the TLSA record was left out
+      ansible.builtin.assert:
+        that:
+          - __postfix_dns_report | selectattr('type', 'eq', 'TLSA') | list | length == 0
+          - __postfix_dns_report | length == 10
+          - __postfix_dns_tlsa_hash.rc != 0
+          - __postfix_dns_tlsa_hash.stderr is search('missing.pem')
+        fail_msg: '{{ __postfix_dns_report | to_json }}'
+
+    # A resolver name that cannot be resolved makes the lookup itself fail
+    # (RFC 6761 name). The role lists every record as unchecked with a
+    # warning, and the run goes on.
+    - name: Verify | Run DNS check with a broken resolver  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: dns.yml
+      vars:
+        mta_enabled: false
+        postfix_dns_resolver: 'resolver.invalid'
+
+    - name: Verify | Assert the lookup failure was reported and the run went on
+      ansible.builtin.assert:
+        that:
+          - __postfix_dns_error is search("lookup plugin 'community.general.dig'")
+          - __postfix_dns_report | map(attribute='status') | unique | list == ['unchecked']
+          - __postfix_dns_report | length == 11
+        fail_msg: '{{ __postfix_dns_error }} {{ __postfix_dns_report }}'
+
+    #
+    # Package Update (side_effect.yml)
+    #
+
+    - name: Verify | Read the package versions around the rollback
+      ansible.builtin.slurp:
+        src: /root/postfix-update-versions
+      register: __verify_update_versions
+
+    - name: Verify | Gather package facts after the update
+      ansible.builtin.package_facts:
+
+    - name: Verify | Set update version facts
+      ansible.builtin.set_fact:
+        __verify_version_latest: '{{ (__verify_update_versions.content | b64decode).splitlines()[0] | trim }}'
+        __verify_version_rolled_back: '{{ (__verify_update_versions.content | b64decode).splitlines()[1] | trim }}'
+        __verify_version_now: >-
+          {{ ((__verify_pkg.epoch ~ ':')
+              if ((__verify_pkg.epoch | default('', true) | string) not in ['', 'None', '0']) else '')
+             ~ (__verify_pkg.version | default(''))
+             ~ (('-' ~ __verify_pkg.release) if (__verify_pkg.release | default('', true)) else '') }}
+      vars:
+        __verify_pkg: "{{ ansible_facts['packages']['postfix'] | default([{}]) | first }}"
+
+    - name: Verify | Read the PID of the master process
+      ansible.builtin.slurp:
+        src: /var/spool/postfix/pid/master.pid
+      register: __verify_master_pid
+
+    # readlink reports a replaced binary as "<path> (deleted)"
+    - name: Verify | Read the binary of the master process
+      ansible.builtin.command:
+        argv: [readlink, '/proc/{{ __verify_master_pid.content | b64decode | trim }}/exe']
+      register: __verify_master_exe
+      changed_when: false
+
+    - name: Verify | Assert the update and the master binary
+      ansible.builtin.assert:
+        that:
+          - __verify_version_now == __verify_version_latest
+          - __verify_master_exe.stdout is not search(' \(deleted\)$')
+        fail_msg: >-
+          postfix {{ __verify_version_now }} after the update (expected {{ __verify_version_latest }},
+          rolled back to {{ __verify_version_rolled_back }}); master: {{ __verify_master_exe.stdout }}
+        success_msg: >-
+          Updated from {{ __verify_version_rolled_back }} to {{ __verify_version_now }}, the master runs the new binary

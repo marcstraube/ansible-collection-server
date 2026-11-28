@@ -8,17 +8,37 @@
 # it reloads after a renewal run (certbot_*_enabled, certbot_reload_services)
 # also pick up a certificate issued inside a play. The script never restarts
 # and fails the handler when a configuration check or a reload fails (the
-# retry timer or cron job then retries it). The script is written by the
+# retry timer or cron job then retries it). With --issuance it skips a unit
+# that does not exist yet: a later play may install the service, which reads
+# the certificate at its first start. The script is written by the
 # renewal tasks; a run limited to `--tags certbot:certificates` on a host
 # without it skips the reload (`removes:`) instead of failing. The listener is
 # always defined, as Ansible aborts a run when a notification reaches no
 # handler at all.
 - name: Run certbot service reload script
   ansible.builtin.command:
-    cmd: '{{ __certbot_reload_script }}'
+    cmd: '{{ __certbot_reload_script }} --issuance'
     removes: '{{ __certbot_reload_script }}'
+  register: __certbot_reload_result
   changed_when: true
   listen: Reload cert services
   when:
     - certbot_enabled | bool
     - __certbot_reload_services | length > 0
+
+# The output of a successful command is not part of the play output
+- name: Report services skipped by the certbot reload
+  ansible.builtin.debug:
+    msg: >-
+      Not reloaded, no such unit: {{ __certbot_reload_skipped | join(', ') }}.
+      A service that is installed later reads the certificate at its first
+      start; correct a misspelled name, the next renewal fails on it.
+  vars:
+    __certbot_reload_skipped: >-
+      {{ __certbot_reload_result.stderr_lines | default([])
+         | select('search', ': unit not found, skipped$')
+         | map('regex_replace', '^[^:]*: (.*): unit not found, skipped$', '\1') | list }}
+  listen: Reload cert services
+  when:
+    - certbot_enabled | bool
+    - __certbot_reload_skipped | length > 0

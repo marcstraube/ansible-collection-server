@@ -1,0 +1,79 @@
+---
+# Test CA and the server certificates of the scenario (__prepare_certificates:
+# name and subject alternative names), written below /etc/molecule-tls; the
+# CA certificate is fetched to the ephemeral directory for the other hosts.
+# Postfix and Dovecot read certificate and key as root; key_mode opens a key
+# for a server that reads it as its own user (MariaDB).
+
+- name: Prepare | Create the TLS directory
+  ansible.builtin.file:
+    path: /etc/molecule-tls
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Prepare | Create the CA key
+  community.crypto.openssl_privatekey:
+    path: /etc/molecule-tls/ca.key
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Prepare | Create the CA certificate request
+  community.crypto.openssl_csr_pipe:
+    privatekey_path: /etc/molecule-tls/ca.key
+    common_name: 'Postfix molecule test CA'
+    basic_constraints:
+      - 'CA:TRUE'
+    basic_constraints_critical: true
+    key_usage:
+      - keyCertSign
+    key_usage_critical: true
+  register: __prepare_ca_csr
+  changed_when: false
+
+- name: Prepare | Create the CA certificate
+  community.crypto.x509_certificate:
+    path: /etc/molecule-tls/ca.pem
+    csr_content: '{{ __prepare_ca_csr.csr }}'
+    privatekey_path: /etc/molecule-tls/ca.key
+    provider: selfsigned
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Prepare | Create the server keys
+  community.crypto.openssl_privatekey:
+    path: '/etc/molecule-tls/{{ item.name }}.key'
+    owner: root
+    group: '{{ item.group | default("root") }}'
+    mode: '{{ item.key_mode | default("0640") }}'
+  loop: '{{ __prepare_certificates }}'
+  loop_control:
+    label: '{{ item.name }}'
+
+- name: Prepare | Create the server certificate requests
+  community.crypto.openssl_csr_pipe:
+    privatekey_path: '/etc/molecule-tls/{{ item.name }}.key'
+    common_name: '{{ item.names | first }}'
+    subject_alt_name: "{{ item.names | map('regex_replace', '^', 'DNS:') | list }}"
+  loop: '{{ __prepare_certificates }}'
+  loop_control:
+    label: '{{ item.name }}'
+  register: __prepare_server_csr
+  changed_when: false
+
+- name: Prepare | Create the server certificates
+  community.crypto.x509_certificate:
+    path: '/etc/molecule-tls/{{ item.item.name }}.pem'
+    csr_content: '{{ item.csr }}'
+    provider: ownca
+    ownca_path: /etc/molecule-tls/ca.pem
+    ownca_privatekey_path: /etc/molecule-tls/ca.key
+    owner: root
+    group: root
+    mode: '0644'
+  loop: '{{ __prepare_server_csr.results }}'
+  loop_control:
+    label: '{{ item.item.name }}'

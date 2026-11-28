@@ -1,0 +1,21 @@
+{{ ansible_managed | comment }}
+# Included by the php-fpm profile: files PHP-FPM needs for PostfixAdmin.
+{#- The real path of a role path, with the characters that have a meaning
+    in AppArmor rules escaped #}
+{%- set __real = dict(__postfixadmin_apparmor_paths | zip(__postfixadmin_apparmor_realpath.stdout_lines)) -%}
+{%- macro path(name) -%}
+{{ __real[name] | regex_replace('([\\\\"*?\\[\\]{}^])', '\\\\\\1') }}
+{%- endmacro %}
+
+
+"{{ path(postfixadmin_install_dir) }}/" r,
+"{{ path(postfixadmin_install_dir) }}/**" r,
+"{{ path(postfixadmin_install_dir) }}/templates_c/" rw,
+"{{ path(postfixadmin_install_dir) }}/templates_c/**" rwk,
+"{{ path(__postfixadmin_config_file) }}" r,
+{% if postfixadmin_db_tls | bool %}
+"{{ path(postfixadmin_db_tls_ca_file) }}" r,
+{% endif %}
+{% if __postfixadmin_db_socket | length > 0 %}
+"{{ path(__postfixadmin_db_socket) }}{{ ('/.s.PGSQL.' ~ postfixadmin_db_port) if postfixadmin_db_type == 'postgresql' else '' }}" rw,
+{% endif %}

@@ -1,0 +1,422 @@
+---
+# The role writes only files in local.d; the configuration the package ships
+# stays untouched, so the layout is the same on every platform. A new set
+# of files is rendered into a staging copy of local.d and override.d first
+# and checked there with rspamadm configtest; only a set that passes
+# replaces the active files, so a broken setting never reaches the running
+# service. Check mode on a new host has no rspamadm.
+
+#
+# Controller Passwords
+#
+# The controller keeps hashes (rspamadm pw). A hash in the active
+# worker-controller.inc stays while it still verifies the password, so a
+# run without a password change changes nothing; otherwise the role creates
+# a new one. The passwords reach rspamadm on stdin, never on a command
+# line or in the environment of the Ansible command (which Ansible renders
+# into the command line of the remote shell): the check sets
+# RSPAMADM_PASSWORD inside its own process from stdin, the hash is created
+# from stdin in Lua.
+#
+
+- name: Configure | Read the active worker settings
+  ansible.builtin.slurp:
+    src: '{{ __rspamd_local_dir }}/{{ item }}'
+  loop:
+    - 'worker-controller.inc'
+    - 'worker-proxy.inc'
+  register: __rspamd_workers_active
+  # Missing before the first run
+  failed_when: false
+  # The content holds the password hashes
+  no_log: true
+
+- name: Configure | Collect the active password hashes
+  ansible.builtin.set_fact:
+    __rspamd_controller_hashes_active:
+      password: '{{ (__rspamd_controller_text | regex_findall(''(?m)^password = "([^"]*)";$'') + [""]) | first }}'
+      enable_password: >-
+        {{ (__rspamd_controller_text | regex_findall('(?m)^enable_password = "([^"]*)";$') + ['']) | first }}
+    # The listener addresses of the active files, for the restart decision
+    __rspamd_controller_bind_active: >-
+      {{ (__rspamd_controller_text | regex_findall('(?m)^bind_socket = "([^"]*)";$') + ['']) | first }}
+    __rspamd_proxy_bind_active: >-
+      {{ (__rspamd_proxy_text | regex_findall('(?m)^bind_socket = "([^"]*)";$') + ['']) | first }}
+  vars:
+    __rspamd_controller_text: '{{ __rspamd_workers_active.results[0].content | default("") | b64decode }}'
+    __rspamd_proxy_text: '{{ __rspamd_workers_active.results[1].content | default("") | b64decode }}'
+  no_log: true
+
+- name: Configure | Verify the active password hashes
+  ansible.builtin.command:
+    argv:
+      - sh
+      - -c
+      - 'RSPAMADM_PASSWORD="$(cat)" exec rspamadm pw --check --quiet --password "$1"'
+      - sh
+      - '{{ __rspamd_controller_hashes_active[item] }}'
+    stdin: '{{ lookup("vars", "rspamd_controller_" ~ item) }}'
+    stdin_add_newline: false
+  loop:
+    - 'password'
+    - 'enable_password'
+  register: __rspamd_controller_verify
+  changed_when: false
+  # Exit status 1: the password no longer matches (or a broken hash)
+  failed_when: __rspamd_controller_verify.rc not in [0, 1]
+  check_mode: false
+  no_log: true
+  when:
+    - not __rspamd_check_mode_install | default(false) | bool
+    - __rspamd_controller_hashes_active[item] is match(__rspamd_password_hash_regex)
+
+- name: Configure | Create new password hashes
+  ansible.builtin.command:
+    argv:
+      - rspamadm
+      - lua
+      - --batch
+      - --exec
+      - "return require('rspamd_cryptobox').pbkdf(io.read('*a'))"
+    stdin: '{{ lookup("vars", "rspamd_controller_" ~ item.item) }}'
+    stdin_add_newline: false
+  loop: '{{ __rspamd_controller_verify.results }}'
+  loop_control:
+    label: '{{ item.item }}'
+  register: __rspamd_controller_new
+  changed_when: false
+  check_mode: false
+  no_log: true
+  when:
+    - not __rspamd_check_mode_install | default(false) | bool
+    - (item.rc | default(1)) != 0
+
+- name: Configure | Select the password hashes
+  ansible.builtin.set_fact:
+    __rspamd_controller_hashes:
+      password: >-
+        {{ __rspamd_new.password | default(__rspamd_controller_hashes_active.password, true) }}
+      enable_password: >-
+        {{ __rspamd_new.enable_password | default(__rspamd_controller_hashes_active.enable_password, true) }}
+  vars:
+    __rspamd_new: >-
+      {{ dict(__rspamd_controller_new.results | default([]) | rejectattr('skipped', 'defined')
+              | map(attribute='item.item')
+              | zip(__rspamd_controller_new.results | default([]) | rejectattr('skipped', 'defined')
+                    | map(attribute='stdout') | map('trim'))) }}
+  no_log: true
+
+- name: Configure | Assert the password hashes
+  ansible.builtin.assert:
+    that:
+      - __rspamd_controller_hashes.password is match(__rspamd_password_hash_regex)
+      - __rspamd_controller_hashes.enable_password is match(__rspamd_password_hash_regex)
+    fail_msg: 'rspamadm did not return a password hash.'
+    quiet: true
+  no_log: true
+  when: not __rspamd_check_mode_install | default(false) | bool
+
+# Files of rspamd_local_config whose name left the mapping carry the marker
+# in their first line. Read from the active local.d, also in check mode;
+# the backups the role keeps ('~' suffix) are not files of the mapping.
+- name: Configure | Find extra files no longer configured
+  ansible.builtin.find:
+    paths: '{{ __rspamd_local_dir }}'
+    file_type: file
+    excludes:
+      - '*~'
+    contains: '^{{ __rspamd_local_config_marker | regex_escape }}$'
+    read_whole_file: false
+  register: __rspamd_extra_found
+  check_mode: false
+
+- name: Configure | Record the extra files no longer configured
+  ansible.builtin.set_fact:
+    __rspamd_extra_removed_names: >-
+      {{ __rspamd_extra_found.files | map(attribute='path') | map('basename')
+         | reject('in', rspamd_local_config.keys() | list) | list }}
+
+#
+# Check Mode
+#
+# Check mode writes nothing: the templates are compared with the active
+# files directly and report the change the real run would make.
+#
+
+- name: Configure | Compare the role files in check mode
+  ansible.builtin.template:
+    src: '{{ item.name }}.j2'
+    dest: '{{ __rspamd_local_dir }}/{{ item.name }}'
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ __rspamd_local_files | rejectattr('secret') | list }}"
+  loop_control:
+    label: '{{ item.name }}'
+  when:
+    - ansible_check_mode
+    - not __rspamd_check_mode_install | default(false) | bool
+
+# Password hashes and the Valkey password
+- name: Configure | Compare the role files with secrets in check mode
+  ansible.builtin.template:
+    src: '{{ item.name }}.j2'
+    dest: '{{ __rspamd_local_dir }}/{{ item.name }}'
+    owner: root
+    group: '{{ __rspamd_group }}'
+    mode: '0640'
+  loop: "{{ __rspamd_local_files | selectattr('secret') | list }}"
+  loop_control:
+    label: '{{ item.name }}'
+  when:
+    - ansible_check_mode
+    - not __rspamd_check_mode_install | default(false) | bool
+  no_log: true
+
+- name: Configure | Compare the extra files in check mode
+  ansible.builtin.copy:
+    content: "{{ __rspamd_local_config_marker }}\n{{ item.value }}"
+    dest: '{{ __rspamd_local_dir }}/{{ item.key }}'
+    owner: root
+    group: '{{ __rspamd_group }}'
+    mode: '0640'
+  loop: '{{ rspamd_local_config | dict2items }}'
+  loop_control:
+    label: '{{ item.key }}'
+  when:
+    - ansible_check_mode
+    - not __rspamd_check_mode_install | default(false) | bool
+  # The files may hold secrets (mode 0640): no content, no diff
+  no_log: true
+
+- name: Configure | Report the removal of extra files in check mode
+  ansible.builtin.file:
+    path: '{{ __rspamd_local_dir }}/{{ item }}'
+    state: absent
+  loop: '{{ __rspamd_extra_removed_names }}'
+  when: ansible_check_mode
+
+#
+# Staging
+#
+
+- name: Configure | Validate and activate the configuration
+  when: not ansible_check_mode
+  block:
+    # A fresh copy of the active local.d, override.d and the local
+    # configuration files the packaged configuration includes from
+    # $LOCAL_CONFDIR on every run: the files of the role are then reported
+    # as changed exactly when they differ from the active ones, and files of
+    # others take part in the test as well. Only root reads the directory
+    # (it holds the password hashes and the Valkey password).
+    - name: Configure | Copy the active local configuration into the staging directory
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          rm -rf -- "${STAGING}"
+          mkdir -m 0700 -- "${STAGING}"
+          for dir in local.d override.d; do
+            mkdir -p -- "${STAGING}/${dir}"
+            if [ -d "${CONFIG_DIR}/${dir}" ]; then
+              cp -a -- "${CONFIG_DIR}/${dir}/." "${STAGING}/${dir}/"
+            fi
+          done
+          for file in rspamd.conf.local rspamd.conf.local.override rspamd.conf.override; do
+            if [ -e "${CONFIG_DIR}/${file}" ]; then
+              cp -a -- "${CONFIG_DIR}/${file}" "${STAGING}/${file}"
+            fi
+          done
+      environment:
+        STAGING: '{{ __rspamd_staging_dir }}'
+        CONFIG_DIR: '{{ __rspamd_config_dir }}'
+      changed_when: false
+
+    - name: Configure | Render the role files into the staging directory
+      ansible.builtin.template:
+        src: '{{ item.name }}.j2'
+        dest: '{{ __rspamd_staging_dir }}/local.d/{{ item.name }}'
+        owner: root
+        group: root
+        mode: '0644'
+      loop: "{{ __rspamd_local_files | rejectattr('secret') | list }}"
+      loop_control:
+        label: '{{ item.name }}'
+      register: __rspamd_staged_role
+
+    - name: Configure | Render the role files with secrets into the staging directory
+      ansible.builtin.template:
+        src: '{{ item.name }}.j2'
+        dest: '{{ __rspamd_staging_dir }}/local.d/{{ item.name }}'
+        owner: root
+        group: '{{ __rspamd_group }}'
+        mode: '0640'
+      loop: "{{ __rspamd_local_files | selectattr('secret') | list }}"
+      loop_control:
+        label: '{{ item.name }}'
+      register: __rspamd_staged_secret
+      no_log: true
+
+    - name: Configure | Write the extra files into the staging directory
+      ansible.builtin.copy:
+        content: "{{ __rspamd_local_config_marker }}\n{{ item.value }}"
+        dest: '{{ __rspamd_staging_dir }}/local.d/{{ item.key }}'
+        owner: root
+        group: '{{ __rspamd_group }}'
+        mode: '0640'
+      loop: '{{ rspamd_local_config | dict2items }}'
+      loop_control:
+        label: '{{ item.key }}'
+      register: __rspamd_staged_extra
+      no_log: true
+
+    - name: Configure | Remove the extra files no longer configured from the staging directory
+      ansible.builtin.file:
+        path: '{{ __rspamd_staging_dir }}/local.d/{{ item }}'
+        state: absent
+      loop: '{{ __rspamd_extra_removed_names }}'
+
+    - name: Configure | Record the pending changes
+      ansible.builtin.set_fact:
+        __rspamd_config_changed: >-
+          {{ __rspamd_staged_role is changed or __rspamd_staged_secret is changed
+             or __rspamd_staged_extra is changed
+             or __rspamd_extra_removed_names | length > 0 }}
+
+    # The packaged rspamd.conf includes local.d and override.d through
+    # $LOCAL_CONFDIR, which points at the staging directory for the test.
+    - name: Configure | Test the configuration in the staging directory
+      ansible.builtin.command:
+        argv:
+          - rspamadm
+          - '--var=LOCAL_CONFDIR={{ __rspamd_staging_dir }}'
+          - configtest
+          - -c
+          - '{{ __rspamd_config_file }}'
+      register: __rspamd_configtest
+      changed_when: false
+      failed_when: false
+      when: __rspamd_config_changed | bool
+
+    - name: Configure | Assert the configuration passes rspamadm configtest
+      ansible.builtin.assert:
+        that:
+          - __rspamd_configtest.rc | default(0) == 0
+        fail_msg: >-
+          rspamadm configtest rejects the new configuration; the active
+          configuration stays in place:
+          {{ (__rspamd_configtest.stdout_lines | default([]))
+             + (__rspamd_configtest.stderr_lines | default([])) }}
+        quiet: true
+
+    # A changed listener address needs a restart, as does a new group of
+    # the service user (install.yml); anything else a reload
+    - name: Configure | Decide on a restart for changed listeners
+      ansible.builtin.set_fact:
+        __rspamd_restart_needed: >-
+          {{ __rspamd_restart_needed | default(false) | bool
+             or (__rspamd_config_changed | bool
+                 and (__rspamd_controller_bind_active != rspamd_controller_bind
+                      or __rspamd_proxy_bind_active != rspamd_milter_bind)) }}
+
+    # backup: every change keeps the previous file next to it
+    # ('<name>.<pid>.<date>~'); rspamd includes its local.d files by name,
+    # never by pattern, so it does not load these copies
+    - name: Configure | Activate the role files
+      ansible.builtin.copy:
+        src: '{{ __rspamd_staging_dir }}/local.d/{{ item.name }}'
+        dest: '{{ __rspamd_local_dir }}/{{ item.name }}'
+        remote_src: true
+        backup: true
+        owner: root
+        group: root
+        mode: '0644'
+      loop: "{{ __rspamd_local_files | rejectattr('secret') | list }}"
+      loop_control:
+        label: '{{ item.name }}'
+      notify:
+        - Reload rspamd
+        - Restart rspamd
+
+    - name: Configure | Activate the role files with secrets
+      ansible.builtin.copy:
+        src: '{{ __rspamd_staging_dir }}/local.d/{{ item.name }}'
+        dest: '{{ __rspamd_local_dir }}/{{ item.name }}'
+        remote_src: true
+        backup: true
+        owner: root
+        group: '{{ __rspamd_group }}'
+        mode: '0640'
+      loop: "{{ __rspamd_local_files | selectattr('secret') | list }}"
+      loop_control:
+        label: '{{ item.name }}'
+      notify:
+        - Reload rspamd
+        - Restart rspamd
+      no_log: true
+
+    - name: Configure | Activate the extra files
+      ansible.builtin.copy:
+        src: '{{ __rspamd_staging_dir }}/local.d/{{ item.key }}'
+        dest: '{{ __rspamd_local_dir }}/{{ item.key }}'
+        remote_src: true
+        backup: true
+        owner: root
+        group: '{{ __rspamd_group }}'
+        mode: '0640'
+      loop: '{{ rspamd_local_config | dict2items }}'
+      loop_control:
+        label: '{{ item.key }}'
+      notify:
+        - Reload rspamd
+        - Restart rspamd
+      no_log: true
+
+    - name: Configure | Remove the extra files no longer configured
+      ansible.builtin.file:
+        path: '{{ __rspamd_local_dir }}/{{ item }}'
+        state: absent
+      loop: '{{ __rspamd_extra_removed_names }}'
+      notify:
+        - Reload rspamd
+        - Restart rspamd
+
+#
+# Backups
+#
+# Every activation keeps the previous file next to it
+# ('<name>.<pid>.<YYYY-MM-DD@HH:MM:SS>~'); rspamd includes the files of
+# local.d by name and never loads these copies. Of the files of the role
+# and of rspamd_local_config only the newest backup stays; the backups of
+# a file that left rspamd_local_config go with it.
+#
+
+- name: Configure | Find the backups in local.d
+  ansible.builtin.find:
+    paths: '{{ __rspamd_local_dir }}'
+    file_type: file
+    patterns:
+      - '*~'
+  register: __rspamd_backups
+  check_mode: false
+
+- name: Configure | Remove old backups and the backups of removed extra files
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: absent
+  loop: '{{ __rspamd_backups_obsolete }}'
+  vars:
+    __rspamd_backup_regex: '[.][0-9]+[.][0-9]{4}-[0-9]{2}-[0-9]{2}@[0-9]{2}:[0-9]{2}:[0-9]{2}~$'
+    __rspamd_backups_obsolete: >-
+      {%- set ns = namespace(paths=[]) -%}
+      {%- set kept = __rspamd_local_files | map(attribute='name') | list
+                     + (rspamd_local_config.keys() | list) -%}
+      {%- set files = __rspamd_backups.files | default([])
+                     | selectattr('path', 'search', __rspamd_backup_regex) | list -%}
+      {%- for name in kept + (__rspamd_extra_removed_names | default([])) -%}
+      {%- set own = files
+                    | selectattr('path', 'match', (__rspamd_local_dir ~ '/' ~ name) | regex_escape
+                                                   ~ __rspamd_backup_regex)
+                    | sort(attribute='mtime', reverse=true) | map(attribute='path') | list -%}
+      {%- set ns.paths = ns.paths + (own if name in __rspamd_extra_removed_names else own[1:]) -%}
+      {%- endfor -%}
+      {{ ns.paths }}

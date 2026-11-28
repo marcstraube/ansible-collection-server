@@ -1,0 +1,165 @@
+---
+#
+# rspamd — Shared Variables
+#
+
+# Package on every platform; the upstream repository and Arch Linux name it
+# alike
+__rspamd_packages:
+  - 'rspamd'
+
+# Installed packages a targeted update moves along (the debug and ASAN
+# builds of the upstream repository pin the exact version)
+__rspamd_update_pattern: '^rspamd(-.+)?$'
+
+__rspamd_service_name: 'rspamd'
+
+# Fixed by the packages of every platform
+__rspamd_config_dir: '/etc/rspamd'
+__rspamd_config_file: '{{ __rspamd_config_dir }}/rspamd.conf'
+__rspamd_local_dir: '{{ __rspamd_config_dir }}/local.d'
+__rspamd_override_dir: '{{ __rspamd_config_dir }}/override.d'
+__rspamd_db_dir: '/var/lib/rspamd'
+__rspamd_log_dir: '/var/log/rspamd'
+
+# local.d and override.d are rendered here with the files of the role and
+# checked with rspamadm configtest before they replace the active files.
+# The directory keeps the last checked set.
+__rspamd_staging_dir: '{{ __rspamd_config_dir }}/ansible-staging'
+
+# DKIM keys of the role, '<domain>.<selector>.key' with the public record
+# in '<domain>.<selector>.txt'
+__rspamd_dkim_dir: '{{ __rspamd_db_dir }}/dkim'
+
+# openssl rebuilds the public DKIM record of a key without one; the
+# package has this name on every platform
+__rspamd_openssl_package: 'openssl'
+
+# Files of the role in local.d (secrets: readable by the service group
+# only) and override.d
+__rspamd_local_files:
+  - name: 'worker-proxy.inc'
+    secret: false
+  - name: 'worker-normal.inc'
+    secret: false
+  - name: 'worker-controller.inc'
+    secret: true
+  - name: 'redis.conf'
+    secret: true
+  - name: 'options.inc'
+    secret: false
+  - name: 'actions.conf'
+    secret: false
+  - name: 'classifier-bayes.conf'
+    secret: false
+  - name: 'greylist.conf'
+    secret: false
+  - name: 'ratelimit.conf'
+    secret: false
+  - name: 'milter_headers.conf'
+    secret: false
+  - name: 'dkim_signing.conf'
+    secret: false
+  - name: 'arc.conf'
+    secret: false
+  - name: 'antivirus.conf'
+    secret: false
+  - name: 'dmarc.conf'
+    secret: false
+
+# Key map of the dkim_signing and arc modules: domain -> selector and key
+__rspamd_dkim_domain_map: >-
+  {%- set ns = namespace(map={}) -%}
+  {%- for item in rspamd_dkim_domains -%}
+  {%- set domain = item.domain | lower -%}
+  {%- set ns.map = ns.map | combine({domain: {'selectors': [{
+        'path': __rspamd_dkim_dir ~ '/' ~ domain ~ '.' ~ item.selector ~ '.key',
+        'selector': item.selector}]}}) -%}
+  {%- endfor -%}
+  {{ ns.map }}
+
+# First line of every file of rspamd_local_config; the role removes a file
+# carrying it when its name leaves the mapping
+__rspamd_local_config_marker: '# Managed by Ansible: rspamd_local_config of marcstraube.server.rspamd'
+
+# Controller password hashes (rspamadm pw): '$<id>$<salt>$<key>' in base32
+__rspamd_password_hash_regex: '^[$][0-9]+[$][a-z0-9]+[$][a-z0-9]+$'
+
+# Values the role checks
+__rspamd_action_names:
+  - 'reject'
+  - 'add_header'
+  - 'rewrite_subject'
+  - 'greylist'
+__rspamd_antivirus_actions:
+  - 'reject'
+  - 'add header'
+  - 'rewrite subject'
+  - 'soft reject'
+# DMARC dispositions of the dmarc module and the actions it may force
+# (task:set_pre_result, '_' written as ' '). Not allowed: a forced action
+# without a threshold replaces every action the score earns except reject,
+# so 'no action' would deliver spam below the reject threshold unmarked and
+# 'rewrite subject' would replace 'add header', and the milter passes
+# 'greylist' as accepted while greylisting is off.
+__rspamd_dmarc_dispositions:
+  - 'reject'
+  - 'quarantine'
+  - 'softfail'
+__rspamd_dmarc_action_names:
+  - 'reject'
+  - 'soft reject'
+  - 'add header'
+# rspamd_dmarc_actions with '_' in the action names written as ' '
+__rspamd_dmarc_actions: >-
+  {{ dict(rspamd_dmarc_actions.keys()
+          | zip(rspamd_dmarc_actions.values() | map('string') | map('replace', '_', ' '))) }}
+__rspamd_bind_regex: '^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.*_-]+):[0-9]{1,5}$'
+__rspamd_hostname_regex: '^([A-Za-z0-9_]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?[.])+[A-Za-z]{2,63}$'
+__rspamd_selector_regex: '^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$'
+__rspamd_network_regex: '^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$'
+
+# DMARC report service and timer (role-created units)
+__rspamd_dmarc_report_service: 'rspamd-dmarc-report.service'
+__rspamd_dmarc_report_timer: 'rspamd-dmarc-report.timer'
+
+#
+# DNS Check
+#
+
+# Expected records with their zone file line, computed without any lookup,
+# so they are printed even when the check is off or fails. 'value' is the
+# expected answer: the DKIM record (compared by its public key) or the
+# DMARC policy. Input: __rspamd_dkim_records (domain|selector -> record,
+# '' while the key does not exist yet).
+__rspamd_dns_records: >-
+  {%- set ns = namespace(records=[]) -%}
+  {%- for item in rspamd_dkim_domains -%}
+  {%- set name = item.selector ~ '._domainkey.' ~ item.domain | lower -%}
+  {%- set value = __rspamd_dkim_records[item.domain | lower ~ '|' ~ item.selector] | default('') -%}
+  {%- set ns.records = ns.records + [{
+        'name': name, 'type': 'DKIM', 'query': name, 'value': value,
+        'record': name ~ '. IN TXT "' ~ (value if value | length > 0 else '<key not created yet>') ~ '"'}] -%}
+  {%- if rspamd_dns_dmarc | length > 0 -%}
+  {%- set name = '_dmarc.' ~ item.domain | lower -%}
+  {%- set ns.records = ns.records + [{
+        'name': name, 'type': 'DMARC', 'query': name, 'value': rspamd_dns_dmarc,
+        'record': name ~ '. IN TXT "' ~ rspamd_dns_dmarc ~ '"'}] -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {{ ns.records }}
+
+# Arguments of the community.general.dig lookup. Missing records, empty
+# answers and a resolver that does not answer come back as values
+# ('NXDOMAIN', ''), never as a failure; the lookup only fails on its own
+# errors (dnspython missing, a resolver name that does not resolve). The
+# port option is only passed when it differs from 53, so community.general
+# releases older than 9.5.0 keep working with the default.
+__rspamd_dns_servers: >-
+  {{ ['@' ~ rspamd_dns_resolver] if rspamd_dns_resolver | length > 0 else [] }}
+__rspamd_dns_options: >-
+  {{
+    {'fail_on_error': false, 'real_empty': false}
+    | combine({'port': rspamd_dns_resolver_port | int}
+              if rspamd_dns_resolver_port | int != 53 else {})
+  }}

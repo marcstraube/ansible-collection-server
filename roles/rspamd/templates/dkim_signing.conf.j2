@@ -1,0 +1,13 @@
+{{ ansible_managed | comment }}
+{% if rspamd_dkim_domains | length > 0 %}
+# Sign mail of authenticated users and of the signing networks with the key
+# of the From domain; no fallback to a global key
+sign_authenticated = true;
+sign_local = false;
+sign_inbound = false;
+sign_networks = {{ rspamd_signing_networks | map('string') | list | to_json }};
+try_fallback = false;
+domain = {{ __rspamd_dkim_domain_map | to_json }};
+{% else %}
+enabled = false;
+{% endif %}

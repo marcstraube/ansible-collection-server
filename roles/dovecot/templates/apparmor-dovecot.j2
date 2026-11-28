@@ -1,0 +1,134 @@
+{{ __dovecot_apparmor_marker }}
+{{ ansible_managed | comment }}
+# Included by the profile {{ __dovecot_apparmor_profile }}: what Dovecot 2.4 needs for
+# the configuration of the role beyond the packaged Dovecot 2.3 profile.
+# The role replaces and removes this file. Do not add rules here: the role
+# writes the rules Dovecot needs itself. Only rules that belong in every
+# Dovecot profile go into /etc/apparmor.d/abstractions/dovecot-common.d/,
+# which the internet-facing login processes (imap-login, pop3-login)
+# include as well.
+{# A path with the characters that have a meaning in AppArmor rules
+   escaped, and the real path of a role path #}
+{% macro escape(value) -%}
+{{ value | regex_replace('([\\\\"*?\\[\\]{}^])', '\\\\\\1') }}
+{%- endmacro %}
+{% macro path(name) -%}
+{{ escape(__dovecot_apparmor_real[name]) }}
+{%- endmacro %}
+{% macro mail_root() %}
+
+# The mail root
+"{{ path(dovecot_mail_root) }}/" rw,
+"{{ path(dovecot_mail_root) }}/**" rwkl,
+{% endmacro %}
+{% if __dovecot_apparmor_profile in ['usr.sbin.dovecot', 'usr.lib.dovecot.config'] %}
+
+# TLS files; doveconf and the config process read them. A configured
+# path that is a symlink gets a rule of its own besides its target.
+{% for name in __dovecot_apparmor_tls_files %}
+"{{ path(name) }}" r,
+{% if __dovecot_apparmor_real[name] != name %}
+"{{ escape(name) }}" r,
+{% endif %}
+{% endfor %}
+{% elif __dovecot_apparmor_profile == 'usr.lib.dovecot.auth' %}
+{% if dovecot_db_tls | bool %}
+
+# CA of the database server certificate
+"{{ path(dovecot_db_tls_ca_file) }}" r,
+{% if __dovecot_apparmor_real[dovecot_db_tls_ca_file] != dovecot_db_tls_ca_file %}
+"{{ escape(dovecot_db_tls_ca_file) }}" r,
+{% endif %}
+{% endif %}
+{% if dovecot_db_host is match('/') %}
+
+# Unix socket of the database server
+"{{ path(dovecot_db_host) }}{{ ('/.s.PGSQL.' ~ dovecot_db_port) if dovecot_db_type == 'postgresql' else '' }}" rw,
+{% endif %}
+{% elif __dovecot_apparmor_profile == 'usr.lib.dovecot.lmtp' %}
+
+# Process statistics: /proc/<pid> belongs to root after the switch to the
+# mail user, the profile allows stat to the owner only (this rule matches
+# every pid, as in the imap and pop3 profiles)
+@{PROC}/@{pid}/stat r,
+{% if dovecot_sieve_before | length > 0 %}
+
+# Global Sieve scripts before the personal one
+"{{ path(__dovecot_sieve_before_dir) }}/" r,
+"{{ path(__dovecot_sieve_before_dir) }}/*" r,
+{% endif %}
+{% if dovecot_sieve_after | length > 0 %}
+
+# Global Sieve scripts after the personal one
+"{{ path(__dovecot_sieve_after_dir) }}/" r,
+"{{ path(__dovecot_sieve_after_dir) }}/*" r,
+{% endif %}
+{{ mail_root() }}
+{%- if dovecot_submission_host | length == 0 %}
+
+# Sieve redirects and vacation replies through the sendmail of Postfix,
+# which hands the message to postdrop (the child profile of
+# usr.lib.dovecot.dovecot-lda for Postfix only). Postfix reads its map
+# module definitions in dynamicmaps.cf.d at start; postdrop writes to the
+# pickup socket through a path AppArmor sees as disconnected. sendmail
+# inherits the files LMTP keeps open in the mail root (index, duplicate
+# database lock, Sieve script) and needs none of them: the deny rule keeps
+# them closed as before without a file_inherit line in the audit log.
+/usr/{bin,sbin}/sendmail Cx -> sendmail,
+signal (send) set=(term, kill) peer=dovecot-lmtp//sendmail,
+
+profile sendmail flags=(attach_disconnected) {
+  include <abstractions/base>
+  include <abstractions/nameservice>
+  include <abstractions/postfix-common>
+
+  signal (receive) peer=dovecot-lmtp,
+  signal (send, receive) peer=dovecot-lmtp//sendmail,
+
+  /usr/{bin,sbin}/sendmail mr,
+  /usr/{bin,sbin}/postdrop mrix,
+  /etc/postfix/dynamicmaps.cf.d/* r,
+  /var/spool/postfix/maildrop/* rwl,
+  /var/spool/postfix/public/pickup w,
+  deny "{{ path(dovecot_mail_root) }}/**" rwkl,
+}
+{% endif %}
+{% elif __dovecot_apparmor_profile == 'usr.lib.dovecot.imap' %}
+{{ mail_root() }}
+{%- if dovecot_rspamd_learn_enabled | bool %}
+
+# Spam training: the IMAPSieve scripts and their programs, which run curl
+# in a profile of their own
+"{{ path(__dovecot_sieve_imap_dir) }}/*" r,
+"{{ path(__dovecot_sieve_pipe_dir) }}/rspamd-learn-*.sh" rCx -> rspamd-learn,
+signal (send) set=(term, kill) peer=dovecot-imap//rspamd-learn,
+
+profile rspamd-learn {
+  include <abstractions/base>
+  include <abstractions/nameservice>
+  include <abstractions/ssl_certs>
+
+  signal (receive) peer=dovecot-imap,
+
+  /usr/bin/{,ba,da}sh ix,
+  "{{ path(__dovecot_sieve_pipe_dir) }}/rspamd-learn-*.sh" r,
+  /usr/bin/curl ix,
+  "{{ path(__dovecot_rspamd_header_file) }}" r,
+{% if dovecot_rspamd_controller_ca_file | length > 0 %}
+  "{{ path(dovecot_rspamd_controller_ca_file) }}" r,
+{% if __dovecot_apparmor_real[dovecot_rspamd_controller_ca_file] != dovecot_rspamd_controller_ca_file %}
+  "{{ escape(dovecot_rspamd_controller_ca_file) }}" r,
+{% endif %}
+{% endif %}
+}
+{% endif %}
+{% elif __dovecot_apparmor_profile == 'usr.lib.dovecot.pop3' %}
+{{ mail_root() }}
+{%- elif __dovecot_apparmor_profile == 'usr.lib.dovecot.managesieve' %}
+
+# Process statistics: /proc/<pid> belongs to root after the switch to the
+# mail user, the profile has no rule for it (this rule matches every pid,
+# as in the imap and pop3 profiles)
+@{PROC}/@{pid}/stat r,
+{{ mail_root() }}
+{%- endif %}

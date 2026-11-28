@@ -1,0 +1,1107 @@
+---
+# Checks the installation, the protocols with the accounts PostfixAdmin
+# created, the Postfix interfaces without Postfix, quota, Sieve, the spam
+# training, the shared mailboxes and the failure cases of the role. The
+# protocol checks run through mailtest.py (standard library only), which
+# prints one JSON object per check.
+- name: Verify
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - vars/main.yml
+
+  vars:
+    __verify_dir: '/root/molecule-dovecot'
+    __verify_test: >-
+      {{ ansible_facts['python']['executable'] }} -I {{ __verify_dir }}/mailtest.py
+    __verify_learn_log: '/var/log/molecule-rspamd-learn.log'
+    # A second address on the loopback interface: a connection from it to the
+    # host address is not secured for Dovecot (from the host address itself,
+    # or from loopback, it would be)
+    __verify_remote_source: '192.0.2.10'
+    __verify_host: "{{ ansible_facts['default_ipv4']['address'] }}"
+    __verify_failure: >-
+      {{ ansible_failed_result.msg | default('') }}
+      {{ ansible_failed_result.results | default([]) | map(attribute='msg', default='') | join(' ') }}
+    # A host with AppArmor (molecule/shared/tasks/apparmor_host.yml) and the
+    # Dovecot profiles: Arch Linux only, Debian ships none and EL has no
+    # AppArmor, whatever is in place there
+    __verify_apparmor: >-
+      {{ __molecule_apparmor | default(false) | bool and ansible_facts['os_family'] == 'Archlinux' }}
+    __verify_apparmor_dir: '/etc/apparmor.d/local'
+    __verify_apparmor_pending: '/etc/apparmor.d/local/.dovecot.reload-pending'
+    __verify_apparmor_broken: '/etc/apparmor.d/tunables/dovecot.d/molecule-broken'
+    __verify_apparmor_log: '/root/molecule-apparmor-parser.log'
+    __verify_apparmor_profiles:
+      - 'usr.sbin.dovecot'
+      - 'usr.lib.dovecot.config'
+      - 'usr.lib.dovecot.auth'
+      - 'usr.lib.dovecot.lmtp'
+      - 'usr.lib.dovecot.imap'
+      - 'usr.lib.dovecot.pop3'
+      - 'usr.lib.dovecot.managesieve'
+    # Rules of converge (comments and empty lines left out); the database
+    # behind the MariaDB socket of the abstraction and POP3 off, so auth and
+    # pop3 get none
+    __verify_apparmor_mail:
+      - '"/var/vmail/" rw,'
+      - '"/var/vmail/**" rwkl,'
+    __verify_apparmor_tls:
+      - '"/etc/ssl/certs/molecule-dovecot.pem" r,'
+      - '"/etc/ssl/private/molecule-dovecot.key" r,'
+    __verify_apparmor_sendmail:
+      - '/usr/{bin,sbin}/sendmail Cx -> sendmail,'
+      - 'signal (send) set=(term, kill) peer=dovecot-lmtp//sendmail,'
+      - 'profile sendmail flags=(attach_disconnected) {'
+      - '  include <abstractions/base>'
+      - '  include <abstractions/nameservice>'
+      - '  include <abstractions/postfix-common>'
+      - '  signal (receive) peer=dovecot-lmtp,'
+      - '  signal (send, receive) peer=dovecot-lmtp//sendmail,'
+      - '  /usr/{bin,sbin}/sendmail mr,'
+      - '  /usr/{bin,sbin}/postdrop mrix,'
+      - '  /etc/postfix/dynamicmaps.cf.d/* r,'
+      - '  /var/spool/postfix/maildrop/* rwl,'
+      - '  /var/spool/postfix/public/pickup w,'
+      - '  deny "/var/vmail/**" rwkl,'
+      - '}'
+    # Spam training without and with dovecot_rspamd_controller_ca_file
+    # (the last two lines)
+    __verify_apparmor_learn:
+      - '"/etc/dovecot/sieve/imapsieve/*" r,'
+      - '"/usr/local/lib/dovecot/sieve-pipe/rspamd-learn-*.sh" rCx -> rspamd-learn,'
+      - 'signal (send) set=(term, kill) peer=dovecot-imap//rspamd-learn,'
+      - 'profile rspamd-learn {'
+      - '  include <abstractions/base>'
+      - '  include <abstractions/nameservice>'
+      - '  include <abstractions/ssl_certs>'
+      - '  signal (receive) peer=dovecot-imap,'
+      - '  /usr/bin/{,ba,da}sh ix,'
+      - '  "/usr/local/lib/dovecot/sieve-pipe/rspamd-learn-*.sh" r,'
+      - '  /usr/bin/curl ix,'
+      - '  "/etc/dovecot/rspamd-controller.header" r,'
+      - '}'
+    __verify_apparmor_expected:
+      usr.sbin.dovecot: '{{ __verify_apparmor_tls }}'
+      usr.lib.dovecot.config: '{{ __verify_apparmor_tls }}'
+      usr.lib.dovecot.lmtp: >-
+        {{ ['@{PROC}/@{pid}/stat r,',
+            '"/etc/dovecot/sieve/before.d/" r,', '"/etc/dovecot/sieve/before.d/*" r,',
+            '"/etc/dovecot/sieve/after.d/" r,', '"/etc/dovecot/sieve/after.d/*" r,']
+           + __verify_apparmor_mail + __verify_apparmor_sendmail }}
+      usr.lib.dovecot.imap: '{{ __verify_apparmor_mail + __verify_apparmor_learn }}'
+      usr.lib.dovecot.managesieve: "{{ ['@{PROC}/@{pid}/stat r,'] + __verify_apparmor_mail }}"
+    # Every profile with its rules of converge, none without a file
+    __verify_apparmor_converge: >-
+      {%- set ns = namespace(rules={}) -%}
+      {%- for profile in __verify_apparmor_profiles -%}
+      {%- set ns.rules = ns.rules | combine({profile: __verify_apparmor_expected.get(profile)}) -%}
+      {%- endfor -%}
+      {{ ns.rules }}
+
+  tasks:
+    - name: Verify | Create the test directory
+      ansible.builtin.file:
+        path: '{{ __verify_dir }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Verify | Deploy the protocol client
+      ansible.builtin.copy:
+        src: mailtest.py
+        dest: '{{ __verify_dir }}/mailtest.py'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Verify | Write the test messages
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: '{{ __verify_dir }}/{{ item.name }}'
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - name: 'plain.eml'
+          content: "From: sender@example.org\r\nTo: alice@example.com\r\nSubject: hello\r\n\r\nplain\r\n"
+        - name: 'spam.eml'
+          content: "From: sender@example.org\r\nTo: alice@example.com\r\nSubject: spammy\r\nX-Spam: Yes\r\n\r\nspam\r\n"
+        - name: 'archive.eml'
+          content: "From: sender@example.org\r\nTo: alice@example.com\r\nSubject: please archive-me\r\n\r\nfilter\r\n"
+        - name: 'late.eml'
+          content: "From: sender@example.org\r\nTo: alice@example.com\r\nSubject: late-filter\r\n\r\nafter\r\n"
+        - name: 'filter.sieve'
+          content: |
+            require ["fileinto"];
+            if header :contains "Subject" "archive-me" {
+              fileinto "Archive";
+            }
+      loop_control:
+        label: '{{ item.name }}'
+
+    # 1.5 MB: above the 1 MB quota of dave@example.com
+    - name: Verify | Write a message above the quota
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          { printf 'From: sender@example.org\r\nTo: dave@example.com\r\nSubject: large\r\n\r\n';
+          head -c 1500000 /dev/zero | tr '\0' 'x' | fold -w 76; } > {{ __verify_dir }}/large.eml
+        executable: /bin/bash
+        creates: '{{ __verify_dir }}/large.eml'
+
+    - name: Verify | Add the second loopback address
+      ansible.builtin.command:
+        argv: ['ip', 'address', 'replace', '{{ __verify_remote_source }}/32', 'dev', 'lo']
+      changed_when: false
+
+    #
+    # Installation
+    #
+
+    - name: Verify | Read the Dovecot version
+      ansible.builtin.command:
+        argv: ['dovecot', '--version']
+      register: __verify_version
+      changed_when: false
+
+    - name: Verify | Assert Dovecot 2.4 is installed
+      ansible.builtin.assert:
+        that:
+          - __verify_version.stdout is match('^2\.4\.')
+        fail_msg: '{{ __verify_version.stdout }}'
+
+    - name: Verify | Stat the configuration files
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+        - /etc/dovecot/dovecot.conf
+        - /etc/dovecot/dovecot-db-password.conf.ext
+        - /etc/dovecot/rspamd-controller.header
+        - /var/vmail
+      register: __verify_files
+
+    - name: Verify | Assert ownership and modes
+      ansible.builtin.assert:
+        that:
+          - __verify_files.results[0].stat.mode == '0644'
+          - __verify_files.results[1].stat.pw_name == 'root'
+          - __verify_files.results[1].stat.gr_name == 'dovecot'
+          - __verify_files.results[1].stat.mode == '0640'
+          - __verify_files.results[2].stat.gr_name == 'vmail'
+          - __verify_files.results[2].stat.mode == '0640'
+          - __verify_files.results[3].stat.pw_name == 'vmail'
+          - __verify_files.results[3].stat.uid == 5000
+          - __verify_files.results[3].stat.mode == '0700'
+
+    - name: Verify | Read dovecot.conf
+      ansible.builtin.slurp:
+        src: /etc/dovecot/dovecot.conf
+      register: __verify_config
+
+    - name: Verify | Assert the role's configuration without the conf.d files
+      ansible.builtin.assert:
+        that:
+          - __verify_conf is search('(?m)^dovecot_config_version = 2\.4\.0$')
+          - __verify_conf is search('(?m)^dovecot_storage_version = 2\.4\.0$')
+          # The header comment names conf.d; only an include would load it
+          - __verify_conf is not search('(?m)^\s*!include(_try)?\s+\S*conf\.d')
+          - __verify_conf is search('(?m)^auth_allow_cleartext = no$')
+          - __verify_conf is search('(?m)^sieve_redirect_envelope_from = orig_recipient$')
+          - __verify_conf is not search('dovecot-Reader-42')
+      vars:
+        __verify_conf: '{{ __verify_config.content | b64decode }}'
+
+    - name: Verify | Read the listening TCP ports
+      ansible.builtin.command:
+        argv: ['ss', '-Hltn']
+      register: __verify_ports
+      changed_when: false
+
+    # POP3 is off and its package not installed: neither 110 nor 995
+    - name: Verify | Assert only the enabled protocols listen
+      ansible.builtin.assert:
+        that:
+          - __verify_listen | select('match', '.*:993$') | list | length > 0
+          - __verify_listen | select('match', '.*:143$') | list | length > 0
+          - __verify_listen | select('match', '.*:4190$') | list | length > 0
+          - "'127.0.0.1:24' in __verify_listen"
+          - "'127.0.0.1:12345' in __verify_listen"
+          - "'127.0.0.1:12340' in __verify_listen"
+          - __verify_listen | select('match', '.*:(995|110)$') | list | length == 0
+        fail_msg: '{{ __verify_listen }}'
+      vars:
+        __verify_listen: "{{ __verify_ports.stdout_lines | map('split') | map(attribute=3) | list }}"
+
+    #
+    # Package Update (side_effect.yml)
+    #
+
+    - name: Verify | Read the core package versions around the rollback
+      ansible.builtin.slurp:
+        src: /root/dovecot-update-versions
+      register: __verify_update_versions
+
+    - name: Verify | Stat the version record
+      ansible.builtin.stat:
+        path: /root/dovecot-update-versions
+      register: __verify_update_stat
+
+    - name: Verify | Gather package facts after the update
+      ansible.builtin.package_facts:
+
+    - name: Verify | Set update version facts
+      ansible.builtin.set_fact:
+        __verify_version_latest: '{{ (__verify_update_versions.content | b64decode).splitlines()[0] | trim }}'
+        __verify_version_rolled_back: '{{ (__verify_update_versions.content | b64decode).splitlines()[1] | trim }}'
+        __verify_version_now: >-
+          {{ ((__verify_pkg.epoch ~ ':')
+              if ((__verify_pkg.epoch | default('', true) | string) not in ['', 'None', '0']) else '')
+             ~ (__verify_pkg.version | default(''))
+             ~ (('-' ~ __verify_pkg.release) if (__verify_pkg.release | default('', true)) else '') }}
+      vars:
+        __verify_core: "{{ {'Debian': 'dovecot-core'}.get(ansible_facts['os_family'], 'dovecot') }}"
+        __verify_pkg: "{{ ansible_facts['packages'][__verify_core] | default([{}]) | first }}"
+
+    - name: Verify | Assert the update restored the latest build
+      ansible.builtin.assert:
+        that:
+          - __verify_version_now == __verify_version_latest
+        fail_msg: >-
+          The core package is at {{ __verify_version_now }} after the update,
+          expected {{ __verify_version_latest }} (rolled back to {{ __verify_version_rolled_back }})
+        success_msg: 'Updated from {{ __verify_version_rolled_back }} to {{ __verify_version_now }}'
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    - name: Verify | Read the main PID of the running service
+      ansible.builtin.command:
+        argv: ['systemctl', 'show', '--property=MainPID', '--value', 'dovecot']
+      register: __verify_main_pid
+      changed_when: false
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    # readlink reports a replaced binary as "<path> (deleted)"
+    - name: Verify | Read the binary of the running service
+      ansible.builtin.command:
+        argv: ['readlink', '/proc/{{ __verify_main_pid.stdout | trim }}/exe']
+      register: __verify_master_exe
+      changed_when: false
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    - name: Verify | Assert the service runs the updated binary
+      ansible.builtin.assert:
+        that:
+          - __verify_main_pid.stdout | trim not in ['', '0']
+          - __verify_master_exe.stdout is not search(' \(deleted\)$')
+        fail_msg: 'Dovecot still runs the replaced binary: {{ __verify_master_exe.stdout }}'
+        success_msg: 'Dovecot runs the updated binary'
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    # side_effect blocks the package restart on Debian, so the role has to
+    # restart Dovecot there, exactly once
+    - name: Verify | Read the service starts since the update
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - '--unit=dovecot'
+          - '--since=@{{ __verify_update_stat.stat.mtime | int }}'
+          - '--output=cat'
+          - '--no-pager'
+      register: __verify_update_journal
+      changed_when: false
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    - name: Verify | Assert the update restarted the service exactly once
+      ansible.builtin.assert:
+        that:
+          - __verify_update_starts | length == 1
+        fail_msg: >-
+          Dovecot started {{ __verify_update_starts | length }} times after the
+          package update, expected once: {{ __verify_update_starts }}
+        success_msg: 'Dovecot started once after the package update'
+      vars:
+        __verify_update_starts: >-
+          {{ __verify_update_journal.stdout_lines | select('match', '^Started ') | list }}
+      when: __verify_version_rolled_back != __verify_version_latest
+
+    #
+    # Authentication
+    #
+
+    # The auth server never returns the password of a passdb lookup
+    # (doveadm auth lookup prints the extra fields only), so the hash is read
+    # from the database as the reader Dovecot connects as
+    - name: Verify | Read the stored password of alice as the Dovecot reader
+      ansible.builtin.command:
+        argv: >-
+          {{ (dovecot_db_type == 'postgresql')
+             | ternary(['psql', '--host', dovecot_db_host, '--username', 'dovecot', '--dbname', 'postfixadmin',
+                        '--no-psqlrc', '--tuples-only', '--no-align', '--command', __verify_password_query],
+                       ['mariadb', '--host', dovecot_db_host, '--user', 'dovecot', '--batch',
+                        '--skip-column-names', '--execute', __verify_password_query, 'postfixadmin']) }}
+      environment:
+        PGPASSWORD: '{{ dovecot_db_password }}'
+        MYSQL_PWD: '{{ dovecot_db_password }}'
+      vars:
+        __verify_password_query: "SELECT password FROM mailbox WHERE username = 'alice@example.com'"
+      register: __verify_stored_password
+      changed_when: false
+
+    - name: Verify | Assert PostfixAdmin stored an ARGON2ID hash with prefix
+      ansible.builtin.assert:
+        that:
+          - __verify_stored_password.stdout is match('\{ARGON2ID\}\$argon2id\$')
+        fail_msg: '{{ __verify_stored_password.stdout }}'
+
+    - name: Verify | Log in over IMAP with TLS
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_test.split() + ['imap', '--user', item.user, '--password', item.password] }}
+      loop:
+        - {user: 'alice@example.com', password: 'alice-Secret-42'}
+        - {user: 'alice@example.com', password: 'wrong-Secret-42'}
+        - {user: 'inactive@example.com', password: 'inactive-Secret-42'}
+      loop_control:
+        label: '{{ item.user }}'
+      register: __verify_imap_login
+      changed_when: false
+
+    - name: Verify | Assert the login, the wrong password and the inactive mailbox
+      ansible.builtin.assert:
+        that:
+          - (__verify_imap_login.results[0].stdout | from_json).login
+          - not (__verify_imap_login.results[1].stdout | from_json).login
+          - not (__verify_imap_login.results[2].stdout | from_json).login
+        fail_msg: "{{ __verify_imap_login.results | map(attribute='stdout') | list }}"
+
+    # The login process logs a failed login with user and remote address in
+    # the journal of the unit (auth_verbose off); it writes the line when the
+    # connection closes, so the read is repeated briefly
+    - name: Verify | Read the failed login of alice from the journal
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - '--unit=dovecot'
+          - '--since=@{{ ansible_facts["date_time"]["epoch"] }}'
+          - '--output=cat'
+          - '--no-pager'
+      register: __verify_auth_journal
+      changed_when: false
+      until: __verify_auth_journal.stdout_lines | select('match', __verify_auth_failed_line) | list | length > 0
+      retries: 5
+      delay: 1
+      vars:
+        __verify_auth_failed_line: >-
+          ^imap-login: Login aborted: .*\(auth failed, [0-9]+ attempts .*user=<alice@example\.com>, .*rip=[^,]+,
+
+    - name: Verify | Assert the failed login is logged with user and remote address
+      ansible.builtin.assert:
+        that:
+          - __verify_auth_journal.stdout_lines | select('match', __verify_auth_failed_line) | list | length > 0
+        fail_msg: '{{ __verify_auth_journal.stdout_lines[-10:] }}'
+        success_msg: 'The failed login is in the journal of the unit'
+      vars:
+        __verify_auth_failed_line: >-
+          ^imap-login: Login aborted: .*\(auth failed, [0-9]+ attempts .*user=<alice@example\.com>, .*rip=[^,]+,
+
+    # A successful login is logged by default with user, remote and local
+    # address and TLS
+    - name: Verify | Read the successful login of alice from the journal
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - '--unit=dovecot'
+          - '--since=@{{ ansible_facts["date_time"]["epoch"] }}'
+          - '--output=cat'
+          - '--no-pager'
+      register: __verify_login_journal
+      changed_when: false
+      until: __verify_login_journal.stdout_lines | select('match', __verify_login_line) | list | length > 0
+      retries: 5
+      delay: 1
+      vars:
+        __verify_login_line: >-
+          ^imap-login: Logged in: user=<alice@example\.com>, method=PLAIN, rip=[^,]+, lip=[^,]+, .*\bTLS\b
+
+    - name: Verify | Assert the successful login is logged with user and remote address
+      ansible.builtin.assert:
+        that:
+          - __verify_login_journal.stdout_lines | select('match', __verify_login_line) | list | length > 0
+        fail_msg: '{{ __verify_login_journal.stdout_lines[-10:] }}'
+        success_msg: 'The successful login is in the journal of the unit'
+      vars:
+        __verify_login_line: >-
+          ^imap-login: Logged in: user=<alice@example\.com>, method=PLAIN, rip=[^,]+, lip=[^,]+, .*\bTLS\b
+
+    - name: Verify | Log in without STARTTLS on 143 and 4190 from another address
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_test.split() + [item, '--host', __verify_host, '--source', __verify_remote_source,
+             '--user', 'alice@example.com', '--password', 'alice-Secret-42'] }}
+      loop:
+        - imap-plain
+        - managesieve
+      register: __verify_plain
+      changed_when: false
+
+    - name: Verify | Assert the logins before STARTTLS are refused
+      ansible.builtin.assert:
+        that:
+          - (__verify_plain.results[0].stdout | from_json).connected
+          - not (__verify_plain.results[0].stdout | from_json).login
+          - "'LOGINDISABLED' in (__verify_plain.results[0].stdout | from_json).capabilities"
+          - not (__verify_plain.results[1].stdout | from_json).plain_login
+          - (__verify_plain.results[1].stdout | from_json).tls_login
+        fail_msg: "{{ __verify_plain.results | map(attribute='stdout') | list }}"
+
+    - name: Verify | Handshake with TLS versions
+      ansible.builtin.command:
+        argv: '{{ __verify_test.split() + ["tls", "--version", item] }}'
+      loop:
+        - TLSv1_1
+        - TLSv1_2
+      register: __verify_tls
+      changed_when: false
+
+    # The server must refuse TLSv1.1 with a protocol_version alert. Where the
+    # client cannot even offer TLSv1.1 (the system crypto policy of EL
+    # forbids it), the handshake proves nothing; the rendered
+    # ssl_min_protocol is checked instead.
+    - name: Verify | Assert TLSv1.1 is refused and TLSv1.2 accepted
+      ansible.builtin.assert:
+        that:
+          - not __verify_tls11.handshake
+          - __verify_tls11.server_refused or (__verify_tls11.client_unsupported and __verify_min_protocol_set | bool)
+          - (__verify_tls.results[1].stdout | from_json).handshake
+        fail_msg: "{{ __verify_tls.results | map(attribute='stdout') | list }}"
+      vars:
+        __verify_tls11: '{{ __verify_tls.results[0].stdout | from_json }}'
+        __verify_min_protocol_set: >-
+          {{ (__verify_config.content | b64decode) is search('(?m)^ssl_min_protocol = TLSv1\.[23]$') }}
+
+    - name: Verify | Read the effective TLS 1.2 cipher list
+      ansible.builtin.command:
+        argv: [doveconf, '-h', ssl_cipher_list]
+      register: __verify_cipher_list
+      changed_when: false
+
+    # The test certificate has an RSA key. The client offers only the CBC
+    # suites (HMAC-SHA1, -SHA256 and -SHA384) in the first handshake and one
+    # AES-GCM suite in the second.
+    - name: Verify | Handshake on 993 with CBC and AEAD suites
+      ansible.builtin.command:
+        argv: '{{ __verify_test.split() + ["tls", "--version", "TLSv1_2", "--cipher", item] }}'
+      loop:
+        - 'ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384'
+        - 'ECDHE-RSA-AES128-GCM-SHA256'
+      register: __verify_ciphers
+      changed_when: false
+
+    - name: Verify | Assert only the AEAD suites of dovecot_tls_cipher_list are offered
+      ansible.builtin.assert:
+        that:
+          - __verify_cipher_list.stdout == __verify_aead_list
+          - not __verify_cbc.handshake
+          - __verify_cbc.cipher_refused
+          - not __verify_cbc.client_unsupported
+          - __verify_aead.handshake
+          - __verify_aead.cipher == 'ECDHE-RSA-AES128-GCM-SHA256'
+        fail_msg: >-
+          {{ {'ssl_cipher_list': __verify_cipher_list.stdout, 'cbc': __verify_cbc, 'aead': __verify_aead} | to_json }}
+      vars:
+        __verify_cbc: '{{ __verify_ciphers.results[0].stdout | from_json }}'
+        __verify_aead: '{{ __verify_ciphers.results[1].stdout | from_json }}'
+        # Role default
+        __verify_aead_list: >-
+          {{ ['ECDHE-ECDSA-AES128-GCM-SHA256', 'ECDHE-RSA-AES128-GCM-SHA256', 'ECDHE-ECDSA-AES256-GCM-SHA384',
+              'ECDHE-RSA-AES256-GCM-SHA384', 'ECDHE-ECDSA-CHACHA20-POLY1305', 'ECDHE-RSA-CHACHA20-POLY1305',
+              'DHE-RSA-AES128-GCM-SHA256', 'DHE-RSA-AES256-GCM-SHA384', 'DHE-RSA-CHACHA20-POLY1305'] | join(':') }}
+
+    # What Postfix speaks to the auth listeners
+    - name: Verify | Authenticate over SASL through the socket and TCP
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_test.split() + ['sasl', '--target', item.target, '--user', 'alice@example.com',
+             '--password', item.password] }}
+      loop:
+        - {target: '/var/spool/postfix/private/auth', password: 'alice-Secret-42'}
+        - {target: '127.0.0.1:12345', password: 'alice-Secret-42'}
+        - {target: '127.0.0.1:12345', password: 'wrong-Secret-42'}
+      loop_control:
+        label: '{{ item.target }}'
+      register: __verify_sasl
+      changed_when: false
+
+    - name: Verify | Assert SASL accepts the password and refuses a wrong one
+      ansible.builtin.assert:
+        that:
+          - (__verify_sasl.results[0].stdout | from_json).ok
+          - (__verify_sasl.results[1].stdout | from_json).ok
+          - not (__verify_sasl.results[2].stdout | from_json).ok
+        fail_msg: "{{ __verify_sasl.results | map(attribute='stdout') | list }}"
+
+    - name: Verify | Stat the sockets for Postfix
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+        - /var/spool/postfix/private/dovecot-lmtp
+        - /var/spool/postfix/private/auth
+      register: __verify_sockets
+
+    - name: Verify | Assert owner and mode of the sockets
+      ansible.builtin.assert:
+        that:
+          - __verify_sockets.results[0].stat.issock
+          - __verify_sockets.results[0].stat.pw_name == 'postfix'
+          - __verify_sockets.results[0].stat.gr_name == 'postfix'
+          - __verify_sockets.results[0].stat.mode == '0600'
+          - __verify_sockets.results[1].stat.issock
+          - __verify_sockets.results[1].stat.pw_name == 'postfix'
+          - __verify_sockets.results[1].stat.gr_name == 'postfix'
+          - __verify_sockets.results[1].stat.mode == '0660'
+
+    #
+    # LMTP, Sieve and Quota
+    #
+
+    - name: Verify | Upload a personal Sieve script over ManageSieve with STARTTLS
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_test.split() + ['managesieve', '--host', __verify_host, '--source', __verify_remote_source,
+             '--user', 'alice@example.com', '--password', 'alice-Secret-42',
+             '--script', __verify_dir ~ '/filter.sieve', '--name', 'filter'] }}
+      register: __verify_managesieve
+      changed_when: false
+
+    - name: Verify | Assert the script is stored and active
+      ansible.builtin.assert:
+        that:
+          - (__verify_managesieve.stdout | from_json).putscript is match('OK')
+          - (__verify_managesieve.stdout | from_json).setactive is match('OK')
+        fail_msg: '{{ __verify_managesieve.stdout }}'
+
+    - name: Verify | Deliver over LMTP
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_test.split() + ['lmtp', '--target', item.target, '--rcpt', item.rcpt,
+             '--message', __verify_dir ~ '/' ~ item.message] }}
+      loop:
+        - {target: '/var/spool/postfix/private/dovecot-lmtp', rcpt: 'alice@example.com', message: 'plain.eml'}
+        - {target: '127.0.0.1:24', rcpt: 'alice@example.com', message: 'spam.eml'}
+        - {target: '127.0.0.1:24', rcpt: 'alice@example.com', message: 'archive.eml'}
+        - {target: '127.0.0.1:24', rcpt: 'nobody@example.com', message: 'plain.eml'}
+        - {target: '127.0.0.1:24', rcpt: 'alice@example.com', message: 'late.eml'}
+        - {target: '127.0.0.1:24', rcpt: 'dave@example.com', message: 'large.eml'}
+      loop_control:
+        label: '{{ item.target }} {{ item.rcpt }} {{ item.message }}'
+      register: __verify_lmtp
+      changed_when: false
+
+    - name: Verify | Assert the deliveries, the unknown user and the quota
+      ansible.builtin.assert:
+        that:
+          - (__verify_lmtp.results[0].stdout | from_json).delivered
+          - (__verify_lmtp.results[1].stdout | from_json).delivered
+          - (__verify_lmtp.results[2].stdout | from_json).delivered
+          - not (__verify_lmtp.results[3].stdout | from_json).delivered
+          - (__verify_lmtp.results[4].stdout | from_json).delivered
+          - not (__verify_lmtp.results[5].stdout | from_json).delivered
+          - (__verify_lmtp.results[5].stdout | from_json | to_json) is search('[Qq]uota')
+        fail_msg: "{{ __verify_lmtp.results | map(attribute='stdout') | list }}"
+
+    - name: Verify | List the Maildir of alice
+      ansible.builtin.find:
+        paths:
+          - /var/vmail/example.com/alice/Maildir/new
+          - /var/vmail/example.com/alice/Maildir/cur
+      register: __verify_maildir
+
+    # plain.eml in INBOX; spam.eml went to Junk (global script before),
+    # archive.eml to Archive (personal script), late.eml to After (global
+    # script after)
+    - name: Verify | Assert the Maildir layout of the PostfixAdmin maildir path
+      ansible.builtin.assert:
+        that:
+          - __verify_maildir.files | length == 1
+          - __verify_maildir.files[0].pw_name == 'vmail'
+
+    - name: Verify | Count the folders of alice
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_test.split() + ['imap', '--user', 'alice@example.com', '--password', 'alice-Secret-42',
+             '--action', 'count=INBOX', '--action', 'count=Junk', '--action', 'count=Archive',
+             '--action', 'count=After', '--action', 'lsub', '--action', 'getquota'] }}
+      register: __verify_folders
+      changed_when: false
+
+    - name: Verify | Assert the global and the personal Sieve script filed the mail
+      ansible.builtin.assert:
+        that:
+          - __verify_result['count:INBOX'] == 1
+          - __verify_result['count:Junk'] == 1
+          - __verify_result['count:Archive'] == 1
+          - __verify_result['count:After'] == 1
+          # auto = subscribe
+          - __verify_result.lsub is superset(['Drafts', 'Sent', 'Junk', 'Trash', 'Archive'])
+          - __verify_result.list | select('search', 'Junk. "/" Junk$') | list | length == 1
+          - __verify_result.list | select('search', 'Drafts. "/" Drafts$') | list | length == 1
+        fail_msg: '{{ __verify_result | to_json }}'
+      vars:
+        __verify_result: '{{ __verify_folders.stdout | from_json }}'
+
+    - name: Verify | Ask the quota-status service
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_test.split() + ['policy', '--target', '127.0.0.1:12340', '--rcpt', item.rcpt,
+             '--size', item.size | string] }}
+      loop:
+        - {rcpt: 'dave@example.com', size: 2000000}
+        - {rcpt: 'dave@example.com', size: 1000}
+        - {rcpt: 'unknown@example.com', size: 1000}
+      loop_control:
+        label: '{{ item.rcpt }} {{ item.size }}'
+      register: __verify_policy
+      changed_when: false
+
+    - name: Verify | Assert the full mailbox is rejected and the others pass on
+      ansible.builtin.assert:
+        that:
+          - (__verify_policy.results[0].stdout | from_json).action is match('552 ')
+          - (__verify_policy.results[1].stdout | from_json).action == 'DUNNO'
+          - (__verify_policy.results[2].stdout | from_json).action == 'DUNNO'
+        fail_msg: "{{ __verify_policy.results | map(attribute='stdout') | list }}"
+
+    #
+    # Spam Training
+    #
+
+    - name: Verify | Move mail into and out of Junk
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_test.split() + ['imap', '--user', 'alice@example.com', '--password', 'alice-Secret-42',
+             '--action', 'move=INBOX#hello:Junk', '--action', 'move=Junk#spammy:INBOX',
+             '--action', 'move=Junk#hello:Trash'] }}
+      register: __verify_moves
+      changed_when: false
+
+    - name: Verify | Read the requests of the rspamd stand-in
+      ansible.builtin.command:
+        argv: ['cat', '{{ __verify_learn_log }}']
+      register: __verify_learned
+      changed_when: false
+
+    # hello into Junk: spam; spammy out of Junk: ham; hello from Junk into
+    # Trash: nothing
+    - name: Verify | Assert spam and ham were reported with the password
+      ansible.builtin.assert:
+        that:
+          - __verify_requests | length == 2
+          - __verify_requests[0].path == '/learnspam'
+          - __verify_requests[0].subject == 'hello'
+          - __verify_requests[1].path == '/learnham'
+          - __verify_requests[1].subject == 'spammy'
+          - __verify_requests | map(attribute='password') | unique | list == ['learn-Secret-42']
+        fail_msg: '{{ __verify_moves.stdout }} {{ __verify_learned.stdout }}'
+      vars:
+        __verify_requests: "{{ __verify_learned.stdout_lines | map('from_json') | list }}"
+
+    #
+    # Shared Mailboxes
+    #
+
+    - name: Verify | Use the shared mailbox as alice
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_test.split() + ['imap', '--user', 'alice@example.com', '--password', 'alice-Secret-42',
+             '--action', 'myrights=shared/support@example.com',
+             '--action', 'setacl=shared/support@example.com:bob@example.com:lr',
+             '--action', 'setacl=Archive:bob@example.com:lr'] }}
+      register: __verify_shared_alice
+      changed_when: false
+
+    - name: Verify | Use the shares as bob and support
+      ansible.builtin.command:
+        argv: '{{ __verify_test.split() + ["imap"] + item }}'
+      loop:
+        - ['--user', 'bob@example.com', '--password', 'bob-Secret-42',
+           '--action', 'count=shared/alice@example.com/Archive', '--action', 'count=shared/support@example.com/Archive']
+        - ['--user', 'support@example.com', '--password', 'support-Secret-42',
+           '--action', 'myrights=INBOX', '--action', 'setacl=INBOX:bob@example.com:lr']
+        - ['--user', 'dave@example.com', '--password', 'dave-Secret-42']
+      loop_control:
+        label: '{{ item[1] }}'
+      register: __verify_shared_others
+      changed_when: false
+
+    - name: Verify | Assert the shares and their locks
+      ansible.builtin.assert:
+        that:
+          # listed for the granted user, without admin, SETACL refused
+          - __verify_alice.list | select('search', '"/" shared/support@example.com$') | list | length == 1
+          - "'a' not in __verify_alice['myrights:shared/support@example.com']"
+          - "'r' in __verify_alice['myrights:shared/support@example.com']"
+          - __verify_alice['setacl:shared/support@example.com:bob@example.com'] is match('NO')
+          # a folder alice shares herself, and the Archive of the initial entry
+          - __verify_alice['setacl:Archive:bob@example.com'] == 'OK'
+          - __verify_bob['count:shared/alice@example.com/Archive'] == 1
+          - __verify_bob['count:shared/support@example.com/Archive'] == 0
+          # the owner without admin (owner_admin: false)
+          - "'a' not in __verify_support['myrights:INBOX']"
+          - __verify_support['setacl:INBOX:bob@example.com'] is match('NO')
+          # absent entry: nothing shared with dave
+          - __verify_dave.list | select('search', 'shared') | list | length == 0
+        fail_msg: >-
+          {{ __verify_alice }} {{ __verify_bob }} {{ __verify_support }} {{ __verify_dave }}
+      vars:
+        __verify_alice: '{{ __verify_shared_alice.stdout | from_json }}'
+        __verify_bob: '{{ __verify_shared_others.results[0].stdout | from_json }}'
+        __verify_support: '{{ __verify_shared_others.results[1].stdout | from_json }}'
+        __verify_dave: '{{ __verify_shared_others.results[2].stdout | from_json }}'
+
+    - name: Verify | Read the shared mailbox map
+      ansible.builtin.slurp:
+        src: /var/vmail/shared-mailboxes.db
+      register: __verify_shared_map
+
+    - name: Verify | Assert doveadm acl filled the shared mailbox map
+      ansible.builtin.assert:
+        that:
+          - __verify_map is search('shared/shared-boxes/user/alice@example.com/support@example.com')
+          - __verify_map is search('shared/shared-boxes/user/bob@example.com/support@example.com')
+          - __verify_map is search('shared/shared-boxes/user/bob@example.com/alice@example.com')
+        fail_msg: '{{ __verify_map }}'
+      vars:
+        __verify_map: '{{ __verify_shared_map.content | b64decode }}'
+
+    #
+    # Shared Mailboxes: Account Modes
+    #
+    # A second run with changed entries: the managed grant of alice is
+    # removed (state: absent), the initial entry of bob gets other rights
+    # (no change expected), a disabled entry is added (nothing applied) and
+    # owner_admin: false is dropped (the owner entry the role wrote goes, the
+    # owner gets the default rights back). The share alice set up herself
+    # through SETACL stays. A repeat run changes nothing. Both runs also set
+    # dovecot_tls_cipher_list to '' (the Dovecot default).
+    #
+
+    - name: Verify | Run the role with changed shared mailbox entries  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        dovecot_tls_cipher_list: ''
+        dovecot_shared_mailboxes: &verify_changed_shares
+          - owner: 'support@example.com'
+            user: 'alice@example.com'
+            state: 'absent'
+          - owner: 'support@example.com'
+            folder: 'Archive'
+            user: 'bob@example.com'
+            rights: 'lrws'
+            mode: 'initial'
+          - owner: 'support@example.com'
+            user: 'dave@example.com'
+            rights: 'lr'
+            mode: 'disabled'
+
+    - name: Verify | Record the ACL changes of the second run
+      ansible.builtin.set_fact:
+        __verify_shared_second: >-
+          {{ (__dovecot_shared_grant.results | default([]) | selectattr('changed') | map(attribute='item') | list)
+             + (__dovecot_shared_remove.results | default([]) | selectattr('changed') | map(attribute='item') | list) }}
+
+    - name: Verify | Read the ACLs after the second run
+      ansible.builtin.command:
+        argv: ['doveadm', '-f', 'json', 'acl', 'get', '-u', '{{ item.owner }}', '{{ item.folder }}']
+      loop:
+        - {owner: 'support@example.com', folder: 'INBOX'}
+        - {owner: 'support@example.com', folder: 'Archive'}
+        - {owner: 'alice@example.com', folder: 'Archive'}
+      loop_control:
+        label: '{{ item.owner }} {{ item.folder }}'
+      register: __verify_acls
+      changed_when: false
+
+    - name: Verify | Assert the account modes of the shared mailboxes
+      ansible.builtin.assert:
+        that:
+          # (a) absent: the grant of alice is gone; (c) disabled: dave got nothing
+          - "'user=alice@example.com' not in __verify_inbox"
+          - "'user=dave@example.com' not in __verify_inbox"
+          # (d) owner_admin dropped: the owner entry of the role is removed
+          - "'owner' not in __verify_inbox"
+          # (b) initial: the existing rights of bob stay 'lr'
+          - __verify_archive['user=bob@example.com'] == 'lookup read'
+          # (e) the share alice set up through SETACL stays
+          - "'user=bob@example.com' in __verify_alice_archive"
+          # the second run changed exactly the absent grant and the owner entry
+          - __verify_shared_second | map(attribute='id') | sort == ['owner', 'user=alice@example.com']
+        fail_msg: >-
+          {{ __verify_inbox }} {{ __verify_archive }} {{ __verify_alice_archive }} {{ __verify_shared_second }}
+      vars:
+        __verify_acl_maps: >-
+          {{ __verify_acls.results | map(attribute='stdout') | map('from_json')
+             | map('items2dict', key_name='id', value_name='rights') | list }}
+        __verify_inbox: '{{ __verify_acl_maps[0] }}'
+        __verify_archive: '{{ __verify_acl_maps[1] }}'
+        __verify_alice_archive: '{{ __verify_acl_maps[2] }}'
+
+    - name: Verify | Repeat the run with the changed entries  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        dovecot_tls_cipher_list: ''
+        dovecot_shared_mailboxes: *verify_changed_shares
+
+    - name: Verify | Assert the repeat run changed no ACL
+      ansible.builtin.assert:
+        that:
+          - __dovecot_shared_grant.results | default([]) | selectattr('changed') | list | length == 0
+          - __dovecot_shared_remove.results | default([]) | selectattr('changed') | list | length == 0
+          - __dovecot_shared_create.results | default([]) | selectattr('changed') | list | length == 0
+          - not (__dovecot_config_changed | bool)
+
+    - name: Verify | Read the cipher list without dovecot_tls_cipher_list
+      ansible.builtin.command:
+        argv: [doveconf, '-h', ssl_cipher_list]
+      register: __verify_cipher_default
+      changed_when: false
+
+    - name: Verify | Read dovecot.conf without dovecot_tls_cipher_list
+      ansible.builtin.slurp:
+        src: /etc/dovecot/dovecot.conf
+      register: __verify_config_default
+
+    # '' leaves the line out: the built-in default of Dovecot applies
+    - name: Verify | Assert the Dovecot default cipher list
+      ansible.builtin.assert:
+        that:
+          - (__verify_config_default.content | b64decode) is not search('(?m)^ssl_cipher_list =')
+          - __verify_cipher_default.stdout is match('ALL:')
+        fail_msg: '{{ __verify_cipher_default.stdout }}'
+
+    - name: Verify | Run the role with the converge entries again  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+
+    #
+    # SELinux (RedHat with SELinux enabled; the containers run without)
+    #
+
+    - name: Verify | Read the local SELinux port labels
+      ansible.builtin.command:
+        argv: ['semanage', 'port', '--list', '--locallist']
+      register: __verify_seports
+      changed_when: false
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    - name: Verify | Read the SELinux modules
+      ansible.builtin.command:
+        argv: ['semodule', '--list-modules']
+      register: __verify_semodules
+      changed_when: false
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    - name: Verify | Read the SELinux label of the mail root
+      ansible.builtin.command:
+        argv: ['ls', '-dZ', '/var/vmail', '/var/vmail/shared-mailboxes.db', '/var/vmail/example.com/alice/Maildir']
+      register: __verify_mail_label
+      changed_when: false
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    - name: Verify | Assert the mail root is labeled mail_spool_t
+      ansible.builtin.assert:
+        that:
+          - __verify_mail_label.stdout_lines | select('search', ':mail_spool_t:') | list | length == 3
+        fail_msg: '{{ __verify_mail_label.stdout_lines }}'
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    - name: Verify | Assert the listener ports are labeled
+      ansible.builtin.assert:
+        that:
+          - __verify_seports.stdout is search('mail_port_t\s+tcp\s+.*12340')
+          - __verify_seports.stdout is search('mail_port_t\s+tcp\s+.*12345')
+          - (__verify_semodules.stdout_lines | select('match', '^dovecot_ansible') | list | length > 0)
+            == (dovecot_db_type == 'postgresql')
+        fail_msg: '{{ __verify_seports.stdout }}'
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+    #
+    # Failure Cases
+    #
+    # dovecot.conf is validated before it replaces the active one: a broken
+    # setting fails the run, the file and the running service stay as they
+    # are.
+    #
+
+    - name: Verify | Stat dovecot.conf before the broken setting
+      ansible.builtin.stat:
+        path: /etc/dovecot/dovecot.conf
+        checksum_algorithm: sha256
+      register: __verify_config_before
+
+    - name: Verify | Read the main PID before the broken setting
+      ansible.builtin.command:
+        argv: ['systemctl', 'show', '--property=MainPID', '--value', 'dovecot']
+      register: __verify_pid_before
+      changed_when: false
+
+    - name: Verify | Run the role with a broken dovecot_extra_config
+      block:
+        - name: Verify | Include dovecot role  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            dovecot_extra_config: |
+              no_such_setting = 1
+
+        - name: Verify | Fail when the setting was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a broken dovecot_extra_config'
+      rescue:
+        - name: Verify | Assert doveconf rejected the setting
+          ansible.builtin.assert:
+            that:
+              - (ansible_failed_result | to_json) is search('no_such_setting')
+            fail_msg: '{{ ansible_failed_result | to_json }}'
+
+    - name: Verify | Stat dovecot.conf after the broken setting
+      ansible.builtin.stat:
+        path: /etc/dovecot/dovecot.conf
+        checksum_algorithm: sha256
+      register: __verify_config_after
+
+    - name: Verify | Read the main PID after the broken setting
+      ansible.builtin.command:
+        argv: ['systemctl', 'show', '--property=MainPID', '--value', 'dovecot']
+      register: __verify_pid_after
+      changed_when: false
+
+    - name: Verify | Assert dovecot.conf and the running service are untouched
+      ansible.builtin.assert:
+        that:
+          - __verify_config_after.stat.checksum == __verify_config_before.stat.checksum
+          - __verify_pid_after.stdout == __verify_pid_before.stdout
+          - __verify_pid_after.stdout != '0'
+
+    # Without the Postfix queue directory the role fails before any change
+    - name: Verify | Move the Postfix queue directory away
+      ansible.builtin.command:
+        argv: ['mv', '/var/spool/postfix/private', '/var/spool/postfix/private.molecule']
+      changed_when: true
+
+    - name: Verify | Run the role without the Postfix queue directory
+      block:
+        - name: Verify | Include dovecot role  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+
+        - name: Verify | Fail when the role ran without Postfix
+          ansible.builtin.fail:
+            msg: 'The role ran with dovecot_postfix_local and no Postfix queue directory'
+      rescue:
+        - name: Verify | Assert the missing Postfix was reported
+          ansible.builtin.assert:
+            that:
+              - __verify_failure is search('Postfix is not installed')
+            fail_msg: '{{ __verify_failure }}'
+      always:
+        - name: Verify | Restore the Postfix queue directory
+          ansible.builtin.command:
+            argv: ['mv', '/var/spool/postfix/private.molecule', '/var/spool/postfix/private']
+          changed_when: true
+
+    - name: Verify | Run the role with a wildcard TCP listener
+      block:
+        - name: Verify | Include dovecot role  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            dovecot_auth_listen: '0.0.0.0:12345'
+
+        - name: Verify | Fail when the wildcard was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted a wildcard address for the auth listener'
+      rescue:
+        - name: Verify | Assert the wildcard was reported
+          ansible.builtin.assert:
+            that:
+              - __verify_failure is search('dovecot_auth_listen needs a specific address')
+            fail_msg: '{{ __verify_failure }}'
+
+    - name: Verify | Run the role with a config version above the installed release
+      block:
+        - name: Verify | Include dovecot role  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            dovecot_config_version: '2.4.99'
+
+        - name: Verify | Fail when the version was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted dovecot_config_version above the installed release'
+      rescue:
+        - name: Verify | Assert the version was reported
+          ansible.builtin.assert:
+            that:
+              - __verify_failure is search('dovecot_config_version 2.4.99 is above the installed release')
+            fail_msg: '{{ __verify_failure }}'
+
+    - name: Verify | Run the role with a remote rspamd controller over http
+      block:
+        - name: Verify | Include dovecot role  # noqa: role-name[path]
+          ansible.builtin.include_role:
+            name: '{{ playbook_dir }}/../..'
+          vars:
+            dovecot_rspamd_controller_url: 'http://rspamd.example.com:11334'
+
+        - name: Verify | Fail when http was accepted
+          ansible.builtin.fail:
+            msg: 'The role accepted http:// for a remote rspamd controller'
+      rescue:
+        - name: Verify | Assert https was required
+          ansible.builtin.assert:
+            that:
+              - __verify_failure is search('must use https:// for a controller on another host')
+            fail_msg: '{{ __verify_failure }}'
+
+    #
+    # AppArmor
+    #
+
+    # The whole role ran with AppArmor and a stand-in profile on EL, with
+    # AppArmor and without Dovecot profiles on Debian (the mariadb scenario)
+    # and everywhere without AppArmor (postgresql)
+    - name: Verify | Find AppArmor rules for Dovecot
+      ansible.builtin.find:
+        paths: '{{ __verify_apparmor_dir }}'
+        patterns:
+          - 'usr.sbin.dovecot'
+          - 'usr.lib.dovecot.*'
+          - '.dovecot.*'
+        hidden: true
+      register: __verify_apparmor_found
+      when: not __verify_apparmor | bool
+
+    - name: Verify | Assert the role wrote no AppArmor rules
+      ansible.builtin.assert:
+        that:
+          - __verify_apparmor_found.files | length == 0
+        fail_msg: '{{ __verify_apparmor_found.files | map(attribute="path") | list | to_json }}'
+      when: not __verify_apparmor | bool
+
+    - name: Verify | Check the AppArmor rules
+      ansible.builtin.include_tasks: tasks/apparmor_verify.yml
+      when: __verify_apparmor | bool

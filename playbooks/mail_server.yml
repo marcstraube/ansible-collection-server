@@ -1,0 +1,36 @@
+---
+# =============================================================================
+# Mail Server Playbook
+# =============================================================================
+# Mail server stack: pki or certbot certificates, Valkey, PostfixAdmin,
+# Postfix, Dovecot, rspamd, SOGo, Roundcube and the mail discovery data.
+# The stack and its order live in tasks/mail_server.yml; this play adds the
+# Arch Linux system update in front of it.
+#
+# Every host that runs one of the mail roles belongs to mail_servers. Run the
+# database_server and web_server playbooks first: PostfixAdmin, SOGo and
+# Roundcube need their database, PostfixAdmin and Roundcube their web server
+# and PHP.
+#
+# Usage:
+#   ansible-playbook marcstraube.server.mail_server -i inventory/
+#   ansible-playbook marcstraube.server.mail_server -i inventory/ --tags postfix
+#
+# Configure roles via inventory variables (group_vars/host_vars).
+# See each role's defaults/main.yml for available variables.
+# =============================================================================
+
+- name: Mail Server Deployment
+  hosts: mail_servers
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Mail | Import system update tasks
+      ansible.builtin.import_tasks:
+        file: tasks/system_update.yml
+
+  tasks:
+    - name: Mail | Import mail server tasks
+      ansible.builtin.import_tasks:
+        file: tasks/mail_server.yml

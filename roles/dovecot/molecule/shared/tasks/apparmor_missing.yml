@@ -1,0 +1,32 @@
+---
+# The AppArmor tasks while __verify_apparmor_missing does not exist: they
+# write no rules for lmtp. The path comes back also when an assertion
+# fails.
+- name: Verify | Run the AppArmor tasks without the path
+  block:
+    - name: Verify | Move the path away
+      ansible.builtin.command:
+        argv: [mv, '{{ __verify_apparmor_missing }}', '{{ __verify_apparmor_missing }}.molecule']
+      changed_when: true
+
+    - name: Verify | Include the AppArmor tasks without the path  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: apparmor.yml
+
+    - name: Verify | Stat the lmtp rules without the path
+      ansible.builtin.stat:
+        path: '{{ __verify_apparmor_dir }}/usr.lib.dovecot.lmtp'
+      register: __verify_apparmor_unwritten
+
+    - name: Verify | Assert no lmtp rules were written without the path
+      ansible.builtin.assert:
+        that:
+          - not __verify_apparmor_unwritten.stat.exists
+          - __dovecot_apparmor_deployed.results | default([]) | map(attribute='item') | list
+            is not contains('usr.lib.dovecot.lmtp')
+  always:
+    - name: Verify | Move the path back
+      ansible.builtin.command:
+        argv: [mv, '{{ __verify_apparmor_missing }}.molecule', '{{ __verify_apparmor_missing }}']
+        removes: '{{ __verify_apparmor_missing }}.molecule'

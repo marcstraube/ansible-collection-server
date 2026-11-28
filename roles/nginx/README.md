@@ -128,10 +128,116 @@ system-update,nginx`) to restart nginx after it.
 | `nginx_ssl_dhparam`               | `''`                     | DH parameters file path    |
 
 The reload handler of this role subscribes to the `Reload cert services` handler
-topic of `marcstraube.server.certbot` and `marcstraube.common.pki`, so a
-certificate issued or renewed inside the same play takes effect in that run.
+topic of [`marcstraube.server.certbot`](https://github.com/marcstraube/ansible-collection-server/blob/main/roles/certbot/README.md)
+and [`marcstraube.common.pki`](https://github.com/marcstraube/ansible-collection-common/blob/main/roles/pki/README.md),
+so a certificate issued or renewed inside the same play takes effect in that run.
 Renewal through the certbot timer runs outside of Ansible — set
 `certbot_nginx_enabled` for that path.
+
+### HTTP/2
+
+| Variable              | Default | Description                        |
+| --------------------- | ------- | ---------------------------------- |
+| `nginx_http2_enabled` | `true`  | Default for HTTP/2 over TLS (`h2`) |
+
+`nginx_http2_enabled` sets the default for HTTP/2 over TLS (`h2`) of every
+HTTPS site and of the default site; plain HTTP ports never get HTTP/2. A site
+overrides it with `http2: true` or `http2: false`:
+
+```yaml
+nginx_http2_enabled: true
+nginx_sites:
+  - name: 'www.example.com'
+    server_names:
+      - 'www.example.com'
+    root: '/var/www/example.com'
+    ssl:
+      enabled: true
+      certificate: '/etc/letsencrypt/live/www.example.com/fullchain.pem'
+      certificate_key: '/etc/letsencrypt/live/www.example.com/privkey.pem'
+  - name: 'intranet.example.com'
+    server_names:
+      - 'intranet.example.com'
+    type: 'proxy'
+    proxy_pass: 'http://127.0.0.1:8080'
+    http2: false
+    ssl:
+      enabled: true
+      certificate: '/etc/letsencrypt/live/intranet.example.com/fullchain.pem'
+      certificate_key: '/etc/letsencrypt/live/intranet.example.com/privkey.pem'
+```
+
+A site without the key inherits the default; changing
+`nginx_http2_enabled` changes every such site. The key accepts `true` and
+`false` only. `nginx_http2_enabled` also accepts the strings `true`,
+`false`, `yes`, `no`, `on`, `off`, `1` and `0` in any case, which is what
+`-e` passes. Anything else fails the run before any change. How the setting
+is rendered depends on the installed nginx, which the role reads with
+`nginx -v` after the package install:
+
+- **nginx 1.25.1 and later:** the `http2` directive. Every HTTPS server block
+  of a site with HTTP/2 on (main block and www redirect) gets `http2 on;`,
+  the default site's 443 block when `nginx_http2_enabled` is on; nothing goes
+  into the `http` block. A directive there would also accept HTTP/2 with
+  prior knowledge (`h2c`) on plain HTTP ports, where nginx decides before it
+  knows the requested site. The deprecated `http2` parameter of `listen` is
+  no longer rendered, so server blocks on the same port that the role does
+  not write no longer get HTTP/2 from the role's sites; they need their own
+  `http2 on;`. The reverse holds as well: a server block of your own that
+  still uses `listen … http2` switches HTTP/2 on for the whole address and
+  port, so role sites there with `http2: false` lose their setting, and
+  `nginx -t` may warn about redefined protocol options. Drop the parameter
+  from such blocks and give them `http2 on;` instead. nginx selects the
+  server block by SNI before it negotiates the protocol, so sites on the
+  same port can differ; a client without SNI gets the setting of the default
+  server of that address and port: the default site on 443 while
+  `nginx_default_site_enabled` is on, otherwise the server block marked
+  `default_server` there, or the first one nginx loaded for it.
+- **Before nginx 1.25.1:** the `http2` parameter of `listen`, rendered for
+  every HTTPS listener of a site with HTTP/2 on. nginx merges the parameters
+  of all `listen` directives on one port, so a single site with `http2`
+  switches HTTP/2 on for every other site on that port, the default site
+  (port 443, follows `nginx_http2_enabled`) included. The role therefore
+  fails when enabled HTTPS sites on one port disagree, and names the port and
+  the sites. The check needs the installed binary, so it runs after the
+  package install and before any configuration change. Give the sites the
+  same value, or move one to a `listen_ssl` port of its own.
+
+The nginx version per platform at the time of writing:
+
+| Platform      | nginx                                       | HTTP/2 syntax                   |
+| ------------- | ------------------------------------------- | ------------------------------- |
+| Arch Linux    | 1.30 (`nginx`), 1.31 (`nginx-mainline`)     | directive                       |
+| Debian Trixie | 1.26                                        | directive                       |
+| EL 9          | 1.20 (AppStream default)                    | `listen` parameter              |
+| EL 9          | 1.22, 1.24, 1.26 (AppStream module streams) | parameter, parameter, directive |
+| EL 10         | 1.26                                        | directive                       |
+
+The role installs `nginx` as the package manager resolves it. On EL 9 a
+module stream enabled beforehand (`dnf module enable nginx:1.26`) is
+installed instead of the default 1.20, which brings the directive.
+
+Reasons to switch HTTP/2 off for a single site while the others keep it:
+
+- Connection-based authentication (NTLM, Negotiate) binds the login to the
+  client connection, which HTTP/2 shares between requests.
+- Backends or clients that do not cope with HTTP/2.
+- A vulnerability in the HTTP/2 implementation: set `nginx_http2_enabled:
+  false` with no site enabling HTTP/2 until an update is available. For an
+  immediate run, `--tags nginx -e nginx_http2_enabled=false` does the same.
+
+`http2: false` on a site that shares its port with a site with HTTP/2 on is
+no hard guarantee: a client can send the SNI of the other site, or none at
+all when the default server of that port has HTTP/2 on, and still speak
+HTTP/2 to nginx. Browsers also reuse an HTTP/2 connection for other names
+covered by the same certificate, so the site can be reached over HTTP/2 that
+way; nginx refuses such a request (421) only when the sites use
+`ssl_verify_client`. Only HTTP/2 off globally, with no site enabling it,
+removes the HTTP/2 attack surface.
+
+Client certificates checked per location, a reason to switch HTTP/2 off on
+Apache, do not apply: nginx never renegotiates TLS and checks client
+certificates per server block (`ssl_verify_client`) only.
 
 ### Security Headers
 
@@ -175,6 +281,58 @@ Keep the patterns explicit. A generic `/\.` would also match
 `/.well-known/acme-challenge/`, and an nginx regex location takes precedence over
 a plain prefix location, so certificate renewal would break.
 
+### SELinux
+
+| Variable                         | Default | Description                      |
+| -------------------------------- | ------- | -------------------------------- |
+| `nginx_selinux_connect_db`       | `null`  | Let PHP-FPM reach a database     |
+| `nginx_selinux_network_connect`  | `null`  | Let nginx call out to a service  |
+| `nginx_selinux_sendmail`         | `null`  | Let nginx submit mail via an MTA |
+
+On SELinux systems, nginx and the PHP-FPM workers behind it run in the
+`httpd_t` domain and cannot open outbound network connections or submit mail
+unless the matching boolean is set. In every case the failure surfaces as a
+bare permission error, or a 502 from nginx, with nothing in the nginx or PHP
+logs pointing at SELinux.
+
+Set `nginx_selinux_connect_db` when an application served by this role
+connects to a database on another host, `nginx_selinux_network_connect` when
+it calls out to a remote service such as an API endpoint, and
+`nginx_selinux_sendmail` when it sends mail through PHP's `mail()` or a
+sendmail binary. Proxies are handled automatically: `httpd_can_network_connect`
+is also enabled whenever a site of type `proxy`, an enabled site with
+`authentik.enabled` or, with `nginx_stream_enabled`, a stream server exists;
+setting `nginx_selinux_network_connect` to `false` alongside any of them fails
+the run. An entry in `nginx_upstreams` alone does not count, because only a
+site or location that proxies to it opens the connection: a `locations` or
+`extra_config` entry that proxies from a site of another type needs
+`nginx_selinux_network_connect: true`.
+
+Each variable takes three values: `true` switches the boolean on, `false`
+switches it off, and `null` (the default) leaves it as it is on the host. The
+booleans apply to the whole `httpd_t` domain, which Apache and PHP-FPM share,
+so the role switches one off only when the variable is explicitly `false`.
+Returning a variable to `null` therefore does not revert a boolean the role set
+earlier; set it to `false` for that.
+
+A PHP application that talks to a remote database, calls an external API and
+sends mail through the local MTA:
+
+```yaml
+nginx_selinux_connect_db: true
+nginx_selinux_network_connect: true
+nginx_selinux_sendmail: true
+nginx_sites:
+  - name: 'php-app'
+    server_names:
+      - 'php.example.com'
+    root: '/var/www/php-app'
+    index: 'index.php index.html'
+    type: 'php'
+    php:
+      socket: 'unix:/run/php-fpm/www.sock'
+```
+
 ### Sites
 
 | Variable      | Default | Description              |
@@ -198,14 +356,210 @@ On SELinux systems nginx may only bind TCP ports labeled `http_port_t` (80,
 with `udp: true`) gets that label from the role;
 without it nginx cannot bind the port. A port of another type, such as 3306
 (`mysqld_port_t`), is relabeled `http_port_t`. Labels the role added stay in
-place when a port is removed from the configuration. The role also enables
-the `httpd_can_network_connect` boolean when an upstream, a site of type
-`proxy`, an enabled site with `authentik.enabled` or a stream server exists,
-so nginx can reach backends, the Authentik outpost and stream upstreams on
-any port.
+place when a port is removed from the configuration. Outbound connections
+are covered under [SELinux](#selinux).
 
-The default site listens on 80 and on `443 ssl http2`, the same options as
-the SSL sites, so the sites can share port 443 with it.
+Until the certificate and key file of a site that does not serve HTTPS yet
+exist, the role leaves out every HTTPS server of the site, since nginx would
+not load the configuration. What is deployed instead depends on the deployed
+configuration of the site:
+
+- A site that serves plain HTTP is kept on HTTP, without the redirect to HTTPS.
+- Of any other site only the HTTP redirect is deployed; without `http_redirect`
+  the site is not enabled. Requests for it may get the answer of another site
+  or the default site.
+
+The role reports these sites and the missing files, and the next run that finds
+the files deploys the sites completely. When the deployed configuration of an
+enabled site already has an HTTPS server, a missing file fails the run before
+any site is changed; check mode only reports it. While the files of
+`nginx_default_site_ssl_certificate` are missing, the default site uses its
+self-signed certificate.
+
+Give the certificate and key as absolute paths. A value with a variable
+(`$ssl_server_name`) or a scheme (`data:`, `engine:`, `store:`) is not checked,
+nor is `ssl.trusted_certificate`: it is only part of the HTTPS server, and a
+missing file next to an existing certificate fails the configuration.
+
+The default site listens on 80 and on `443 ssl` (before nginx 1.25.1
+`443 ssl http2` while `nginx_http2_enabled` is on), the same options as the
+SSL sites, so the sites can share port 443 with it. Its HTTP/2 follows
+`nginx_http2_enabled` (see [HTTP/2](#http2)).
+
+### ACME / Let's Encrypt
+
+| Variable                       | Default                       | Description                                |
+| ------------------------------ | ----------------------------- | ------------------------------------------ |
+| `nginx_acme_challenge_enabled` | tracks `certbot_enabled`      | Serve the ACME HTTP-01 challenge           |
+| `nginx_acme_webroot`           | tracks `certbot_webroot_path` | Webroot for `/.well-known/acme-challenge/` |
+
+When enabled, `/.well-known/acme-challenge/` is served from
+`nginx_acme_webroot` (`/var/www/letsencrypt` when `certbot_webroot_path` is not
+set in the inventory):
+
+- by the default site over HTTP, for every name without a site of its own on
+  port 80
+- by the HTTP redirect servers of sites with SSL
+- by the sites themselves, with and without SSL, and the www redirects of sites
+  without SSL
+
+The location wins over regex locations (PHP, `nginx_deny_patterns`) and is
+exempt from basic authentication and IP lists of the site. A `return` or
+`rewrite` in `extra_config` still runs before it. Every other request is
+answered as before.
+
+A site that defines the location itself, in `locations` or `extra_config`,
+keeps its own, and one in `nginx_global_locations` is kept on all sites; the
+role then adds none there, the HTTP redirect server included. Only while a site
+waits for its certificate, the role serves the challenge in the redirect server
+of a site with its own location, which belongs to the HTTPS server.
+
+The webroot has to be the one certbot writes to: `certbot_webroot_path`, the
+`webroot` of an entry in `certbot_certificates` and `certbot_mail_webroot` have
+to match `nginx_acme_webroot`. On a host with `certbot_enabled` the location of
+the role changes who answers the challenge, and a renewal may fail, in these
+cases:
+
+- A certificate with a `webroot` of its own, such as the document root.
+- A proxy site whose backend answers the challenge.
+- A wider location, such as `/.well-known/` or `~ /\.well-known`, that serves
+  the challenge; the more specific location of the role wins.
+- A location in a file that `extra_config` includes, which the role does not
+  see; nginx refuses the duplicate of the same prefix.
+
+Set the webroot to `nginx_acme_webroot`, define the location in the site, or
+set `nginx_acme_challenge_enabled: false`.
+
+`marcstraube.server.certbot` creates `certbot_webroot_path`. Below `/var/www` it
+inherits a label nginx may read; on SELinux systems a webroot elsewhere needs a
+file context of your own (`httpd_sys_content_t`).
+
+#### First Certificate
+
+On a new host the certificate does not exist yet and its site is deployed
+without its HTTPS servers (see [Sites](#sites)). The `web_server` playbook of
+the collection handles the first certificate in one run: nginx serves the
+challenge, certbot obtains the certificate with the webroot authenticator, and
+the site tasks run again and enable the HTTPS servers. A run with
+`--tags certbot` alone issues the certificate, but the HTTPS servers need the
+next run of this role. The inventory only needs the sites and the certificates:
+
+```yaml
+nginx_enabled: true
+nginx_sites:
+  - name: 'www.example.com'
+    server_names:
+      - 'www.example.com'
+    root: '/var/www/example.com'
+    http_redirect: true
+    ssl:
+      enabled: true
+      certificate: '/etc/letsencrypt/live/www.example.com/fullchain.pem'
+      certificate_key: '/etc/letsencrypt/live/www.example.com/privkey.pem'
+certbot_enabled: true
+certbot_email: 'admin@example.com'
+certbot_certificates:
+  - name: 'www.example.com'
+    domains:
+      - 'www.example.com'
+```
+
+A play of your own flushes the handlers before certbot and includes the site
+tasks again after it:
+
+```yaml
+- name: Include nginx role
+  ansible.builtin.include_role:
+    name: marcstraube.server.nginx
+
+- name: Load the HTTP side before certbot
+  ansible.builtin.meta: flush_handlers
+
+- name: Include certbot role
+  ansible.builtin.include_role:
+    name: marcstraube.server.certbot
+
+- name: Enable the HTTPS servers
+  ansible.builtin.include_role:
+    name: marcstraube.server.nginx
+    tasks_from: sites.yml
+```
+
+### Writable Paths
+
+| Variable               | Default | Description                               |
+| ---------------------- | ------- | ----------------------------------------- |
+| `nginx_writable_paths` | `[]`    | Directories the web applications write to |
+
+Under SELinux, the web server and its PHP-FPM workers may only write to paths
+labeled `httpd_sys_rw_content_t`, or `httpd_log_t` for log files. A cache or
+storage directory below the document root inherits the read-only
+`httpd_sys_content_t`, and a log directory below `/var/log` gets `var_log_t`;
+the application then fails with a bare permission error. Each entry of
+`nginx_writable_paths` gets a persistent file context for `<path>(/.*)?` on
+RedHat with SELinux enabled. The role restores the labels of the directory
+and everything below it when the context is new or changed, and on every run
+it compares the label of the directory itself with the context and restores
+the labels when they differ. Other platforms and hosts with SELinux disabled
+get no labels. On RedHat the role installs `policycoreutils-python-utils`,
+which provides `semanage`.
+
+| Key     | Default                  | Description                                   |
+| ------- | ------------------------ | --------------------------------------------- |
+| `path`  | (required)               | Absolute path, no trailing slash              |
+| `type`  | `httpd_sys_rw_content_t` | SELinux type of the directory and its content |
+| `owner` | nginx user               | Owner of the directory the role creates       |
+| `group` | nginx group              | Group of the directory the role creates       |
+| `mode`  | `'0755'`                 | Mode of the directory the role creates        |
+
+`type` accepts `httpd_sys_rw_content_t`, `httpd_sys_ra_content_t` (append
+only), `httpd_log_t` and `httpd_cache_t`. A `path` consists of letters,
+digits and `.`, `_`, `@`, `-`; it becomes part of the file context regex,
+with the dots escaped.
+
+With `owner`, `group` or `mode` set, the role creates the directory on every
+platform and enforces all three on every run. Missing parent directories are
+created with the same settings, so let the document root exist first or list
+the parent as an entry of its own before. Without any of the three, the path
+is only labeled. A path that does not exist yet is skipped; when the
+application creates the directory later, it inherits the type of its parent
+until the next run of the role restores its labels. Only the directory itself
+is compared on every run, not its content: a file below it that got a wrong
+label some other way (e.g. moved with `mv` from another directory) stays as
+it is until the context changes or `restorecon -R <path>` runs.
+
+The default owner and group are the nginx user and group. PHP-FPM does not
+run as nginx: on EL its pools run as `apache`, or as the pool's own user with
+`fpm_pools`. A directory PHP writes to therefore sets `owner` and `group`
+explicitly:
+
+```yaml
+nginx_writable_paths:
+  - path: '/var/log/myapp'
+    type: 'httpd_log_t'
+    owner: 'root'
+    group: 'apache'
+    mode: '2770'
+```
+
+Removing an entry leaves the directory and its file context in place. Remove
+the context by hand with `semanage fcontext -d '<path>(/.*)?'` (dots escaped
+as `\.`) and run `restorecon -R <path>`.
+
+```yaml
+nginx_writable_paths:
+  # Cache below the document root, written by the PHP-FPM pool user
+  - path: '/var/www/app.example.com/var/cache'
+    owner: 'nginx'
+    group: 'nginx'
+    mode: '0750'
+  # Log directory below /var/log
+  - path: '/var/log/app'
+    type: 'httpd_log_t'
+    owner: 'nginx'
+    group: 'nginx'
+    mode: '0750'
+```
 
 ### Upstreams
 
@@ -266,13 +620,14 @@ nginx_stream_servers:
 
 ## Tags
 
-| Tag               | Scope                     |
-| ----------------- | ------------------------- |
-| `nginx`           | All role tasks            |
-| `nginx:install`   | Package installation      |
-| `nginx:configure` | Configuration deployment  |
-| `nginx:service`   | Service management        |
-| `nginx:firewall`  | Firewalld rule management |
+| Tag                    | Scope                             |
+| ---------------------- | --------------------------------- |
+| `nginx`                | All role tasks                    |
+| `nginx:install`        | Package installation              |
+| `nginx:configure`      | Configuration deployment          |
+| `nginx:writable-paths` | Writable paths and SELinux labels |
+| `nginx:service`        | Service management                |
+| `nginx:firewall`       | Firewalld rule management         |
 
 ## Example Playbook
 
@@ -340,6 +695,10 @@ Related roles:
 
 - [marcstraube.common.firewalld](https://github.com/marcstraube/ansible-collection-common/blob/main/roles/firewalld/README.md)
   — firewall rules for stream server ports
+- [marcstraube.server.certbot](https://github.com/marcstraube/ansible-collection-server/blob/main/roles/certbot/README.md)
+  — Let's Encrypt certificates
+- [marcstraube.common.pki](https://github.com/marcstraube/ansible-collection-common/blob/main/roles/pki/README.md)
+  — certificates of an internal CA
 
 External:
 

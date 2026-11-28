@@ -1,0 +1,89 @@
+---
+- name: Verify — Database server
+  hosts: database
+  gather_facts: true
+
+  tasks:
+    - name: Verify | Read the schema version on the database server
+      community.postgresql.postgresql_query:
+        login_db: 'postfixadmin'
+        query: "SELECT value FROM config WHERE name = 'version'"
+      become: true
+      become_user: postgres
+      register: __verify_schema
+
+    - name: Verify | Read the accounts on the database server
+      community.postgresql.postgresql_query:
+        login_db: 'postfixadmin'
+        query: 'SELECT c_uid, c_password FROM sogo_users'
+      become: true
+      become_user: postgres
+      register: __verify_view
+
+    - name: Verify | Assert schema, accounts and SOGo view
+      ansible.builtin.assert:
+        that:
+          - __verify_schema.query_result[0].value | int > 0
+          - __verify_view.query_result | map(attribute='c_uid') | list == ['alice@example.com']
+          - __verify_view.query_result[0].c_password is match('^\{ARGON2ID\}\$argon2id\$')
+
+- name: Verify — PostfixAdmin host
+  hosts: web
+  gather_facts: false
+
+  vars:
+    __verify_helper: '/usr/local/lib/postfixadmin-ansible/postfixadmin-ansible.php'
+    __verify_db_address: "{{ hostvars['postfixadmin-split-db']['ansible_facts']['default_ipv4']['address'] }}"
+
+  tasks:
+    - name: Verify | Read the schema status through the TLS connection
+      ansible.builtin.command:
+        argv: [php, '{{ __verify_helper }}', /var/www/postfixadmin]
+        stdin: '{"action": "status"}'
+      register: __verify_status
+      changed_when: false
+
+    - name: Verify | Assert the schema is up to date
+      ansible.builtin.assert:
+        that:
+          - (__verify_status.stdout | from_json).db_version == (__verify_status.stdout | from_json).target_version
+
+    # The connection of PostfixAdmin used TLS: the server only accepts the
+    # user with TLS, verified against the CA, and refuses it without.
+    - name: Verify | Connect with and without TLS
+      ansible.builtin.command:
+        argv:
+          - php
+          - '-r'
+          - >-
+            try { $l = new PDO($argv[1], 'postfixadmin', $argv[2]);
+            echo json_encode($l->query(
+            'SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()')->fetchColumn()); }
+            catch (PDOException $e) { echo json_encode('refused'); }
+          - '{{ item.dsn }}'
+          - '{{ __molecule_db_password }}'
+      loop:
+        - name: 'verify-full'
+          dsn: >-
+            pgsql:dbname=postfixadmin;host=postfixadmin-split-db;sslmode=verify-full;sslrootcert={{
+            __molecule_ca_file }}
+          expected: true
+        - name: 'without TLS'
+          dsn: 'pgsql:dbname=postfixadmin;host=postfixadmin-split-db;sslmode=disable'
+          expected: 'refused'
+        # The address is not in the certificate: TLS works, the host name
+        # check refuses it
+        - name: 'address without host name check'
+          dsn: 'pgsql:dbname=postfixadmin;host={{ __verify_db_address }};sslmode=require'
+          expected: true
+        - name: 'address with host name check'
+          dsn: >-
+            pgsql:dbname=postfixadmin;host={{ __verify_db_address }};sslmode=verify-full;sslrootcert={{
+            __molecule_ca_file }}
+          expected: 'refused'
+      loop_control:
+        label: '{{ item.name }}'
+      register: __verify_tls
+      changed_when: false
+      failed_when: (__verify_tls.stdout | from_json) != item.expected
+      no_log: true

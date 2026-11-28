@@ -17,6 +17,7 @@
         key: '$binary_remote_addr'
         size: '10m'
         rate: '10r/s'
+    nginx_acme_challenge_enabled: true
     nginx_upstreams:
       - name: 'test_backend'
         strategy: 'round_robin'
@@ -59,7 +60,8 @@
           enabled: true
           certificate: '/etc/nginx/ssl/test.crt'
           certificate_key: '/etc/nginx/ssl/test.key'
-      # HTTPS on 443: the redirect URL carries no port
+      # HTTPS on 443: the redirect URL carries no port. Inherits HTTP/2 from
+      # nginx_http2_enabled (default true).
       - name: 'test-redirect-default'
         server_names:
           - 'redirect-default.example.com'
@@ -69,6 +71,90 @@
           enabled: true
           certificate: '/etc/nginx/ssl/test.crt'
           certificate_key: '/etc/nginx/ssl/test.key'
+      # Switches HTTP/2 off for itself. On a port of its own, since nginx
+      # before 1.25.1 (EL 9) applies the listen parameter to the whole port;
+      # side_effect.yml covers a shared port.
+      - name: 'test-http2-off'
+        server_names:
+          - 'http2-off.example.com'
+        root: '/var/www/html'
+        listen_ssl: 8443
+        http2: false
+        ssl:
+          enabled: true
+          certificate: '/etc/nginx/ssl/test.crt'
+          certificate_key: '/etc/nginx/ssl/test.key'
+      # The certificate and the key do not exist: only the HTTP redirect is
+      # deployed, and the challenge is served. side_effect.yml creates the
+      # files for a while.
+      - name: 'test-acme-redirect'
+        server_names:
+          - 'acme-redirect.example.com'
+        root: '/var/www/html'
+        http_redirect: true
+        www_redirect: 'non-www'
+        ssl:
+          enabled: true
+          certificate: '/etc/nginx/ssl/acme-redirect.crt'
+          certificate_key: '/etc/nginx/ssl/acme-redirect.key'
+      # No HTTP redirect that could stay: not enabled
+      - name: 'test-acme-pending'
+        server_names:
+          - 'acme-pending.example.com'
+        root: '/var/www/html'
+        ssl:
+          enabled: true
+          certificate: '/etc/nginx/ssl/acme-pending.crt'
+          certificate_key: '/etc/nginx/ssl/acme-pending.key'
+      # Only the key is missing, a dangling link
+      - name: 'test-acme-key'
+        server_names:
+          - 'acme-key.example.com'
+        root: '/var/www/html'
+        http_redirect: true
+        ssl:
+          enabled: true
+          certificate: '/etc/nginx/ssl/test.crt'
+          certificate_key: '/etc/nginx/ssl/acme-key.key'
+      # A disabled site is not checked and not reported
+      - name: 'test-acme-disabled'
+        enabled: false
+        server_names:
+          - 'acme-disabled.example.com'
+        root: '/var/www/html'
+        ssl:
+          enabled: true
+          certificate: '/etc/nginx/ssl/acme-disabled.crt'
+          certificate_key: '/etc/nginx/ssl/acme-disabled.key'
+      # Plain HTTP, closed for every other request of the test
+      - name: 'test-acme-http'
+        server_names:
+          - 'acme-http.example.com'
+        root: '/var/www/html'
+        www_redirect: 'non-www'
+        basic_auth:
+          enabled: true
+        allow_ips:
+          - '192.0.2.1'
+      # Serves the challenge from a webroot of its own
+      - name: 'test-acme-own'
+        server_names:
+          - 'acme-own.example.com'
+        root: '/var/www/html'
+        locations:
+          - path: '/.well-known/acme-challenge/'
+            config: 'root /var/www/acme-own;'
+    # Cache below a document root (owner and group default to the web server
+    # user), a log directory created below /var/log and a label-only path.
+    nginx_writable_paths:
+      - path: '/var/www/writable.example.local/var/cache'
+        mode: '0750'
+      - path: '/var/log/molecule-writable'
+        type: 'httpd_log_t'
+        owner: 'root'
+        group: 'root'
+        mode: '0770'
+      - path: '/var/www/writable.example.local/uploads'
     nginx_stub_status_enabled: true
     nginx_stub_status_path: '/nginx_status'
     # TCP proxy on a port outside http_port_t to the static site on port

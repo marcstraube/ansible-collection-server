@@ -1,0 +1,266 @@
+---
+# PHP and its extensions come from marcstraube.common.php; the role only
+# checks what Roundcube needs with these settings. The command line binary
+# loads the same extension packages as PHP-FPM.
+- name: Install | Read the PHP environment
+  ansible.builtin.command:
+    argv:
+      - '{{ roundcube_php_cli }}'
+      - '-r'
+      - >-
+        echo json_encode([
+        'version' => PHP_VERSION, 'version_id' => PHP_VERSION_ID,
+        'extensions' => array_map('strtolower', get_loaded_extensions()),
+        'pdo' => class_exists('PDO') ? PDO::getAvailableDrivers() : [],
+        'argon2id' => defined('PASSWORD_ARGON2ID')]);
+  register: __roundcube_php_result
+  changed_when: false
+  check_mode: false
+
+- name: Install | Assert the PHP requirements of Roundcube
+  ansible.builtin.assert:
+    that:
+      - __roundcube_php.version_id >= __roundcube_php_minimum_id
+      - __roundcube_php_missing | length == 0
+      - __roundcube_pdo_drivers[roundcube_db_type] in __roundcube_php.pdo
+      - >-
+        not __roundcube_password_enabled | bool
+        or __roundcube_pdo_drivers[roundcube_password_db_type] in __roundcube_php.pdo
+      - >-
+        not __roundcube_password_enabled | bool or roundcube_password_scheme != 'ARGON2ID'
+        or __roundcube_php.argon2id
+      - roundcube_session_storage != 'redis' or 'redis' in __roundcube_php.extensions
+    fail_msg: |
+      PHP {{ __roundcube_php.version }} ({{ roundcube_php_cli }}) does not meet the
+      requirements of Roundcube with these settings:
+      - PHP 8.1 or newer: {{ __roundcube_php.version_id >= __roundcube_php_minimum_id }}
+      - Missing extensions: {{ __roundcube_php_missing | join(', ') or 'none' }}
+      - PDO driver '{{ __roundcube_pdo_drivers[roundcube_db_type] }}' for the
+        {{ roundcube_db_type }} database: {{ __roundcube_pdo_drivers[roundcube_db_type] in __roundcube_php.pdo }}
+      {% if __roundcube_password_enabled | bool %}
+      - PDO driver '{{ __roundcube_pdo_drivers[roundcube_password_db_type] }}' for the
+        password plugin: {{ __roundcube_pdo_drivers[roundcube_password_db_type] in __roundcube_php.pdo }}
+      {% if roundcube_password_scheme == 'ARGON2ID' %}
+      - Argon2 (PASSWORD_ARGON2ID) for the ARGON2ID scheme: {{ __roundcube_php.argon2id }}
+        EL 9 has it from the php:8.3 module stream on (php_versions version '8.3'),
+        or choose roundcube_password_scheme 'BLF-CRYPT' or 'SHA512-CRYPT'.
+      {% endif %}
+      {% endif %}
+      {% if roundcube_session_storage == 'redis' %}
+      - Extension redis (phpredis) for the Valkey sessions: {{ 'redis' in __roundcube_php.extensions }}
+      {% endif %}
+      Install the missing parts with marcstraube.common.php (see README).
+  vars:
+    __roundcube_php: '{{ __roundcube_php_result.stdout | from_json }}'
+    __roundcube_php_missing: >-
+      {{ __roundcube_php_extensions | difference(__roundcube_php.extensions) }}
+
+- name: Install | Create the installation directories
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - '{{ roundcube_install_dir }}'
+    - '{{ __roundcube_releases_dir }}'
+  register: __roundcube_install_dirs
+
+- name: Install | Unpack a new release
+  when: not __roundcube_release_present | bool
+  block:
+    - name: Install | Create the download cache directory
+      ansible.builtin.file:
+        path: '{{ __roundcube_cache_dir }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      register: __roundcube_cache_dir_result
+
+    # A check run on a fresh host has not created the cache directory
+    - name: Install | Download the release archive
+      ansible.builtin.get_url:
+        url: '{{ __roundcube_release_url }}/{{ __roundcube_release }}/{{ __roundcube_archive }}'
+        dest: '{{ __roundcube_cache_dir }}/{{ __roundcube_archive }}'
+        checksum: '{{ __roundcube_release_checksum }}'
+        owner: root
+        group: root
+        mode: '0644'
+      retries: 5
+      delay: 10
+      when: not (__roundcube_check_mode and __roundcube_cache_dir_result is changed)
+
+    # Leftover of an interrupted run
+    - name: Install | Remove an incomplete staging directory
+      ansible.builtin.file:
+        path: '{{ __roundcube_staging_dir }}'
+        state: absent
+
+    - name: Install | Create the staging directory
+      ansible.builtin.file:
+        path: '{{ __roundcube_staging_dir }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # Every file belongs to root and is read-only for the PHP-FPM user;
+    # temp and logs are set up below.
+    - name: Install | Unpack the release
+      ansible.builtin.unarchive:
+        src: '{{ __roundcube_cache_dir }}/{{ __roundcube_archive }}'
+        dest: '{{ __roundcube_staging_dir }}'
+        remote_src: true
+        extra_opts:
+          - '--strip-components=1'
+          - '--no-same-owner'
+        owner: root
+        group: root
+        mode: 'u=rwX,go=rX'
+      when: not __roundcube_check_mode
+
+    # Also runs in check mode, where it reports the new release (copy
+    # reports a file in a missing directory as changed without writing it)
+    - name: Install | Write the release marker
+      ansible.builtin.copy:
+        content: "{{ __roundcube_release }}\n"
+        dest: '{{ __roundcube_staging_dir }}/{{ __roundcube_release_marker }}'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Install | Move the release into place
+      ansible.builtin.command:
+        argv:
+          - mv
+          - '-T'
+          - '{{ __roundcube_staging_dir }}'
+          - '{{ __roundcube_release_dir }}'
+      changed_when: true
+      when: not __roundcube_check_mode
+
+    - name: Install | Remove the release archive
+      ansible.builtin.file:
+        path: '{{ __roundcube_cache_dir }}/{{ __roundcube_archive }}'
+        state: absent
+
+# The release does not exist in a check run before its first install
+- name: Install | Set up the release for PHP-FPM
+  when: not __roundcube_check_mode or __roundcube_release_present | bool
+  block:
+    # The only directories PHP-FPM writes to
+    - name: Install | Make temp and logs writable for PHP-FPM
+      ansible.builtin.file:
+        path: '{{ __roundcube_release_dir }}/{{ item }}'
+        state: directory
+        owner: '{{ __roundcube_fpm_user }}'
+        group: '{{ __roundcube_fpm_group }}'
+        mode: '0750'
+      loop:
+        - 'temp'
+        - 'logs'
+
+    # Without owner and group: the file module applies them to the link
+    # target, which would hand config.inc.php to root:root on every run
+    # until configure.yml sets its group again. A first install links to
+    # the file before configure.yml writes it.
+    - name: Install | Link config.inc.php into the release
+      ansible.builtin.file:
+        src: '{{ __roundcube_config_file }}'
+        dest: '{{ __roundcube_release_dir }}/config/config.inc.php'
+        state: link
+        force: true
+
+    - name: Install | Find the enabled plugins in the release
+      ansible.builtin.stat:
+        path: '{{ __roundcube_release_dir }}/plugins/{{ item }}/{{ item }}.php'
+      loop: '{{ roundcube_plugins }}'
+      register: __roundcube_plugin_files
+
+    - name: Install | Assert the enabled plugins are part of the release
+      ansible.builtin.assert:
+        that:
+          - __roundcube_missing_plugins | length == 0
+        fail_msg: >-
+          Roundcube {{ __roundcube_release }} has no plugin
+          {{ __roundcube_missing_plugins | join(', ') }}; roundcube_plugins takes
+          the plugins of the release (plugins/ of the complete archive).
+      vars:
+        __roundcube_missing_plugins: >-
+          {{ __roundcube_plugin_files.results | rejectattr('stat.exists') | map(attribute='item') | list }}
+
+- name: Install | Create the helper directory
+  ansible.builtin.file:
+    path: '{{ __roundcube_helper_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Install | Deploy the helper
+  ansible.builtin.copy:
+    src: roundcube-schema.php
+    dest: '{{ __roundcube_helper }}'
+    owner: root
+    group: root
+    mode: '0644'
+
+# PHP-FPM runs in the httpd_t domain: it reads the releases
+# (httpd_sys_content_t) and writes temp, logs and an SQLite database
+# (httpd_sys_rw_content_t). The file logs are labelled in configure.yml.
+- name: Install | Label the releases for PHP-FPM (SELinux)
+  community.general.sefcontext:
+    target: '{{ item.target }}'
+    setype: '{{ item.setype }}'
+    state: present
+  loop: >-
+    {{ [{'target': roundcube_install_dir ~ '(/.*)?', 'setype': 'httpd_sys_content_t'},
+        {'target': __roundcube_releases_dir ~ '/[^/]+/(temp|logs)(/.*)?', 'setype': 'httpd_sys_rw_content_t'}]
+       + ([{'target': (roundcube_db_path | dirname) ~ '(/.*)?', 'setype': 'httpd_sys_rw_content_t'}]
+          if roundcube_db_type == 'sqlite' else []) }}
+  loop_control:
+    label: '{{ item.target }}'
+  register: __roundcube_sefcontext
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+- name: Install | Apply the SELinux labels to the releases
+  ansible.builtin.command:
+    argv:
+      - restorecon
+      - '-R'
+      - '-v'
+      - '{{ roundcube_install_dir }}'
+  register: __roundcube_restorecon
+  changed_when: __roundcube_restorecon.stdout | length > 0
+  when:
+    - not __roundcube_check_mode
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+    - __roundcube_sefcontext is changed or not __roundcube_release_present | bool
+
+# IMAP (pop_port_t) and SMTP (smtp_port_t) need httpd_can_sendmail, the
+# database httpd_can_network_connect_db; ManageSieve (4190, sieve_port_t)
+# and Valkey (redis_port_t or another port) have no boolean of their own
+# and need httpd_can_network_connect.
+- name: Install | Allow PHP-FPM connections (SELinux)
+  ansible.posix.seboolean:
+    name: '{{ item }}'
+    state: true
+    persistent: true
+  loop: >-
+    {{ ['httpd_can_sendmail']
+       + (['httpd_can_network_connect_db']
+          if (roundcube_db_type != 'sqlite' and __roundcube_db_socket | length == 0)
+             or (__roundcube_password_enabled | bool and __roundcube_password_db_socket | length == 0)
+          else [])
+       + (['httpd_can_network_connect']
+          if __roundcube_managesieve_enabled | bool
+             or (roundcube_session_storage == 'redis' and roundcube_redis_host is not match('/'))
+          else []) }}
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'

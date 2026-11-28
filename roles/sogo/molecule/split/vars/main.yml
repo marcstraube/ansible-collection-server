@@ -1,0 +1,203 @@
+---
+# Test data of the split scenario, read by prepare, converge and verify.
+
+molecule_db_type: 'postgresql'
+__molecule_backend: 'sogo-split-backend'
+__molecule_sogo_host: 'sogo-split-sogo'
+
+__molecule_passwords:
+  alice@example.com: 'alice-Secret-42'
+  bob@example.com: 'bob-Secret-42'
+  carol@example.com: 'carol-Secret-42'
+  support@example.com: 'support-Secret-42'
+  dave@example.com: 'dave-Secret-42'
+__molecule_carol_new_password: 'carol-Changed-77'
+__molecule_sieve_admin: 'sieveadmin'
+__molecule_sieve_admin_password: 'sieve-Admin-42'
+
+# The client of verify talks to nginx on the SOGo container by its name
+__molecule_mail_host: 'sogo-split-sogo'
+molecule_sogo_resources: '/usr/local/share/sogo/WebServerResources'
+
+#
+# Backend: PostgreSQL, PostfixAdmin, Postfix and Dovecot
+#
+
+# PostgreSQL for the other container: the SOGo users only with TLS
+postgresql_enabled: true
+postgresql_listen_addresses: '*'
+postgresql_firewalld_enabled: false
+postgresql_shared_buffers: '64MB'
+postgresql_effective_cache_size: '128MB'
+postgresql_lc_messages: 'en_US.UTF-8'
+postgresql_lc_monetary: 'en_US.UTF-8'
+postgresql_lc_numeric: 'en_US.UTF-8'
+postgresql_lc_time: 'en_US.UTF-8'
+postgresql_ssl_enabled: true
+postgresql_ssl_cert_file: '/etc/molecule-tls/backend.pem'
+postgresql_ssl_key_file: '/etc/molecule-tls/backend.key'
+postgresql_hba_additional:
+  - {type: 'hostssl', database: 'sogo', user: 'sogo', address: '0.0.0.0/0', method: 'scram-sha-256'}
+  - {type: 'hostssl', database: 'sogo', user: 'sogo', address: '::/0', method: 'scram-sha-256'}
+  - {type: 'hostssl', database: 'postfixadmin', user: 'sogo_view', address: '0.0.0.0/0', method: 'scram-sha-256'}
+  - {type: 'hostssl', database: 'postfixadmin', user: 'sogo_view', address: '::/0', method: 'scram-sha-256'}
+# The SOGo database for the other host (sogo_db_create is for a local
+# server only)
+postgresql_users:
+  - name: 'sogo'
+    password: 'sogo-db-Password-42'
+postgresql_databases:
+  - name: 'sogo'
+    owner: 'sogo'
+    encoding: 'UTF8'
+    lc_collate: 'en_US.UTF-8'
+    lc_ctype: 'en_US.UTF-8'
+
+postfixadmin_enabled: true
+postfixadmin_db_type: 'postgresql'
+postfixadmin_db_password: 'test-db-Password-42'
+postfixadmin_db_create: true
+postfixadmin_sogo_view_enabled: true
+postfixadmin_db_readers:
+  - name: 'postfix'
+    password: 'postfix-Reader-42'
+  - name: 'dovecot'
+    password: 'dovecot-Reader-42'
+  - name: 'sogo_view'
+    password: 'sogo-Reader-42'
+    tables: ['sogo_users']
+    update_columns: ['sogo_users.c_password']
+postfixadmin_domains:
+  - domain: 'example.com'
+postfixadmin_mailboxes:
+  - username: 'alice@example.com'
+    password: "{{ __molecule_passwords['alice@example.com'] }}"
+    name: 'Alice'
+  - username: 'bob@example.com'
+    password: "{{ __molecule_passwords['bob@example.com'] }}"
+    name: 'Bob'
+  - username: 'carol@example.com'
+    password: "{{ __molecule_passwords['carol@example.com'] }}"
+    name: 'Carol'
+    mode: 'initial'
+  - username: 'support@example.com'
+    password: "{{ __molecule_passwords['support@example.com'] }}"
+    name: 'Support'
+  # Blocked by the brute-force protection in verify
+  - username: 'dave@example.com'
+    password: "{{ __molecule_passwords['dave@example.com'] }}"
+    name: 'Dave'
+postfixadmin_extra_config:
+  emailcheck_resolve_domain: 'NO'
+
+postfix_enabled: true
+postfix_db_type: 'postgresql'
+postfix_db_password: 'postfix-Reader-42'
+postfix_myhostname: 'mail.example.com'
+postfix_mydomain: 'example.com'
+postfix_tls_cert_file: '/etc/molecule-tls/backend.pem'
+postfix_tls_key_file: '/etc/molecule-tls/backend.key'
+postfix_milters: []
+postfix_dns_check_enabled: false
+mta_enabled: false
+
+dovecot_enabled: true
+dovecot_db_type: 'postgresql'
+dovecot_db_password: 'dovecot-Reader-42'
+dovecot_tls_cert_file: '/etc/molecule-tls/backend.pem'
+dovecot_tls_key_file: '/etc/molecule-tls/backend.key'
+dovecot_managesieve_enabled: true
+dovecot_shared_mailboxes:
+  - owner: 'support@example.com'
+    user: 'alice@example.com'
+    rights: 'lrws'
+dovecot_extra_config: |
+  protocol sieve {
+    passdb molecule-masters {
+      driver = passwd-file
+      passwd_file_path = /etc/dovecot/molecule-masters
+      master = yes
+      result_success = continue
+    }
+  }
+
+#
+# SOGo host: nginx, podman and SOGo
+#
+
+nginx_enabled: true
+nginx_selinux_network_connect: true
+nginx_sites:
+  - name: 'sogo'
+    server_names:
+      - 'sogo-split-sogo'
+    type: 'custom'
+    ssl:
+      enabled: true
+      certificate: '/etc/molecule-tls/web.pem'
+      certificate_key: '/etc/molecule-tls/web.key'
+    http_redirect: true
+    client_max_body_size: '50m'
+    locations:
+      - path: '= /'
+        config: 'return 302 /SOGo/;'
+      - path: '= /.well-known/caldav'
+        config: 'return 301 /SOGo/dav/;'
+      - path: '= /.well-known/carddav'
+        config: 'return 301 /SOGo/dav/;'
+      - path: '^~ /SOGo.woa/WebServerResources/'
+        config: |
+          alias {{ molecule_sogo_resources }}/;
+          expires max;
+      - path: '^~ /SOGo/WebServerResources/'
+        config: |
+          alias {{ molecule_sogo_resources }}/;
+          expires max;
+      - path: '^~ /SOGo'
+        config: |
+          proxy_pass http://127.0.0.1:20000;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header x-webobjects-server-protocol HTTP/1.0;
+          proxy_set_header x-webobjects-remote-host $remote_addr;
+          proxy_set_header x-webobjects-server-name $server_name;
+          proxy_set_header x-webobjects-server-url $scheme://$host;
+          proxy_set_header x-webobjects-server-port $server_port;
+          proxy_read_timeout 300;
+
+podman_compose_enabled: false
+podman_docker_enabled: false
+podman_docker_alias_enabled: false
+podman_docker_socket_symlink_enabled: false
+podman_tools: []
+podman_storage_options:
+  overlay:
+    mountopt: 'nodev,metacopy=on'
+    ignore_chown_errors: 'true'
+
+sogo_enabled: true
+sogo_db_type: 'postgresql'
+sogo_db_host: 'sogo-split-backend'
+sogo_db_password: 'sogo-db-Password-42'
+sogo_db_tls: true
+sogo_db_tls_ca_file: '/etc/molecule-tls/ca.pem'
+sogo_postfixadmin_db_user: 'sogo_view'
+sogo_postfixadmin_db_password: 'sogo-Reader-42'
+sogo_mail_domain: 'example.com'
+sogo_imap_server: 'imaps://sogo-split-backend:993'
+sogo_smtp_server: 'smtp://sogo-split-backend:587/?tls=YES'
+sogo_sieve_server: 'sieve://sogo-split-backend:4190/?tls=YES'
+sogo_sieve_admin_username: '{{ __molecule_sieve_admin }}'
+sogo_sieve_admin_password: '{{ __molecule_sieve_admin_password }}'
+# Off by default (README); the scenarios test the password change
+sogo_password_change_enabled: true
+# Low limits keep the brute-force test of verify short
+sogo_failed_login_count: 3
+sogo_failed_login_interval: 60
+sogo_failed_login_block_interval: 120
+sogo_workers: 2
+sogo_subid_start: 10000
+sogo_subid_count: 50000
+sogo_service_start_timeout: 900

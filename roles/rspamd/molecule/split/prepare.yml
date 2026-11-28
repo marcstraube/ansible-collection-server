@@ -1,0 +1,180 @@
+---
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  vars:
+    __prepare_packages:
+      # valkey-server creates the service user and group the test key
+      # belongs to; valkey-cli comes with valkey-tools
+      backend:
+        - systemd
+        - dbus
+        - procps
+        - iproute2
+        - openssl
+        - valkey-server
+        - valkey-tools
+      filter:
+        - systemd
+        - dbus
+        - procps
+        - iproute2
+        - valkey-tools
+
+  tasks:
+    - name: Prepare | Update package cache
+      ansible.builtin.apt:
+        update_cache: true
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name: '{{ __prepare_packages[group_names | first] }}'
+        state: present
+      retries: 3
+      delay: 5
+
+    - name: Prepare | Create the test certificate directory
+      ansible.builtin.file:
+        path: /etc/molecule-tls
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+# The rspamd container has no policy-rc.d, like a Debian host: the role
+# keeps the first install from starting rspamd itself
+- name: Prepare — rspamd host
+  hosts: filter
+  gather_facts: false
+
+  tasks:
+    - name: Prepare | Remove the policy-rc.d of the image
+      ansible.builtin.file:
+        path: /usr/sbin/policy-rc.d
+        state: absent
+
+#
+# Backend: Valkey with TLS, clamd on TCP, Postfix with the remote milter
+#
+
+- name: Prepare — Backend host
+  hosts: backend
+  gather_facts: false
+
+  vars:
+    __prepare_tls_dir: '/etc/molecule-tls'
+    __prepare_milter: 'inet:rspamd-split-filter:11332'
+    __prepare_inet_interfaces: '127.0.0.1'
+
+  tasks:
+    # A test CA signs the certificate for the container name, which rspamd
+    # resolves on the podman network
+    - name: Prepare | Create the test CA
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -newkey
+          - rsa:2048
+          - -nodes
+          - -days
+          - '30'
+          - -subj
+          - '/CN=Molecule Test CA'
+          - -keyout
+          - '{{ __prepare_tls_dir }}/ca.key'
+          - -out
+          - '{{ __prepare_tls_dir }}/ca.crt'
+        creates: '{{ __prepare_tls_dir }}/ca.crt'
+
+    - name: Prepare | Create the server key and request
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -newkey
+          - rsa:2048
+          - -nodes
+          - -subj
+          - '/CN={{ inventory_hostname }}'
+          - -keyout
+          - '{{ __prepare_tls_dir }}/server.key'
+          - -out
+          - '{{ __prepare_tls_dir }}/server.csr'
+        creates: '{{ __prepare_tls_dir }}/server.csr'
+
+    - name: Prepare | Write the server certificate extensions
+      ansible.builtin.copy:
+        content: "subjectAltName=DNS:{{ inventory_hostname }}\n"
+        dest: '{{ __prepare_tls_dir }}/server.ext'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Sign the server certificate
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -req
+          - -in
+          - '{{ __prepare_tls_dir }}/server.csr'
+          - -CA
+          - '{{ __prepare_tls_dir }}/ca.crt'
+          - -CAkey
+          - '{{ __prepare_tls_dir }}/ca.key'
+          - -CAcreateserial
+          - -days
+          - '30'
+          - -extfile
+          - '{{ __prepare_tls_dir }}/server.ext'
+          - -out
+          - '{{ __prepare_tls_dir }}/server.crt'
+        creates: '{{ __prepare_tls_dir }}/server.crt'
+
+    - name: Prepare | Make the server key readable for the service user
+      ansible.builtin.file:
+        path: '{{ __prepare_tls_dir }}/server.key'
+        owner: root
+        group: valkey
+        mode: '0640'
+
+    - name: Prepare | Read the test CA
+      ansible.builtin.slurp:
+        src: '{{ __prepare_tls_dir }}/ca.crt'
+      register: __prepare_ca
+
+    - name: Prepare | Include valkey role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../valkey'
+
+    - name: Prepare | Set up clamd
+      ansible.builtin.include_tasks: ../shared/tasks/clamd.yml
+
+    - name: Prepare | Set up Postfix
+      ansible.builtin.include_tasks: ../shared/tasks/mta.yml
+
+    - name: Prepare | Install the SMTP test client
+      ansible.builtin.copy:
+        src: '{{ playbook_dir }}/../shared/files/smtp_send.py'
+        dest: /usr/local/bin/molecule-smtp-send
+        owner: root
+        group: root
+        mode: '0755'
+
+- name: Prepare — rspamd host certificates
+  hosts: filter
+  gather_facts: false
+
+  tasks:
+    - name: Prepare | Install the test CA
+      ansible.builtin.copy:
+        content: "{{ hostvars['rspamd-split-backend']['__prepare_ca']['content'] | b64decode }}"
+        dest: /etc/molecule-tls/ca.crt
+        owner: root
+        group: root
+        mode: '0644'

@@ -1,0 +1,192 @@
+---
+# The community.general.dig lookup runs on the controller. Missing records
+# never fail the run. The expected records are printed on every run, also
+# when the check is off or the lookup itself fails.
+
+# TLSA '3 1 1': SHA-256 of the SubjectPublicKeyInfo (DER) of the server
+# certificate, the first one in the file. Read-only, so it also runs in
+# check mode; a failure leaves the record out with a warning.
+- name: DNS | Compute the TLSA hash of the server certificate
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail &&
+      openssl x509 -in {{ postfix_tls_cert_file | quote }} -noout -pubkey
+      | openssl pkey -pubin -outform DER
+      | sha256sum
+    executable: /bin/bash
+  register: __postfix_dns_tlsa_hash
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: postfix_dns_tlsa_enabled | bool
+
+- name: DNS | Warn about the missing TLSA hash
+  ansible.builtin.debug:
+    msg: >-
+      The TLSA record of port 25 is left out: the public key of
+      {{ postfix_tls_cert_file }} could not be read
+      ({{ __postfix_dns_tlsa_hash.stderr_lines | default([]) | first | default('') }}).
+  when:
+    - postfix_dns_tlsa_enabled | bool
+    - __postfix_dns_tlsa_digest | length == 0
+
+# The hash only helps while the certificate keeps its key. A certbot
+# certificate keeps it with reuse_key in its renewal configuration (option
+# reuse_key of marcstraube.server.certbot); configobj reads true, yes, on and
+# 1 as true. Read-only, so it also runs in check mode.
+- name: DNS | Check the key reuse of the certbot certificate
+  ansible.builtin.command:
+    argv:
+      - grep
+      - '-Eiq'
+      - '^[[:space:]]*reuse_key[[:space:]]*=[[:space:]]*(true|yes|on|1)[[:space:]]*$'
+      - '{{ __postfix_dns_tlsa_certbot_renewal_file }}'
+  register: __postfix_dns_tlsa_reuse_key
+  changed_when: false
+  failed_when: __postfix_dns_tlsa_reuse_key.rc > 2
+  check_mode: false
+  when:
+    - postfix_dns_tlsa_enabled | bool
+    - __postfix_dns_tlsa_digest | length > 0
+    - __postfix_dns_tlsa_certbot_renewal_file | length > 0
+
+- name: DNS | Warn about a certbot certificate without key reuse
+  ansible.builtin.debug:
+    msg: >-
+      {{ postfix_tls_cert_file }} is a certbot certificate whose renewal
+      configuration {{ __postfix_dns_tlsa_certbot_renewal_file }}
+      {{ 'does not set reuse_key = True' if __postfix_dns_tlsa_reuse_key.rc == 1 else 'cannot be read' }}:
+      certbot creates a new key at the next renewal, and the TLSA record stops
+      matching. Set reuse_key: true for the certificate in
+      marcstraube.server.certbot.
+  when:
+    - __postfix_dns_tlsa_reuse_key is not skipped
+    - __postfix_dns_tlsa_reuse_key.rc != 0
+
+# Starts every run from the unchecked records, so a report or an error of an
+# earlier run in the same play never shows up again
+- name: DNS | Reset report
+  ansible.builtin.set_fact:
+    __postfix_dns_report: >-
+      {{ __postfix_dns_records | map('combine', {'status': 'unchecked', 'found': []}) | list }}
+    __postfix_dns_error: ''
+
+- name: DNS | Check records
+  when:
+    - postfix_dns_check_enabled | bool
+    - __postfix_dns_records | length > 0
+  block:
+    - name: DNS | Query records
+      ansible.builtin.set_fact:
+        __postfix_dns_answer: >-
+          {{ query('community.general.dig', item.query, *__postfix_dns_servers,
+                   qtype=item.type, **__postfix_dns_options) }}
+      loop: '{{ __postfix_dns_records }}'
+      loop_control:
+        label: '{{ item.type }} {{ item.name }}'
+      register: __postfix_dns_answers
+
+    # MX '<priority> <target>.' -> target (a null MX stays '.'), PTR
+    # '<target>.' -> target, TXT
+    # '"part" "part"' -> one string; only TXT records starting with v=spf1
+    # count for SPF. TLSA comes as '3 1 1 <hex>' and compares as it is, one
+    # matching record of several (key rollover) is present.
+    - name: DNS | Compare records
+      ansible.builtin.set_fact:
+        __postfix_dns_result:
+          name: '{{ __record.name }}'
+          type: '{{ __record.type }}'
+          record: '{{ __record.record }}'
+          found: '{{ __found }}'
+          status: >-
+            {{ 'missing' if __found | length == 0
+               else 'present' if (__record.value | lower) in (__found | map('lower') | list)
+               else 'different' }}
+      loop: '{{ __postfix_dns_answers.results }}'
+      loop_control:
+        label: '{{ __record.type }} {{ __record.name }}'
+      register: __postfix_dns_results
+      vars:
+        __record: '{{ item.item }}'
+        __answer: >-
+          {{ item.ansible_facts.__postfix_dns_answer | reject('in', ['', 'NXDOMAIN']) | map('string') | list }}
+        __found: >-
+          {{ (__answer | map('regex_replace', '^\d+\s+', '') | map('regex_replace', '(.)\.$', '\1') | list)
+             if __record.type in ['MX', 'PTR']
+             else ((__answer | map('regex_replace', '"\s+"', '') | map('regex_replace', '^"|"$', '')
+                    | select('match', '(?i)^v=spf1( |$)') | list)
+                   if __record.type == 'TXT'
+                   else __answer) }}
+
+    - name: DNS | Collect report
+      ansible.builtin.set_fact:
+        __postfix_dns_report: >-
+          {{ __postfix_dns_results.results
+             | map(attribute='ansible_facts.__postfix_dns_result') | list }}
+
+  # Only an error of the dig lookup itself (dnspython missing, a resolver name
+  # that does not resolve, an unexpected resolver error) skips the check. The
+  # lookup plugin is named in its error message, also per item of a loop; any
+  # other error, such as a broken variable, is a bug and fails the run with
+  # its original message.
+  rescue:
+    - name: DNS | Fail on errors other than the lookup
+      ansible.builtin.fail:
+        msg: '{{ __postfix_dns_failures | unique | join(" ") }}'
+      when: >-
+        __postfix_dns_failures | length == 0
+        or __postfix_dns_failures
+           | reject('search', "lookup plugin 'community.general.dig'") | list | length > 0
+      vars:
+        __postfix_dns_failures: &postfix_dns_failures >-
+          {{ (ansible_failed_result.results | default([ansible_failed_result]))
+             | selectattr('failed', 'defined') | selectattr('failed')
+             | map(attribute='msg', default='') | list }}
+
+    - name: DNS | Record lookup error
+      ansible.builtin.set_fact:
+        __postfix_dns_error: '{{ __postfix_dns_failures | first }}'
+      vars:
+        __postfix_dns_failures: *postfix_dns_failures
+
+# STATUS | record | values found. A TLSA line is marked: the check sees the
+# record, not the DNSSEC signature DANE depends on.
+- name: DNS | Show records
+  ansible.builtin.debug:
+    msg: >-
+      {%- set ns = namespace(lines=[]) -%}
+      {%- for record in __postfix_dns_report -%}
+      {%- set ns.lines = ns.lines + [
+            ([record.status | upper,
+              record.record ~ (' ' ~ __postfix_dns_tlsa_label if record.type == 'TLSA' else '')]
+             + ([record.found | join(', ')] if record.found | length > 0 else []))
+            | join(' | ')] -%}
+      {%- endfor -%}
+      {{ ns.lines }}
+  when: __postfix_dns_records | length > 0
+
+- name: DNS | Warn about the failed check
+  ansible.builtin.debug:
+    msg: >-
+      The DNS check could not run, the records above are unchecked. Lookup
+      error: {{ __postfix_dns_error }}
+      The controller needs the Python library dnspython for the
+      community.general.dig lookup, and postfix_dns_resolver must be an IPv4
+      address or a name the controller resolves. Set
+      postfix_dns_check_enabled to false to turn the check off.
+  when: __postfix_dns_error | length > 0
+
+# The lookup returns the same empty answer for a missing record and for a
+# resolver that does not answer
+- name: DNS | Warn about an empty result
+  ansible.builtin.debug:
+    msg: >-
+      No record was found, not even an address of {{ postfix_myhostname }}.
+      Check that the resolver
+      ({{ postfix_dns_resolver | default('', true) or 'system resolver' }})
+      answers from the controller.
+  when:
+    - postfix_dns_check_enabled | bool
+    - __postfix_dns_error | length == 0
+    - __postfix_dns_report | length > 0
+    - __postfix_dns_report | map(attribute='status') | unique == ['missing']

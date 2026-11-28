@@ -1,0 +1,324 @@
+{{ ansible_managed | comment }}
+# Dovecot 2.4 configuration, owned by the role as a whole: the conf.d files
+# of the distribution packages are not included. Settings not listed here
+# keep the defaults of Dovecot (doveconf -d shows them).
+
+dovecot_config_version = {{ dovecot_config_version }}
+dovecot_storage_version = {{ dovecot_storage_version }}
+
+protocols = {{ __dovecot_protocols | join(' ') }}
+listen = {{ dovecot_listen }}
+
+##
+## Authentication
+##
+
+auth_allow_cleartext = no
+auth_mechanisms = plain login
+passdb_default_password_scheme = {{ dovecot_password_scheme }}
+
+sql_driver = {{ __dovecot_sql_driver }}
+{% if dovecot_db_type == 'postgresql' %}
+pgsql {{ dovecot_db_host }} {
+  parameters {
+    port = {{ dovecot_db_port }}
+    dbname = {{ dovecot_db_name }}
+    user = {{ dovecot_db_user }}
+{% if dovecot_db_tls | bool %}
+    sslmode = verify-full
+    sslrootcert = {{ dovecot_db_tls_ca_file }}
+{% endif %}
+    !include {{ __dovecot_db_config_file }}
+  }
+}
+{% else %}
+mysql {{ dovecot_db_host }} {
+  port = {{ dovecot_db_port }}
+  dbname = {{ dovecot_db_name }}
+  user = {{ dovecot_db_user }}
+{% if dovecot_db_tls | bool %}
+  # Encryption only: the MySQL driver of Dovecot 2.4 does not verify the
+  # server certificate (see the README of the role)
+  ssl = yes
+  ssl_client_ca_file = {{ dovecot_db_tls_ca_file }}
+{% endif %}
+  !include {{ __dovecot_db_config_file }}
+}
+{% endif %}
+
+passdb sql {
+  query = {{ __dovecot_passdb_query }}
+}
+
+userdb sql {
+  query = {{ __dovecot_userdb_query }}
+  iterate_query = {{ __dovecot_iterate_query }}
+}
+
+service auth {
+{% if dovecot_postfix_local | bool %}
+  unix_listener {{ __dovecot_postfix_auth_socket }} {
+    user = postfix
+    group = postfix
+    mode = 0660
+  }
+{% endif %}
+{% if dovecot_auth_listen | length > 0 %}
+  inet_listener auth-postfix {
+    listen = {{ __dovecot_auth_address }}
+    port = {{ __dovecot_auth_port }}
+  }
+{% endif %}
+}
+
+# Password hashes are verified in the auth workers; ARGON2ID needs about
+# 64 MB per verification
+service auth-worker {
+  vsz_limit = {{ dovecot_auth_worker_vsz_limit }}
+}
+
+##
+## TLS
+##
+
+ssl = required
+ssl_server_cert_file = {{ dovecot_tls_cert_file }}
+ssl_server_key_file = {{ dovecot_tls_key_file }}
+ssl_min_protocol = {{ dovecot_tls_min_protocol }}
+{% if dovecot_tls_cipher_list | length > 0 %}
+ssl_cipher_list = {{ dovecot_tls_cipher_list }}
+{% endif %}
+
+##
+## Mail Storage
+##
+
+mail_driver = maildir
+mail_path = ~/Maildir
+mail_uid = {{ dovecot_vmail_user }}
+mail_gid = {{ dovecot_vmail_group }}
+first_valid_uid = {{ dovecot_vmail_uid }}
+last_valid_uid = {{ dovecot_vmail_uid }}
+first_valid_gid = {{ dovecot_vmail_gid }}
+last_valid_gid = {{ dovecot_vmail_gid }}
+
+mail_plugins {
+  acl = yes
+{% if dovecot_quota_enabled | bool %}
+  quota = yes
+{% endif %}
+}
+
+namespace inbox {
+  type = private
+  separator = /
+  prefix =
+  inbox = yes
+{% for mailbox in dovecot_mailboxes %}
+
+  mailbox "{{ mailbox.name }}" {
+{% if mailbox.special_use | default('') | length > 0 %}
+    special_use = {{ mailbox.special_use }}
+{% endif %}
+    auto = {{ mailbox.auto | default('subscribe') }}
+  }
+{% endfor %}
+}
+
+##
+## Shared Mailboxes
+##
+
+acl_driver = vfile
+
+namespace shared {
+  type = shared
+  separator = /
+  prefix = shared/$user/
+  mail_path = %{owner_home}/Maildir
+  mail_index_private_path = ~/Maildir/shared/%{owner_user}
+  subscriptions = no
+  list = children
+}
+
+acl_sharing_map {
+  dict file {
+    path = {{ __dovecot_shared_map_file }}
+  }
+}
+{% if dovecot_quota_enabled | bool %}
+
+##
+## Quota
+##
+
+# The limit comes from the userdb (quota_storage_size)
+quota "User quota" {
+  quota_driver = count
+}
+{% if dovecot_quota_status_listen | length > 0 %}
+
+# Postfix policy service: unknown recipients (aliases) and mailboxes below
+# their quota pass on to the next restriction. Both rejections are set
+# explicitly: Dovecot 2.4.1 answers an empty action for a message above the
+# quota instead of falling back to quota_status_overquota.
+quota_status_success = DUNNO
+quota_status_nouser = DUNNO
+quota_status_overquota = "552 5.2.2 Mailbox is full"
+quota_status_toolarge = "552 5.2.2 Message exceeds the mailbox quota"
+
+service quota-status {
+  executable = quota-status -p postfix
+  inet_listener quota-status {
+    listen = {{ __dovecot_quota_status_address }}
+    port = {{ __dovecot_quota_status_port }}
+  }
+  client_limit = 1
+}
+{% endif %}
+{% endif %}
+
+##
+## Protocols
+##
+
+service imap-login {
+  inet_listener imap {
+    port = {{ dovecot_imap_starttls_enabled | bool | ternary(143, 0) }}
+  }
+  inet_listener imaps {
+    port = 993
+    ssl = yes
+  }
+}
+
+protocol imap {
+  mail_plugins {
+    imap_acl = yes
+{% if dovecot_quota_enabled | bool %}
+    imap_quota = yes
+{% endif %}
+{% if dovecot_rspamd_learn_enabled | bool %}
+    imap_sieve = yes
+{% endif %}
+  }
+}
+{% if dovecot_pop3_enabled | bool %}
+
+service pop3-login {
+  inet_listener pop3 {
+    port = 0
+  }
+  inet_listener pop3s {
+    port = 995
+    ssl = yes
+  }
+}
+{% endif %}
+
+service lmtp {
+{% if dovecot_postfix_local | bool %}
+  unix_listener {{ __dovecot_postfix_lmtp_socket }} {
+    user = postfix
+    group = postfix
+    mode = 0600
+  }
+{% endif %}
+{% if dovecot_lmtp_listen | length > 0 %}
+  inet_listener lmtp {
+    listen = {{ __dovecot_lmtp_address }}
+    port = {{ __dovecot_lmtp_port }}
+  }
+{% endif %}
+}
+
+protocol lmtp {
+{% if dovecot_quota_enabled | bool %}
+  lmtp_rcpt_check_quota = yes
+{% endif %}
+  mail_plugins {
+    sieve = yes
+  }
+}
+{% if dovecot_managesieve_enabled | bool %}
+
+service managesieve-login {
+  inet_listener sieve {
+    port = 4190
+  }
+}
+{% endif %}
+
+##
+## Sieve
+##
+
+sieve_script personal {
+  driver = file
+  path = ~/sieve
+  active_path = ~/.dovecot.sieve
+}
+{% if dovecot_sieve_before | length > 0 %}
+
+sieve_script global-before {
+  type = before
+  path = {{ __dovecot_sieve_before_dir }}
+}
+{% endif %}
+{% if dovecot_sieve_after | length > 0 %}
+
+sieve_script global-after {
+  type = after
+  path = {{ __dovecot_sieve_after_dir }}
+}
+{% endif %}
+
+sieve_redirect_envelope_from = orig_recipient
+{% if dovecot_submission_host | length > 0 %}
+submission_host = {{ dovecot_submission_host }}
+submission_ssl = {{ dovecot_submission_ssl }}
+{% endif %}
+{% if dovecot_rspamd_learn_enabled | bool %}
+
+##
+## Spam Training
+##
+
+sieve_plugins {
+  sieve_imapsieve = yes
+  sieve_extprograms = yes
+}
+
+sieve_global_extensions {
+  vnd.dovecot.pipe = yes
+  vnd.dovecot.environment = yes
+}
+
+sieve_pipe_bin_dir = {{ __dovecot_sieve_pipe_dir }}
+
+# Into Junk from elsewhere: spam
+mailbox "{{ __dovecot_junk_mailbox }}" {
+  sieve_script report-spam {
+    type = before
+    cause = copy
+    path = {{ __dovecot_sieve_imap_dir }}/report-spam.sieve
+  }
+}
+
+# Out of Junk into another folder: ham
+imapsieve_from "{{ __dovecot_junk_mailbox }}" {
+  sieve_script report-ham {
+    type = before
+    cause = copy
+    path = {{ __dovecot_sieve_imap_dir }}/report-ham.sieve
+  }
+}
+{% endif %}
+{% if dovecot_extra_config | length > 0 %}
+
+##
+## Extra Configuration
+##
+
+{{ dovecot_extra_config }}
+{% endif %}

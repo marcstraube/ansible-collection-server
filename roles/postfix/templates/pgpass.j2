@@ -1,0 +1,5 @@
+{{ ansible_managed | comment }}
+{# Any host, port and database for the user; ':' and the backslash are
+    escaped with a backslash (character 92, written without a literal) #}
+{% set bs = '%c' | format(92) %}
+*:*:*:{{ postfix_db_user | replace(bs, bs ~ bs) | replace(':', bs ~ ':') }}:{{ postfix_db_password | replace(bs, bs ~ bs) | replace(':', bs ~ ':') }}

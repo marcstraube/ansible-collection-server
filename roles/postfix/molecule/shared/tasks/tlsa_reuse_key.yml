@@ -1,0 +1,33 @@
+---
+# One run of the DNS tasks against the certbot fixture of verify.yml with the
+# given reuse_key line (__verify_reuse_key: line, expected grep rc)
+- name: Verify | Plant the renewal configuration of the fixture
+  ansible.builtin.copy:
+    content: |
+      version = 3.1.0
+      [renewalparams]
+      authenticator = webroot
+      key_type = ecdsa
+      {{ __verify_reuse_key.line }}
+    dest: /root/molecule-letsencrypt/renewal/mail.example.com.conf
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Verify | Run DNS check with the certbot fixture  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: dns.yml
+  vars:
+    mta_enabled: false
+    postfix_dns_check_enabled: false
+    postfix_tls_cert_file: '/root/molecule-letsencrypt/live/mail.example.com/fullchain.pem'
+    postfix_dns_tlsa_certbot_dir: '/root/molecule-letsencrypt/'
+
+- name: Verify | Assert the key reuse check of the certbot certificate
+  ansible.builtin.assert:
+    that:
+      - __postfix_dns_tlsa_reuse_key.rc == __verify_reuse_key.rc
+      - __postfix_dns_report | selectattr('type', 'eq', 'TLSA') | list | length == 1
+    fail_msg: '{{ __postfix_dns_tlsa_reuse_key | to_json }}'
+    quiet: true

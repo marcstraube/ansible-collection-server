@@ -1,0 +1,261 @@
+---
+# The apparmor package of Arch Linux ships the Dovecot 2.3 profiles
+# (/etc/apparmor.d/usr.sbin.dovecot, usr.lib.dovecot.*) in enforce mode; they
+# do not cover the configuration of the role with Dovecot 2.4. Every profile
+# includes /etc/apparmor.d/local/<profile> if it exists: the role writes its
+# rules there for the profiles that need them with the current variables
+# and removes its files of the others. A file without the marker of the
+# role belongs to the administrator: the role fails before any change when
+# it needs that file and leaves it alone otherwise. Removed rules apply as
+# soon as the profile is reloaded, before Dovecot is reconfigured later in
+# the run. Debian 13 ships the profiles as extra
+# profiles only (not in /etc/apparmor.d); a host without AppArmor or without
+# the profiles needs no rules.
+
+- name: AppArmor | Check if AppArmor is active
+  ansible.builtin.stat:
+    path: /sys/kernel/security/apparmor
+  register: __dovecot_apparmor_active
+
+- name: AppArmor | Check which Dovecot profiles exist
+  ansible.builtin.stat:
+    path: '{{ __dovecot_apparmor_profile_dir }}/{{ item }}'
+  loop: '{{ __dovecot_apparmor_profiles }}'
+  register: __dovecot_apparmor_profile_stat
+  when: __dovecot_apparmor_active.stat.exists
+
+- name: AppArmor | Manage the rules for Dovecot
+  when: __dovecot_apparmor_existing | length > 0
+  vars:
+    __dovecot_apparmor_existing: >-
+      {{ __dovecot_apparmor_profile_stat.results | default([]) | selectattr('stat', 'defined')
+         | selectattr('stat.exists') | map(attribute='item') | list }}
+    __dovecot_apparmor_disabled: >-
+      {{ __dovecot_apparmor_mode.results | default([]) | selectattr('stat', 'defined')
+         | selectattr('stat.exists') | selectattr('item.1', 'eq', 'disable')
+         | map(attribute='item.0') | list }}
+    __dovecot_apparmor_complain: >-
+      {{ __dovecot_apparmor_mode.results | default([]) | selectattr('stat', 'defined')
+         | selectattr('stat.exists') | selectattr('item.1', 'eq', 'force-complain')
+         | map(attribute='item.0') | list }}
+    __dovecot_apparmor_wanted: >-
+      {{ __dovecot_apparmor_existing | select('in', __dovecot_apparmor_rules_profiles) | list
+         if dovecot_apparmor_enabled | bool else [] }}
+    # Existing files with the marker of the role
+    __dovecot_apparmor_owned: >-
+      {%- set ns = namespace(items=[]) -%}
+      {%- for result in __dovecot_apparmor_previous.results | default([]) | selectattr('content', 'defined') -%}
+      {%- if __dovecot_apparmor_marker in (result.content | b64decode).splitlines() -%}
+      {%- set ns.items = ns.items + [result.item] -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ ns.items }}
+    __dovecot_apparmor_written: >-
+      {{ __dovecot_apparmor_deployed.results | default([]) | selectattr('changed')
+         | map(attribute='item') | list }}
+    __dovecot_apparmor_dropped: >-
+      {{ __dovecot_apparmor_removed.results | default([]) | selectattr('changed')
+         | map(attribute='item') | list }}
+    __dovecot_apparmor_changed: '{{ __dovecot_apparmor_written + __dovecot_apparmor_dropped }}'
+  block:
+    # A disabled profile is not loaded; one in force-complain is loaded in
+    # complain mode
+    - name: AppArmor | Check the mode of the Dovecot profiles
+      ansible.builtin.stat:
+        path: '{{ __dovecot_apparmor_profile_dir }}/{{ item.1 }}/{{ item.0 }}'
+      loop: "{{ __dovecot_apparmor_existing | product(['disable', 'force-complain']) | list }}"
+      register: __dovecot_apparmor_mode
+
+    # AppArmor matches the path behind symlinks
+    - name: AppArmor | Resolve the paths of the rules
+      ansible.builtin.command:
+        argv: "{{ ['realpath', '-m', '--'] + __dovecot_apparmor_paths }}"
+      register: __dovecot_apparmor_realpath
+      changed_when: false
+      check_mode: false
+      when: dovecot_apparmor_enabled | bool
+
+    # The current files: restored when a profile does not load with the new
+    # rules; a file without the marker of the role belongs to the
+    # administrator
+    - name: AppArmor | Read the current rules
+      ansible.builtin.slurp:
+        src: '{{ __dovecot_apparmor_rules_dir }}/{{ item }}'
+      loop: '{{ __dovecot_apparmor_existing }}'
+      register: __dovecot_apparmor_previous
+      failed_when: false
+
+    - name: AppArmor | Assert the role owns the files it writes
+      ansible.builtin.assert:
+        that:
+          - __dovecot_apparmor_foreign | length == 0
+        fail_msg: >-
+          {{ __dovecot_apparmor_foreign | map('regex_replace', '^', __dovecot_apparmor_rules_dir ~ '/') | join(', ') }}
+          {{ 'was' if __dovecot_apparmor_foreign | length == 1 else 'were' }} not written by the role
+          (no line '{{ __dovecot_apparmor_marker }}'), and the role needs
+          {{ 'it' if __dovecot_apparmor_foreign | length == 1 else 'them' }} for its rules.
+          Delete the file; the role writes these rules itself. Only rules that
+          belong in every Dovecot profile go into a file in
+          {{ __dovecot_apparmor_profile_dir }}/abstractions/dovecot-common.d/, which
+          the internet-facing login processes (imap-login, pop3-login) include as
+          well. Then run the role again. Nothing was changed.
+        quiet: true
+      vars:
+        __dovecot_apparmor_foreign: >-
+          {{ __dovecot_apparmor_previous.results | selectattr('content', 'defined')
+             | map(attribute='item') | reject('in', __dovecot_apparmor_owned)
+             | select('in', __dovecot_apparmor_wanted) | list }}
+
+    # Marked before any file changes, so an interrupted run reloads the
+    # profiles on the next run; cleared at the end
+    - name: AppArmor | Check for a pending reload
+      ansible.builtin.stat:
+        path: '{{ __dovecot_apparmor_pending }}'
+      register: __dovecot_apparmor_pending_stat
+
+    - name: AppArmor | Create the directory of the local overrides
+      ansible.builtin.file:
+        path: '{{ __dovecot_apparmor_rules_dir }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      register: __dovecot_apparmor_dir
+      when: __dovecot_apparmor_wanted | length > 0
+
+    - name: AppArmor | Check which rules change
+      ansible.builtin.template:
+        src: apparmor-dovecot.j2
+        dest: '{{ __dovecot_apparmor_rules_dir }}/{{ item }}'
+        owner: root
+        group: root
+        mode: '0644'
+      loop: '{{ __dovecot_apparmor_wanted }}'
+      vars:
+        __dovecot_apparmor_profile: '{{ item }}'
+      register: __dovecot_apparmor_planned
+      check_mode: true
+      # In check mode a missing directory is not created
+      when: not (__dovecot_check_mode | default(ansible_check_mode) and __dovecot_apparmor_dir is changed)
+
+    - name: AppArmor | Mark the reload as pending
+      ansible.builtin.copy:
+        content: ''
+        dest: '{{ __dovecot_apparmor_pending }}'
+        owner: root
+        group: root
+        mode: '0644'
+      when: >-
+        __dovecot_apparmor_planned.results | default([]) | selectattr('changed') | list | length > 0
+        or __dovecot_apparmor_owned | reject('in', __dovecot_apparmor_wanted) | list | length > 0
+
+    - name: AppArmor | Deploy the rules
+      ansible.builtin.template:
+        src: apparmor-dovecot.j2
+        dest: '{{ __dovecot_apparmor_rules_dir }}/{{ item }}'
+        owner: root
+        group: root
+        mode: '0644'
+      loop: '{{ __dovecot_apparmor_wanted }}'
+      vars:
+        __dovecot_apparmor_profile: '{{ item }}'
+      register: __dovecot_apparmor_deployed
+      when: not (__dovecot_check_mode | default(ansible_check_mode) and __dovecot_apparmor_dir is changed)
+
+    # Files of the role for profiles without rules in the current
+    # configuration, all with the toggle off; files of the administrator
+    # stay
+    - name: AppArmor | Remove the rules
+      ansible.builtin.file:
+        path: '{{ __dovecot_apparmor_rules_dir }}/{{ item }}'
+        state: absent
+      loop: '{{ __dovecot_apparmor_owned | reject("in", __dovecot_apparmor_wanted) | list }}'
+      register: __dovecot_apparmor_removed
+
+    - name: AppArmor | Report the rules of disabled profiles
+      ansible.builtin.debug:
+        msg: >-
+          The Dovecot profile(s) {{ __dovecot_apparmor_changed_disabled | join(', ') }}
+          are disabled ({{ __dovecot_apparmor_profile_dir }}/disable); the rules in
+          {{ __dovecot_apparmor_rules_dir }} apply once they are enabled.
+      vars:
+        __dovecot_apparmor_changed_disabled: >-
+          {{ __dovecot_apparmor_changed | select('in', __dovecot_apparmor_disabled) | list }}
+      when: __dovecot_apparmor_changed_disabled | length > 0
+
+    # Runs immediately, not as a handler: the rules are in place before
+    # Dovecot starts or reloads. Running processes get the replaced
+    # profiles at once. A profile that does not load leaves the others
+    # loaded with their new rules.
+    - name: AppArmor | Load the rules
+      vars:
+        __dovecot_apparmor_reloads: >-
+          {{ (__dovecot_apparmor_existing if __dovecot_apparmor_pending_stat.stat.exists
+              else __dovecot_apparmor_changed)
+             | reject('in', __dovecot_apparmor_disabled) | list }}
+        __dovecot_apparmor_failed: >-
+          {{ __dovecot_apparmor_reload.results | default([]) | selectattr('failed', 'defined')
+             | selectattr('failed') | map(attribute='item') | list }}
+      block:
+        - name: AppArmor | Reload the Dovecot profiles
+          ansible.builtin.command:
+            argv: >-
+              {{ ['apparmor_parser', '-r']
+                 + (['-C'] if item in __dovecot_apparmor_complain else [])
+                 + [__dovecot_apparmor_profile_dir ~ '/' ~ item] }}
+          loop: '{{ __dovecot_apparmor_reloads }}'
+          register: __dovecot_apparmor_reload
+          changed_when: true
+
+        - name: AppArmor | Clear the pending reload
+          ansible.builtin.file:
+            path: '{{ __dovecot_apparmor_pending }}'
+            state: absent
+      rescue:
+        # New rules a profile does not load with are replaced by the ones
+        # before (rules of another file may be the cause), so the next boot
+        # loads the profile. Removed rules stay removed.
+        - name: AppArmor | Restore the rules before the run
+          ansible.builtin.copy:
+            content: '{{ item.content | b64decode }}'
+            dest: '{{ __dovecot_apparmor_rules_dir }}/{{ item.item }}'
+            owner: root
+            group: root
+            mode: '0644'
+          loop: >-
+            {{ __dovecot_apparmor_previous.results | default([]) | selectattr('content', 'defined')
+               | selectattr('item', 'in', __dovecot_apparmor_failed)
+               | selectattr('item', 'in', __dovecot_apparmor_written) | list }}
+          loop_control:
+            label: '{{ item.item }}'
+
+        - name: AppArmor | Remove the new rules
+          ansible.builtin.file:
+            path: '{{ __dovecot_apparmor_rules_dir }}/{{ item }}'
+            state: absent
+          loop: >-
+            {{ __dovecot_apparmor_failed | select('in', __dovecot_apparmor_written)
+               | reject('in', __dovecot_apparmor_previous.results | default([])
+                              | selectattr('content', 'defined') | map(attribute='item') | list)
+               | list }}
+
+        - name: AppArmor | Fail on the Dovecot profiles
+          ansible.builtin.fail:
+            msg: >-
+              apparmor_parser did not load {{ __dovecot_apparmor_errors | join(', ') }}.
+              Dovecot keeps the profiles that were loaded before. Fix the
+              profiles and run the role again; it repeats the reload.
+          vars:
+            # Profile (parser error; state of its rules)
+            __dovecot_apparmor_errors: >-
+              {%- set ns = namespace(errors=[]) -%}
+              {%- for result in __dovecot_apparmor_reload.results | default([])
+                    | selectattr('item', 'in', __dovecot_apparmor_failed) -%}
+              {%- set ns.errors = ns.errors + [__dovecot_apparmor_profile_dir ~ '/' ~ result.item ~ ' ('
+                    ~ ((result.stderr_lines | default([]) | join(' ')) or result.msg | default('')) | trim
+                    ~ '; ' ~ __dovecot_apparmor_rules_dir ~ '/' ~ result.item ~ ' '
+                    ~ ('is back at its state before the run' if result.item in __dovecot_apparmor_written
+                       else 'stays removed' if result.item in __dovecot_apparmor_dropped
+                       else 'is unchanged') ~ ')'] -%}
+              {%- endfor -%}
+              {{ ns.errors }}

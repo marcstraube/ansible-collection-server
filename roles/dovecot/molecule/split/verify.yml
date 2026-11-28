@@ -1,0 +1,214 @@
+---
+# The database container talks to Dovecot like a Postfix on another host
+# (LMTP, SASL, quota-status over TCP) and like a remote mail client (IMAP).
+- name: Verify — Client
+  hosts: database
+  gather_facts: true
+
+  vars:
+    __verify_dir: '/root/molecule-dovecot'
+    __verify_test: '/usr/bin/python3 -I /root/molecule-dovecot/mailtest.py'
+    __verify_mail: "{{ groups['mail'] | first }}"
+    __verify_mail_ip: "{{ hostvars[groups['mail'] | first]['ansible_facts']['default_ipv4']['address'] }}"
+
+  tasks:
+    - name: Verify | Gather the facts of the Dovecot host
+      ansible.builtin.setup:
+      delegate_to: '{{ __verify_mail }}'
+      delegate_facts: true
+
+    - name: Verify | Create the test directory
+      ansible.builtin.file:
+        path: '{{ __verify_dir }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Verify | Deploy the protocol client
+      ansible.builtin.copy:
+        src: ../shared/files/mailtest.py
+        dest: '{{ __verify_dir }}/mailtest.py'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Verify | Write the test message
+      ansible.builtin.copy:
+        content: "From: sender@example.org\r\nTo: alice@example.com\r\nSubject: split\r\n\r\nsplit\r\n"
+        dest: '{{ __verify_dir }}/split.eml'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Verify | Deliver over LMTP from the Postfix host
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_test.split() + ['lmtp', '--target', __verify_mail_ip ~ ':24',
+             '--rcpt', 'alice@example.com', '--message', __verify_dir ~ '/split.eml'] }}
+      register: __verify_lmtp
+      changed_when: false
+
+    - name: Verify | Authenticate over SASL from the Postfix host
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_test.split() + ['sasl', '--target', __verify_mail_ip ~ ':12345',
+             '--user', 'alice@example.com', '--password', item] }}
+      loop:
+        - 'alice-Secret-42'
+        - 'wrong-Secret-42'
+      register: __verify_sasl
+      changed_when: false
+
+    - name: Verify | Ask the quota-status service from the Postfix host
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_test.split() + ['policy', '--target', __verify_mail_ip ~ ':12340',
+             '--rcpt', 'alice@example.com'] }}
+      register: __verify_policy
+      changed_when: false
+
+    - name: Verify | Assert the Postfix interfaces over TCP
+      ansible.builtin.assert:
+        that:
+          - (__verify_lmtp.stdout | from_json).delivered
+          - (__verify_sasl.results[0].stdout | from_json).ok
+          - not (__verify_sasl.results[1].stdout | from_json).ok
+          - (__verify_policy.stdout | from_json).action == 'DUNNO'
+        fail_msg: >-
+          {{ __verify_lmtp.stdout }} {{ __verify_sasl.results | map(attribute='stdout') | list }}
+          {{ __verify_policy.stdout }}
+
+    - name: Verify | Log in over IMAP from the other host
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_test.split() + ['imap', '--host', __verify_mail, '--ca', __molecule_mail_ca_file,
+             '--user', 'alice@example.com', '--password', 'alice-Secret-42', '--action', 'count=INBOX'] }}
+      register: __verify_imap
+      changed_when: false
+
+    - name: Verify | Log in over POP3 from the other host
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_test.split() + ['pop3', '--host', __verify_mail, '--ca', __molecule_mail_ca_file,
+             '--user', 'alice@example.com', '--password', 'alice-Secret-42'] }}
+      register: __verify_pop3
+      changed_when: false
+
+    - name: Verify | Log in on 143 without STARTTLS from the other host
+      ansible.builtin.command:
+        argv: >-
+          {{ __verify_test.split() + ['imap-plain', '--host', __verify_mail,
+             '--user', 'alice@example.com', '--password', 'alice-Secret-42'] }}
+      register: __verify_plain
+      changed_when: false
+
+    - name: Verify | Assert the IMAP login and the delivered message
+      ansible.builtin.assert:
+        that:
+          - (__verify_imap.stdout | from_json).login
+          - (__verify_imap.stdout | from_json)['count:INBOX'] == 1
+          - (__verify_plain.stdout | from_json).connected
+          - not (__verify_plain.stdout | from_json).login
+          - (__verify_pop3.stdout | from_json).login
+          - (__verify_pop3.stdout | from_json).count == 1
+        fail_msg: '{{ __verify_imap.stdout }} {{ __verify_plain.stdout }} {{ __verify_pop3.stdout }}'
+
+- name: Verify — Dovecot
+  hosts: mail
+  gather_facts: true
+
+  tasks:
+    - name: Verify | Read the listening TCP ports
+      ansible.builtin.command:
+        argv: ['ss', '-Hltn']
+      register: __verify_ports
+      changed_when: false
+
+    # The unauthenticated listeners bind the network address only
+    - name: Verify | Assert the TCP listeners use the configured address
+      ansible.builtin.assert:
+        that:
+          - (__verify_ip ~ ':24') in __verify_listen
+          - (__verify_ip ~ ':12345') in __verify_listen
+          - (__verify_ip ~ ':12340') in __verify_listen
+          - __verify_listen | select('match', '.*:995$') | list | length > 0
+          - __verify_listen | select('match', '^(0\.0\.0\.0|\*|\[::\]):(24|12345|12340)$') | list | length == 0
+        fail_msg: '{{ __verify_listen }}'
+      vars:
+        __verify_ip: "{{ ansible_facts['default_ipv4']['address'] }}"
+        __verify_listen: "{{ __verify_ports.stdout_lines | map('split') | map(attribute=3) | list }}"
+
+    - name: Verify | Stat the Postfix queue directory
+      ansible.builtin.stat:
+        path: /var/spool/postfix
+      register: __verify_postfix
+
+    - name: Verify | Read dovecot.conf
+      ansible.builtin.slurp:
+        src: /etc/dovecot/dovecot.conf
+      register: __verify_config
+
+    - name: Verify | Assert verify-full and no local Postfix listeners
+      ansible.builtin.assert:
+        that:
+          - not __verify_postfix.stat.exists
+          - __verify_conf is search('(?m)^\s+sslmode = verify-full$')
+          - __verify_conf is search('(?m)^pgsql dovecot-split-db \{$')
+          - __verify_conf is not search('/var/spool/postfix')
+          - __verify_conf is search('(?m)^submission_host = dovecot-split-db:25$')
+          - __verify_conf is search('(?m)^submission_ssl = starttls$')
+      vars:
+        __verify_conf: '{{ __verify_config.content | b64decode }}'
+
+    # The first install: the package must not have started Dovecot with the
+    # packaged configuration, and the role's temporary policy-rc.d is gone,
+    # also the one side effect left behind on the installed host.
+    # The overlay storage of the container brings the policy-rc.d of the
+    # image back when the role removes its own file (it was renamed over the
+    # whiteout of the removed one), so the check is that the file is not the
+    # role's.
+    - name: Verify | Read the policy-rc.d
+      ansible.builtin.command:
+        argv: ['cat', '/usr/sbin/policy-rc.d']
+      register: __verify_policy_rc
+      changed_when: false
+      failed_when: false
+
+    - name: Verify | Read the service starts
+      ansible.builtin.command:
+        argv: ['journalctl', '--unit=dovecot', '--output=cat', '--no-pager']
+      register: __verify_journal
+      changed_when: false
+
+    - name: Verify | Assert Dovecot started once, with the role's configuration
+      ansible.builtin.assert:
+        that:
+          - __verify_policy_rc.stdout is not search('marcstraube\.server\.dovecot')
+          - __verify_starts | length == 1
+        fail_msg: >-
+          policy-rc.d: {{ __verify_policy_rc.stdout }}; Dovecot started
+          {{ __verify_starts | length }} times, expected once: {{ __verify_starts }}
+        success_msg: 'Only the role started Dovecot, the package did not'
+      vars:
+        __verify_starts: "{{ __verify_journal.stdout_lines | select('match', '^Started ') | list }}"
+
+    - name: Verify | Gather package facts
+      ansible.builtin.package_facts:
+
+    - name: Verify | Assert the POP3 package is installed
+      ansible.builtin.assert:
+        that:
+          - "'dovecot-pop3d' in ansible_facts['packages']"
+
+    - name: Verify | List the Maildir of alice
+      ansible.builtin.find:
+        paths:
+          - /var/vmail/example.com/alice/Maildir/new
+          - /var/vmail/example.com/alice/Maildir/cur
+      register: __verify_maildir
+
+    - name: Verify | Assert the message from the other host is in the Maildir
+      ansible.builtin.assert:
+        that:
+          - __verify_maildir.files | length == 1

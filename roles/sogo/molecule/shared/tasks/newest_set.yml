@@ -1,0 +1,14 @@
+---
+# Sets __side_effect_newest_set to the newest complete backup set
+- name: Side Effect | Find the backup sets
+  ansible.builtin.find:
+    paths: '{{ sogo_backup_dir }}'
+    file_type: directory
+    patterns: 'sogo-*'
+    excludes: '*.partial'
+  register: __side_effect_set_list
+
+- name: Side Effect | Record the newest backup set
+  ansible.builtin.set_fact:
+    __side_effect_newest_set: >-
+      {{ __side_effect_set_list.files | map(attribute='path') | map('basename') | sort | last }}

@@ -1,0 +1,340 @@
+---
+# Test environment of the postgresql and mariadb scenarios: the database
+# server of dovecot_db_type and PostfixAdmin with the test mailboxes and the
+# dovecot reader (the roles of this collection, with PHP from
+# marcstraube.common.php), EPEL on EL, a test certificate, the Postfix queue
+# directory without Postfix (the contract: the dovecot scenarios test LMTP
+# and SASL without Postfix) and a stand-in for the rspamd controller.
+- name: Prepare
+  hosts: all
+  gather_facts: true
+
+  vars_files:
+    - vars/main.yml
+
+  vars:
+    __prepare_packages:
+      Archlinux:
+        - systemd
+        - dbus
+        - procps-ng
+        - iproute2
+        - openssl
+        - python
+      Debian:
+        - systemd
+        - dbus
+        - procps
+        - iproute2
+        - openssl
+        - locales
+      RedHat:
+        - systemd
+        - dbus
+        - procps-ng
+        - iproute
+        - openssl
+        - glibc-langpack-en
+    __prepare_php_extensions:
+      postgresql:
+        Archlinux: ['pdo_pgsql', 'iconv']
+        Debian: ['pdo_pgsql', 'mbstring']
+        RedHat: ['pdo_pgsql', 'mbstring']
+      mariadb:
+        Archlinux: ['pdo_mysql', 'iconv']
+        Debian: ['pdo_mysql', 'mbstring']
+        RedHat: ['pdo_mysql', 'mbstring']
+    # EL 9: the php:8.3 module stream, the first with Argon2
+    __prepare_php_version: >-
+      {{ '8.3' if ansible_facts['os_family'] == 'RedHat'
+                 and ansible_facts['distribution_major_version'] == '9' else 'auto' }}
+    __prepare_nologin:
+      Archlinux: '/usr/bin/nologin'
+      Debian: '/usr/sbin/nologin'
+      RedHat: '/sbin/nologin'
+
+  tasks:
+    # Sudo PAM bypass — required for tasks using `become_user` on
+    # geerlingguy Rocky containers under GitHub-hosted runners
+    # (test container only).
+
+    - name: Prepare | Bypass sudo PAM stack (RedHat container)
+      ansible.builtin.copy:
+        content: |
+          #%PAM-1.0
+          auth       sufficient   pam_permit.so
+          account    sufficient   pam_permit.so
+          password   sufficient   pam_permit.so
+          session    sufficient   pam_permit.so
+        dest: /etc/pam.d/sudo
+        owner: root
+        group: root
+        mode: '0644'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Disable sudoers authentication (RedHat container)
+      ansible.builtin.copy:
+        content: 'Defaults !authenticate'
+        dest: /etc/sudoers.d/molecule-no-auth
+        owner: root
+        group: root
+        mode: '0440'
+        validate: 'visudo -cf %s'
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Update package cache (Arch)
+      community.general.pacman:
+        update_cache: true
+        upgrade: true
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    # The pacman ignore drop-in setup of marcstraube.common.package_management
+    # that the database roles expect; pacman fails on an Include glob
+    # without a match, so a file is in place before the Include line
+    - name: Prepare | Create pacman ignore drop-in directory (Arch)
+      ansible.builtin.file:
+        path: /etc/pacman.d/ignore.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Create pacman ignore drop-in (Arch)
+      ansible.builtin.copy:
+        content: "# molecule\n"
+        dest: /etc/pacman.d/ignore.d/00-molecule.conf
+        owner: root
+        group: root
+        mode: '0644'
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Include pacman ignore drop-ins (Arch)
+      ansible.builtin.lineinfile:
+        path: /etc/pacman.conf
+        line: 'Include = /etc/pacman.d/ignore.d/*.conf'
+        insertafter: '^\[options\]'
+        firstmatch: true
+      when: ansible_facts['os_family'] == 'Archlinux'
+
+    - name: Prepare | Update package cache (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Update package cache (RedHat)
+      ansible.builtin.dnf:
+        update_cache: true
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    # Multi-purpose repository the Dovecot CE packages depend on (libunwind);
+    # on a real host it comes from marcstraube.common.package_management
+    - name: Prepare | Install EPEL (RedHat)
+      ansible.builtin.dnf:
+        name: epel-release
+        state: present
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Prepare | Install container dependencies
+      ansible.builtin.package:
+        name: '{{ __prepare_packages[ansible_facts["os_family"]] }}'
+        state: present
+      retries: 3
+      delay: 5
+
+    # The PostgreSQL role sets the en_US.UTF-8 locale in the molecule vars
+    - name: Prepare | Generate en_US.UTF-8 locale (Debian)
+      community.general.locale_gen:
+        name: en_US.UTF-8
+        state: present
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Enable PostgreSQL 16 module stream (EL9)
+      ansible.builtin.dnf:
+        name: '@postgresql:16'
+        state: present
+      when:
+        - dovecot_db_type == 'postgresql'
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['distribution_major_version'] == '9'
+
+    #
+    # Database and PostfixAdmin
+    #
+
+    - name: Prepare | Include php role
+      ansible.builtin.include_role:
+        name: marcstraube.common.php
+      vars:
+        php_versions:
+          - version: '{{ __prepare_php_version }}'
+            extensions: '{{ __prepare_php_extensions[dovecot_db_type][ansible_facts["os_family"]] }}'
+            fpm: true
+        php_default_version: '{{ __prepare_php_version }}'
+
+    - name: Prepare | Include postgresql role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postgresql'
+      when: dovecot_db_type == 'postgresql'
+
+    - name: Prepare | Include mariadb role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../mariadb'
+      when: dovecot_db_type == 'mariadb'
+
+    - name: Prepare | Include postfixadmin role  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../../../postfixadmin'
+      vars:
+        postfixadmin_db_type: '{{ dovecot_db_type }}'
+
+    #
+    # Postfix Queue Directory
+    #
+    # The local unix listeners need the postfix user and the queue
+    # directory, which the Postfix package creates; the scenarios test LMTP
+    # and SASL without Postfix.
+    #
+
+    - name: Prepare | Create the postfix group
+      ansible.builtin.group:
+        name: postfix
+        system: true
+        state: present
+
+    - name: Prepare | Create the postfix user
+      ansible.builtin.user:
+        name: postfix
+        group: postfix
+        home: /var/spool/postfix
+        create_home: false
+        shell: '{{ __prepare_nologin[ansible_facts["os_family"]] }}'
+        system: true
+        state: present
+
+    - name: Prepare | Create the Postfix queue directory
+      ansible.builtin.file:
+        path: '{{ item.path }}'
+        state: directory
+        owner: '{{ item.owner }}'
+        group: root
+        mode: '{{ item.mode }}'
+      loop:
+        - {path: '/var/spool/postfix', owner: 'root', mode: '0755'}
+        - {path: '/var/spool/postfix/private', owner: 'postfix', mode: '0700'}
+
+    #
+    # Test Certificate
+    #
+
+    - name: Prepare | Create the private key directory
+      ansible.builtin.file:
+        path: /etc/ssl/private
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Prepare | Create the test certificate
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -newkey
+          - rsa:2048
+          - -nodes
+          - -days
+          - '30'
+          - -subj
+          - '/CN=mail.example.com'
+          - -addext
+          - 'subjectAltName=DNS:mail.example.com,DNS:localhost'
+          - -keyout
+          - '{{ dovecot_tls_key_file }}'
+          - -out
+          - '{{ dovecot_tls_cert_file }}'
+        creates: '{{ dovecot_tls_cert_file }}'
+
+    - name: Prepare | Restrict the test key
+      ansible.builtin.file:
+        path: '{{ dovecot_tls_key_file }}'
+        owner: root
+        group: root
+        mode: '0600'
+
+    #
+    # rspamd Controller Stand-in
+    #
+    # Records the learn requests of the spam training (rspamd_stub.py)
+    #
+
+    - name: Prepare | Create the stand-in directory
+      ansible.builtin.file:
+        path: /usr/local/lib/molecule
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Prepare | Deploy the rspamd controller stand-in
+      ansible.builtin.copy:
+        src: rspamd_stub.py
+        dest: /usr/local/lib/molecule/rspamd_stub.py
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Deploy the stand-in unit
+      ansible.builtin.copy:
+        src: rspamd-stub.service
+        dest: /etc/systemd/system/molecule-rspamd-stub.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Prepare | Start the rspamd controller stand-in
+      ansible.builtin.systemd_service:
+        name: molecule-rspamd-stub.service
+        state: started
+        daemon_reload: true
+
+    #
+    # Dovecot Started by the Package (Debian)
+    #
+    # On a Debian host the postinst of dovecot-core starts Dovecot with the
+    # packaged configuration (PAM, system users); the container blocks that
+    # with policy-rc.d. Started here, the role meets a running service with
+    # the old configuration: the shared mailbox ACLs it applies afterwards
+    # through doveadm only work when the role reloaded it first.
+    #
+
+    - name: Prepare | Install the Dovecot core package (Debian)
+      ansible.builtin.apt:
+        name:
+          - dovecot-core
+          - dovecot-imapd
+        state: present
+      retries: 3
+      delay: 5
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Prepare | Start Dovecot with the packaged configuration (Debian)
+      ansible.builtin.systemd_service:
+        name: dovecot
+        state: started
+        enabled: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # After every other role: the host has AppArmor for the role under test
+    - name: Prepare | Set up AppArmor
+      ansible.builtin.include_tasks: tasks/apparmor_host.yml
+      when: __molecule_apparmor | default(false) | bool
