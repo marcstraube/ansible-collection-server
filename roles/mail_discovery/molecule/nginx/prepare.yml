@@ -17,6 +17,7 @@
         server_names:
           - 'autoconfig.example.com'
           - 'autodiscover.example.com'
+          - 'mta-sts.example.com'
           - '{{ mail_discovery_web_host }}'
         root: '/var/www/mail-discovery'
         ssl:
@@ -36,6 +37,7 @@
         server_names:
           - 'autoconfig.example.org'
           - 'autodiscover.example.org'
+          - 'mta-sts.example.org'
         root: '/var/www/mail-discovery'
         ssl:
           enabled: true
@@ -51,13 +53,25 @@
           # static files and serves the file with 200 instead
           error_page 405 =200 $uri;
     # Not part of the README: the same web root without error_page, so
-    # verify.yml proves that nginx needs it
+    # verify.yml proves that nginx needs it, and a site that redirects the
+    # MTA-STS policy of example.net, so verify.yml proves the HTTP check
+    # does not follow the redirect
     __prepare_control_sites:
       - name: 'mail-discovery-control'
         server_names:
           - 'control.example.net'
         listen: 8080
         root: '/var/www/mail-discovery'
+      - name: 'mail-discovery-redirect'
+        server_names:
+          - 'mta-sts.example.net'
+        root: '/var/www/mail-discovery'
+        ssl:
+          enabled: true
+          certificate: '/etc/letsencrypt/live/autoconfig.example.com/fullchain.pem'
+          certificate_key: '/etc/letsencrypt/live/autoconfig.example.com/privkey.pem'
+        extra_config: |
+          return 301 https://mta-sts.example.com$request_uri;
 
   tasks:
     - name: Prepare | Import shared environment tasks

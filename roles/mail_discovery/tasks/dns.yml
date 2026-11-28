@@ -10,6 +10,7 @@
     __mail_discovery_dns_report: >-
       {{ __mail_discovery_dns_records | map('combine', {'status': 'unchecked', 'found': []}) | list }}
     __mail_discovery_dns_web_addresses: []
+    __mail_discovery_dns_mx_report: []
     __mail_discovery_dns_error: ''
 
 - name: DNS | Check records
@@ -25,6 +26,19 @@
                      *__mail_discovery_dns_servers, qtype='AAAA', **__mail_discovery_dns_options))
             | reject('in', ['', 'NXDOMAIN']) | map('lower') | list
           }}
+
+    # The MX hosts senders look up, compared with the MX list of the MTA-STS
+    # policy: in enforce mode they refuse to deliver to a host the policy
+    # does not list. Queried before the other records: a lookup error here
+    # leaves every record unchecked and the MX report empty.
+    - name: DNS | Query MX records
+      ansible.builtin.set_fact:
+        __mail_discovery_dns_mx_answer: >-
+          {{ query('community.general.dig', item,
+                   *__mail_discovery_dns_servers, qtype='MX', **__mail_discovery_dns_options) }}
+      loop: '{{ mail_discovery_domains }}'
+      register: __mail_discovery_dns_mx_answers
+      when: mail_discovery_mta_sts_enabled | bool
 
     - name: DNS | Query records
       ansible.builtin.set_fact:
@@ -49,6 +63,12 @@
                     *__mail_discovery_dns_servers, qtype='SRV', **__mail_discovery_dns_options)
               if item.type == 'srv' else []
             }}
+          txt: >-
+            {{
+              query('community.general.dig', item.name,
+                    *__mail_discovery_dns_servers, qtype='TXT', **__mail_discovery_dns_options)
+              if item.type == 'txt' else []
+            }}
       loop: '{{ __mail_discovery_dns_records }}'
       loop_control:
         label: '{{ item.name }}'
@@ -59,14 +79,15 @@
         __mail_discovery_dns_result:
           name: '{{ __record.name }}'
           record: '{{ __record.record }}'
-          found: '{{ __cname + __addresses + __srv }}'
+          found: '{{ __cname + __addresses + __srv + __txt }}'
           status: >-
             {{
-              'missing' if (__cname + __addresses + __srv) | length == 0
+              'missing' if (__cname + __addresses + __srv + __txt) | length == 0
               else 'present' if (
                 (__cname is contains(__record.target | lower)) if __cname | length > 0
                 else (__web | length > 0 and __addresses | difference(__web) | length == 0)
                   if __record.type == 'host'
+                else __txt == [__record.target] if __record.type == 'txt'
                 else __srv is contains(__record.port ~ ' ' ~ __record.target | lower))
               else 'different'
             }}
@@ -88,12 +109,54 @@
           {{ __answer.srv | reject('in', ['', 'NXDOMAIN'])
              | map('regex_replace', '^\d+ \d+ (\d+) (\S+?)\.?$', '\1 \2')
              | map('lower') | list }}
+        # Strings of one record joined, separators written as in the expected
+        # record, trailing separator dropped; only the records of the version
+        # the record expects (v=STSv1, v=TLSRPTv1), the senders ignore others.
+        # Two of them count as different: the senders then use none.
+        __txt: >-
+          {{ __answer.txt | default([]) | reject('in', ['', 'NXDOMAIN'])
+             | map('regex_replace', '"\s*"', '')
+             | map('regex_replace', '\s*;\s*', '; ')
+             | map('regex_replace', ';\s*$', '')
+             | map('regex_replace', '\s*,\s*', ',')
+             | select('match', (__record.target.split(';') | first) ~ ';')
+             | list }}
 
     - name: DNS | Collect report
       ansible.builtin.set_fact:
         __mail_discovery_dns_report: >-
           {{ __mail_discovery_dns_results.results
              | map(attribute='ansible_facts.__mail_discovery_dns_result') | list }}
+
+    # '<preference> <host>.' per MX host; the host is the last field, taken
+    # with split(). Without an MX record the domain itself is the implicit
+    # MX (RFC 5321, section 5.1); the lookup returns the same empty answer
+    # when the resolver does not answer. A null MX ('0 .', RFC 7505) gets its
+    # own status. Listed: the host equals an entry of the policy, or a '*.'
+    # entry matches it with exactly one leftmost label; case-insensitive.
+    - name: DNS | Compare MX records with the MTA-STS policy
+      ansible.builtin.set_fact:
+        __mail_discovery_dns_mx_report: >-
+          {%- set ns = namespace(report=[]) -%}
+          {%- set patterns = mail_discovery_mta_sts_mx | map('lower') | list -%}
+          {%- for answer in __mail_discovery_dns_mx_answers.results -%}
+          {%- set rdata = answer.ansible_facts.__mail_discovery_dns_mx_answer
+                          | reject('in', ['', 'NXDOMAIN']) | list -%}
+          {%- for mx in (rdata if rdata | length > 0 else ['']) -%}
+          {%- set implicit = mx == '' -%}
+          {%- set host = answer.item | lower if implicit else (mx.split() | last | lower).rstrip('.') -%}
+          {%- set ns.report = ns.report + [{
+                'domain': answer.item, 'host': host,
+                'record': answer.item ~ '. (implicit MX, no MX record)' if implicit
+                          else answer.item ~ '. IN MX ' ~ mx,
+                'status': 'null' if host == ''
+                          else 'listed' if host in patterns
+                            or (host is search('[.]') and '*.' ~ host.split('.', 1)[1] in patterns)
+                          else 'unlisted'}] -%}
+          {%- endfor -%}
+          {%- endfor -%}
+          {{ ns.report }}
+      when: mail_discovery_mta_sts_enabled | bool
 
   # Only an error of the dig lookup itself (dnspython missing, a resolver name
   # that does not resolve, an unexpected resolver error) skips the check. The
@@ -130,6 +193,34 @@
               __mail_discovery_dns_report | map(attribute='found') | map('join', ', '))
         | map('join', ' | ') | map('regex_replace', ' [|] $', '') | list
       }}
+
+- name: DNS | Show MX hosts of the MTA-STS policy
+  ansible.builtin.debug:
+    msg: >-
+      {{
+        __mail_discovery_dns_mx_report
+        | map(attribute='status') | map('upper')
+        | zip(__mail_discovery_dns_mx_report | map(attribute='record'))
+        | map('join', ' | ') | list
+      }}
+  when: __mail_discovery_dns_mx_report | length > 0
+
+- name: DNS | Warn about MX hosts the MTA-STS policy does not list
+  ansible.builtin.debug:
+    msg: >-
+      The MX hosts reported as UNLISTED above match no entry of
+      mail_discovery_mta_sts_mx ({{ mail_discovery_mta_sts_mx | join(', ') }}).
+      With mode 'enforce' senders that support MTA-STS refuse to deliver to
+      them; add them to the list or correct the MX records.
+  when: __mail_discovery_dns_mx_report | selectattr('status', 'equalto', 'unlisted') | list | length > 0
+
+- name: DNS | Warn about a null MX with MTA-STS
+  ansible.builtin.debug:
+    msg: >-
+      The domains reported as NULL above publish a null MX (RFC 7505) and
+      accept no mail; an MTA-STS policy for them has no use. Remove them from
+      mail_discovery_domains or publish their MX records.
+  when: __mail_discovery_dns_mx_report | selectattr('status', 'equalto', 'null') | list | length > 0
 
 - name: DNS | Warn about the failed check
   ansible.builtin.debug:

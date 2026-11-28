@@ -1,7 +1,7 @@
 ---
 galaxy_info:
   author: Marc Straube
-  description: Publish the client discovery data of mail domains (Autoconfig, Autodiscover, Apple profile)
+  description: Publish the discovery data of mail domains (Autoconfig, Autodiscover, Apple profile, MTA-STS, TLS-RPT)
   license: MIT
   min_ansible_version: '2.19'
 
@@ -23,6 +23,8 @@ galaxy_info:
     - autodiscover
     - thunderbird
     - outlook
+    - mtasts
+    - tlsrpt
     - dns
 
 dependencies: []

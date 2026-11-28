@@ -56,6 +56,24 @@
   loop: '{{ mail_discovery_domains }}'
   when: mail_discovery_apple_profile_enabled | bool
 
+# Copied from a variable instead of a template: the policy id of the DNS
+# record is the hash of exactly these bytes (CRLF line ends, no header)
+- name: Files | Deploy MTA-STS policy
+  ansible.builtin.copy:
+    content: '{{ __mail_discovery_mta_sts_policy }}'
+    dest: '{{ mail_discovery_web_root }}/{{ __mail_discovery_mta_sts_file }}'
+    owner: root
+    group: root
+    mode: '0644'
+  when: mail_discovery_mta_sts_enabled | bool
+
+# Own state: the role renders the file and removes it with the toggle
+- name: Files | Remove MTA-STS policy
+  ansible.builtin.file:
+    path: '{{ mail_discovery_web_root }}/{{ __mail_discovery_mta_sts_file }}'
+    state: absent
+  when: not mail_discovery_mta_sts_enabled | bool
+
 # Own state: the directory holds only the profiles the role renders, so it
 # goes away with the toggle, together with the profiles of every domain
 - name: Files | Remove Apple configuration profile directory

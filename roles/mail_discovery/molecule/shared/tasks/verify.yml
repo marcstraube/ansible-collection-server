@@ -8,6 +8,12 @@
     __verify_web_root: '/var/www/mail-discovery'
     __verify_pop3: '{{ mail_discovery_pop3_enabled | bool }}'
     __verify_apple: '{{ mail_discovery_apple_profile_enabled | bool }}'
+    __verify_mta_sts: '{{ mail_discovery_mta_sts_enabled | bool }}'
+    __verify_tls_rpt: '{{ mail_discovery_tls_rpt_rua | length > 0 }}'
+    # The policy of the toggle set as RFC 8461 writes it, every line ending
+    # with CRLF (YAML escapes in shared/vars), base64-encoded to compare it
+    # byte by byte
+    __verify_mta_sts_policy: '{{ __molecule_toggles.mta_sts_policy | b64encode }}'
     __verify_display_name: >-
       {{ mail_discovery_display_name if mail_discovery_display_name | length > 0
          else 'example.com' }}
@@ -137,6 +143,37 @@
       - __verify_apple_dir.stat.exists == __verify_apple
     fail_msg: 'apple/ exists: {{ __verify_apple_dir.stat.exists }}, profile enabled: {{ __verify_apple }}'
 
+- name: Verify | Read MTA-STS policy
+  ansible.builtin.slurp:
+    src: '{{ __verify_web_root }}/.well-known/mta-sts.txt'
+  register: __verify_mta_sts_file
+  when: __verify_mta_sts
+
+- name: Verify | Assert MTA-STS policy content
+  ansible.builtin.assert:
+    that:
+      - __verify_mta_sts_file.content == __verify_mta_sts_policy
+    fail_msg: '{{ __verify_mta_sts_file.content | b64decode | to_json }}'
+  when: __verify_mta_sts
+
+# The SHA-256 of the file as the container computes it: the policy id of
+# the DNS report has to be its start
+- name: Verify | Check MTA-STS policy
+  ansible.builtin.stat:
+    path: '{{ __verify_web_root }}/.well-known/mta-sts.txt'
+    checksum_algorithm: sha256
+  register: __verify_mta_sts_stat
+
+- name: Verify | Assert MTA-STS policy follows the toggle
+  ansible.builtin.assert:
+    that:
+      - __verify_mta_sts_stat.stat.exists == __verify_mta_sts
+    fail_msg: 'mta-sts.txt exists: {{ __verify_mta_sts_stat.stat.exists }}, MTA-STS enabled: {{ __verify_mta_sts }}'
+
+- name: Verify | Store MTA-STS policy id
+  ansible.builtin.set_fact:
+    __verify_mta_sts_id: '{{ __verify_mta_sts_stat.stat.checksum[:20] if __verify_mta_sts else "" }}'
+
 #
 # Owner and mode
 #
@@ -154,6 +191,7 @@
       + ((['/apple'] + mail_discovery_domains | map('regex_replace', '^', '/apple/')
                        | map('regex_replace', '$', '.mobileconfig') | list)
          if __verify_apple else [])
+      + (['/.well-known/mta-sts.txt'] if __verify_mta_sts else [])
     }}
   loop_control:
     label: '{{ __verify_web_root }}{{ item }}'
@@ -176,7 +214,7 @@
   loop_control:
     label: '{{ __verify_web_root }}{{ item.item }}'
   vars:
-    __file: "{{ item.item is search('[.](xml|mobileconfig)$') }}"
+    __file: "{{ item.item is search('[.](xml|mobileconfig|txt)$') }}"
 
 #
 # Web server
@@ -215,14 +253,15 @@
       }}
   loop: >-
     {{ mail_discovery_domains
-       | product(__verify_requests | rejectattr('apple') | list
-                 + (__verify_requests | selectattr('apple') | list if __verify_apple else []))
+       | product(__verify_requests | selectattr('toggle', 'in', __verify_toggles) | list)
        | list }}
   loop_control:
     label: '{{ item.1.method }} {{ item.1.host }}.{{ item.0 }}{{ item.1.path | replace("DOMAIN", item.0) }}'
   register: __verify_responses
   changed_when: false
   vars:
+    __verify_toggles: >-
+      {{ ['always'] + (['apple'] if __verify_apple else []) + (['mta_sts'] if __verify_mta_sts else []) }}
     __verify_requests:
       - name: 'autoconfig'
         method: 'GET'
@@ -230,28 +269,35 @@
         path: '/mail/config-v1.1.xml?emailaddress=user%40DOMAIN'
         file: 'mail/config-v1.1.xml'
         type: 'xml'
-        apple: false
+        toggle: 'always'
       - name: 'well-known'
         method: 'GET'
         host: 'autoconfig'
         path: '/.well-known/autoconfig/mail/config-v1.1.xml'
         file: '.well-known/autoconfig/mail/config-v1.1.xml'
         type: 'xml'
-        apple: false
+        toggle: 'always'
       - name: 'autodiscover'
         method: 'POST'
         host: 'autodiscover'
         path: '/autodiscover/autodiscover.xml'
         file: 'autodiscover/autodiscover.xml'
         type: 'xml'
-        apple: false
+        toggle: 'always'
       - name: 'apple'
         method: 'GET'
         host: 'autoconfig'
         path: '/apple/DOMAIN.mobileconfig'
         file: 'apple/DOMAIN.mobileconfig'
         type: 'application/x-apple-aspen-config'
-        apple: true
+        toggle: 'apple'
+      - name: 'mta-sts'
+        method: 'GET'
+        host: 'mta-sts'
+        path: '/.well-known/mta-sts.txt'
+        file: '.well-known/mta-sts.txt'
+        type: 'text/plain'
+        toggle: 'mta_sts'
 
 - name: Verify | Assert status and content type
   ansible.builtin.assert:
@@ -334,7 +380,9 @@
                   + (['_submissions._tcp'] if mail_discovery_submission_implicit_tls_enabled | bool else [])
                   + (['_submission._tcp'] if mail_discovery_submission_starttls_enabled | bool else [])
                   + (['_pop3s._tcp'] if __verify_pop3 else [])
-                  + ['_autodiscover._tcp'])
+                  + ['_autodiscover._tcp']
+                  + (['mta-sts', '_mta-sts'] if __verify_mta_sts else [])
+                  + (['_smtp._tls'] if __verify_tls_rpt else []))
         | map('reverse') | map('join', '.') | list
       }}
     # State of every record in the test zone (molecule-dns.conf)
@@ -346,6 +394,9 @@
       _submission._tcp.example.com: 'present'
       _pop3s._tcp.example.com: 'present'
       _autodiscover._tcp.example.com: 'present'
+      mta-sts.example.com: 'present'
+      _mta-sts.example.com: 'present'
+      _smtp._tls.example.com: 'present'
       autoconfig.example.org: 'different'
       autodiscover.example.org: 'missing'
       _imaps._tcp.example.org: 'different'
@@ -353,6 +404,9 @@
       _submission._tcp.example.org: 'missing'
       _pop3s._tcp.example.org: 'missing'
       _autodiscover._tcp.example.org: 'different'
+      mta-sts.example.org: 'missing'
+      _mta-sts.example.org: 'different'
+      _smtp._tls.example.org: 'missing'
 
 - name: Verify | Run DNS check  # noqa: role-name[path]
   ansible.builtin.include_role:
@@ -369,6 +423,13 @@
       - "'_imaps._tcp.example.com. IN SRV 0 1 993 mail.example.com.' in __verify_report.records"
       - "'autoconfig.example.org. IN CNAME web.example.net.' in __verify_report.records"
       - "'_autodiscover._tcp.example.org. IN SRV 0 1 443 web.example.net.' in __verify_report.records"
+      - not __verify_mta_sts
+        or ('mta-sts.example.org. IN CNAME web.example.net.' in __verify_report.records
+            and '_mta-sts.example.org. IN TXT "v=STSv1; id=' ~ __verify_mta_sts_id ~ '"'
+                in __verify_report.records)
+      - not __verify_tls_rpt
+        or ('_smtp._tls.example.com. IN TXT "v=TLSRPTv1; rua=mailto:tls-reports@example.com,'
+            ~ 'https://reports.example.net/tlsrpt"' in __verify_report.records)
     fail_msg: '{{ __verify_report | to_json }}'
   vars:
     __verify_report:
@@ -384,6 +445,61 @@
                    if mail_discovery_dns_check_enabled | bool
                    else __verify_dns_names | map('regex_replace', '^.*$', 'unchecked')))
       }}
+
+# MX hosts of the test zone against the MX list of the policy: example.com
+# matches (one host through the wildcard), example.org has a host two labels
+# below the wildcard. Without MTA-STS or the DNS check nothing is looked up.
+- name: Verify | Assert MX hosts of the MTA-STS policy
+  ansible.builtin.assert:
+    that:
+      - __verify_mx == (__verify_mx_expected if __verify_mta_sts and mail_discovery_dns_check_enabled | bool else {})
+    fail_msg: '{{ __mail_discovery_dns_mx_report | to_json }}'
+  vars:
+    __report: '{{ __mail_discovery_dns_mx_report }}'
+    __verify_mx: >-
+      {{ dict(__report | map(attribute='domain') | zip(__report | map(attribute='host'))
+              | map('join', ' ') | zip(__report | map(attribute='status'))) }}
+    __verify_mx_expected:
+      example.com mail.example.com: 'listed'
+      example.com a.mx.example.net: 'listed'
+      example.org mail.example.com: 'listed'
+      example.org a.b.mx.example.net: 'unlisted'
+
+# Domains without an MX record are their own implicit MX, a null MX gets its
+# own status; the policy entries in upper case prove that the comparison
+# ignores case on the policy side as well (the test resolver answers in
+# lower case)
+- name: Verify | Run DNS check with implicit and null MX domains  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: dns.yml
+  vars:
+    mail_discovery_domains:
+      - 'example.com'
+      - 'example.net'
+      - 'a.mx.example.net'
+      - 'null.example.net'
+    mail_discovery_mta_sts_enabled: true
+    mail_discovery_mta_sts_mx:
+      - 'MAIL.Example.com'
+      - '*.MX.example.net'
+    mail_discovery_dns_check_enabled: true
+
+- name: Verify | Assert implicit and null MX statuses
+  ansible.builtin.assert:
+    that:
+      - __mail_discovery_dns_error == ''
+      - __verify_mx == __verify_mx_expected
+    fail_msg: '{{ __mail_discovery_dns_mx_report | to_json }}'
+  vars:
+    __report: '{{ __mail_discovery_dns_mx_report }}'
+    __verify_mx: "{{ dict(__report | map(attribute='record') | zip(__report | map(attribute='status'))) }}"
+    __verify_mx_expected:
+      example.com. IN MX 10 mail.example.com.: 'listed'
+      example.com. IN MX 20 a.mx.example.net.: 'listed'
+      example.net. (implicit MX, no MX record): 'unlisted'
+      a.mx.example.net. (implicit MX, no MX record): 'listed'
+      null.example.net. IN MX 0 .: 'null'
 
 # A resolver name that cannot be resolved makes the lookup itself fail (RFC
 # 6761 name, never resolvable). The role catches it, still lists every record
@@ -448,7 +564,8 @@
             'GET https://autoconfig.' ~ domain ~ '/mail/config-v1.1.xml',
             'GET https://autoconfig.' ~ domain ~ '/.well-known/autoconfig/mail/config-v1.1.xml',
             'POST https://autodiscover.' ~ domain ~ '/autodiscover/autodiscover.xml']
-          + (['GET https://autoconfig.' ~ domain ~ '/apple/' ~ domain ~ '.mobileconfig'] if __verify_apple else []) -%}
+          + (['GET https://autoconfig.' ~ domain ~ '/apple/' ~ domain ~ '.mobileconfig'] if __verify_apple else [])
+          + (['GET https://mta-sts.' ~ domain ~ '/.well-known/mta-sts.txt'] if __verify_mta_sts else []) -%}
       {%- endfor -%}
       {{ ns.requests }}
 
@@ -468,6 +585,8 @@
       - __verify_report | map(attribute='found') | reject('match', '^200 ') | list | length == 0
       - __verify_report | selectattr('request', 'search', 'mobileconfig$') | map(attribute='found')
         | reject('equalto', '200 application/x-apple-aspen-config') | list | length == 0
+      - __verify_report | selectattr('request', 'search', 'mta-sts[.]txt$') | map(attribute='found')
+        | reject('equalto', '200 text/plain') | list | length == 0
     fail_msg: '{{ __verify_report | to_json }}'
   vars:
     __verify_report: '{{ __mail_discovery_http_report }}'
@@ -549,6 +668,85 @@
     __post: "{{ __report | selectattr('request', 'match', '^POST ') | list }}"
     __others: "{{ __report | rejectattr('request', 'match', '^POST ') | list }}"
 
+# A site that serves another policy than the rendered one (here: the file
+# replaced by an older one) is reported with its content, the other
+# requests stay reachable
+- name: Verify | Run HTTP check with another MTA-STS policy
+  when: __verify_mta_sts
+  block:
+    - name: Verify | Replace the MTA-STS policy
+      ansible.builtin.command:
+        argv:
+          - cp
+          - --preserve=all
+          - '{{ __verify_web_root }}/.well-known/mta-sts.txt'
+          - /tmp/mail-discovery-mta-sts.txt
+      changed_when: true
+
+    - name: Verify | Write an older MTA-STS policy
+      ansible.builtin.copy:
+        content: "version: STSv1\r\nmode: none\r\nmx: mail.example.com\r\nmax_age: 86400\r\n"
+        dest: '{{ __verify_web_root }}/.well-known/mta-sts.txt'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Verify | Include HTTP check with another MTA-STS policy  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+        tasks_from: http.yml
+      vars:
+        mail_discovery_http_check_enabled: true
+
+    - name: Verify | Assert the other policy was reported and the run went on
+      ansible.builtin.assert:
+        that:
+          - __report | map(attribute='request') | list == __verify_http_requests
+          - __policy | map(attribute='status') | unique | list == ['unreachable']
+          - __policy | map(attribute='found') | unique | list == ['200 text/plain, different content']
+          - __others | map(attribute='status') | unique | list == ['reachable']
+        fail_msg: '{{ __report | to_json }}'
+      vars:
+        __report: '{{ __mail_discovery_http_report }}'
+        __policy: "{{ __report | selectattr('request', 'search', 'mta-sts[.]txt$') | list }}"
+        __others: "{{ __report | rejectattr('request', 'search', 'mta-sts[.]txt$') | list }}"
+
+  always:
+    - name: Verify | Restore the MTA-STS policy
+      ansible.builtin.command:
+        argv:
+          - mv
+          - /tmp/mail-discovery-mta-sts.txt
+          - '{{ __verify_web_root }}/.well-known/mta-sts.txt'
+        removes: /tmp/mail-discovery-mta-sts.txt
+
+# A site that redirects the policy URL (prepare: mta-sts.example.net to
+# mta-sts.example.com) is reported with the redirect: senders do not follow
+# it. Certificate verification off, the site uses the example.com
+# certificate.
+- name: Verify | Run HTTP check against a redirected MTA-STS policy  # noqa: role-name[path]
+  ansible.builtin.include_role:
+    name: '{{ playbook_dir }}/../..'
+    tasks_from: http.yml
+  vars:
+    mail_discovery_domains:
+      - 'example.net'
+    mail_discovery_mta_sts_enabled: true
+    mail_discovery_http_check_enabled: true
+    mail_discovery_http_check_validate_certs: false
+
+- name: Verify | Assert the redirect was reported, not followed
+  ansible.builtin.assert:
+    that:
+      - __policy | length == 1
+      - __policy[0].status == 'unreachable'
+      - __policy[0].found is match('^301 ')
+    fail_msg: '{{ __mail_discovery_http_report | to_json }}'
+  vars:
+    __policy: >-
+      {{ __mail_discovery_http_report
+         | selectattr('request', 'equalto', 'GET https://mta-sts.example.net/.well-known/mta-sts.txt') | list }}
+
 #
 # Toggles and validation
 #
@@ -573,6 +771,32 @@
       ansible.builtin.assert:
         that:
           - not __verify_apple_dir_off.stat.exists
+
+# Turning MTA-STS off removes the policy, the rest of .well-known stays
+- name: Verify | Turn MTA-STS off
+  when: __verify_mta_sts
+  block:
+    - name: Verify | Include mail_discovery role with MTA-STS off  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_discovery_mta_sts_enabled: false
+        mail_discovery_dns_check_enabled: false
+        mail_discovery_http_check_enabled: false
+
+    - name: Verify | Check the files after the MTA-STS toggle
+      ansible.builtin.stat:
+        path: '{{ __verify_web_root }}/{{ item }}'
+      loop:
+        - .well-known/mta-sts.txt
+        - .well-known/autoconfig/mail/config-v1.1.xml
+      register: __verify_mta_sts_off
+
+    - name: Verify | Assert the MTA-STS policy was removed
+      ansible.builtin.assert:
+        that:
+          - not __verify_mta_sts_off.results[0].stat.exists
+          - __verify_mta_sts_off.results[1].stat.exists
 
 # A web root that does not exist yet is created with its missing parents,
 # all root:root 0755

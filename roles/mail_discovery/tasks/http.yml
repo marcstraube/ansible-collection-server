@@ -19,13 +19,17 @@
     # resolution, TLS and timeout errors come back with status -1, and the
     # module fails without any status when the server drops the connection
     # mid-request (e.g. a broken pipe on the POST). A broken variable still
-    # fails the task, before any request is sent.
+    # fails the task, before any request is sent. The body is only read for
+    # the MTA-STS policy, without following redirects: senders must not
+    # follow them either (RFC 8461, section 3.3).
     - name: HTTP | Request files
       ansible.builtin.uri:
         url: '{{ item.url }}'
         method: '{{ item.method }}'
         body: '{{ __mail_discovery_http_autodiscover_request if item.method == "POST" else omit }}'
         headers: '{{ {"Content-Type": "text/xml"} if item.method == "POST" else omit }}'
+        return_content: '{{ item.content is defined }}'
+        follow_redirects: '{{ "none" if item.content is defined else omit }}'
         validate_certs: '{{ mail_discovery_http_check_validate_certs | bool }}'
         ca_path: '{{ mail_discovery_http_check_ca_path if mail_discovery_http_check_ca_path | length > 0 else omit }}'
         status_code: 200
@@ -43,9 +47,11 @@
       vars:
         __mail_discovery_http_email: '{{ item.email | default("") }}'
 
-    # Reachable: status 200 with the content type the clients expect. Found:
-    # status and content type of the answer, or the error without the generic
-    # prefix of the uri module (none when the module failed without a status)
+    # Reachable: status 200 with the content type the clients expect and, for
+    # the MTA-STS policy, the rendered policy as body. Found: status and
+    # content type of the answer (and a note on a different body), or the
+    # error without the generic prefix of the uri module (none when the
+    # module failed without a status)
     - name: HTTP | Collect report
       ansible.builtin.set_fact:
         __mail_discovery_http_report: >-
@@ -53,13 +59,16 @@
           {%- for response in __mail_discovery_http_responses.results -%}
           {%- set status = response.status | default(-1) | int -%}
           {%- set type = response.content_type | default('') | regex_replace(';.*$', '') | trim | lower -%}
+          {%- set same = response.item.content is not defined
+                         or response.content | default('') == response.item.content -%}
           {%- set ns.report = ns.report + [{
                 'request': response.item.method ~ ' ' ~ response.item.url,
-                'status': 'reachable' if status == 200
+                'status': 'reachable' if status == 200 and same
                             and ((type is search('xml')) if response.item.type == 'xml'
                                  else type == response.item.type)
                           else 'unreachable',
-                'found': status ~ ' ' ~ (type or 'no content type') if status > 0
+                'found': status ~ ' ' ~ (type or 'no content type')
+                         ~ ('' if same or status != 200 else ', different content') if status > 0
                          else response.msg | default('the connection failed without an answer', true)
                               | regex_replace('^Status code was -?\d+ and not \[[^]]*\]: ', '')}] -%}
           {%- endfor -%}
@@ -83,8 +92,9 @@
           (requested from {{ mail_discovery_http_check_delegate }}). Check the
           DNS records, the site and its certificate for the name; a POST
           answered with 405 comes from an nginx site without
-          'error_page 405 =200 $uri;'. A controller that cannot reach the
-          sites can send the requests from another host
-          (mail_discovery_http_check_delegate);
+          'error_page 405 =200 $uri;', an MTA-STS policy with different
+          content from a site that serves another file or a stale copy. A
+          controller that cannot reach the sites can send the requests from
+          another host (mail_discovery_http_check_delegate);
           mail_discovery_http_check_enabled false turns the check off.
       when: __mail_discovery_http_report | selectattr('status', 'equalto', 'unreachable') | list | length > 0

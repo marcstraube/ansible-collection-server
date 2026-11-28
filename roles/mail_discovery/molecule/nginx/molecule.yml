@@ -6,8 +6,8 @@ driver:
 # side; the DNS check of the role queries it from the controller. The
 # controller cannot reach the web server in the container by name, so the
 # HTTP check runs in the container (shared/vars), where etc_hosts points the
-# autoconfig and autodiscover names to the local web server. Each platform
-# runs another toggle set (molecule_variant, see shared/vars).
+# autoconfig, autodiscover and mta-sts names to the local web server. Each
+# platform runs another toggle set (molecule_variant, see shared/vars).
 platforms:
   - name: mail-discovery-nginx-archlinux
     image: docker.io/marcstraube/archlinux-ansible:latest
@@ -26,6 +26,11 @@ platforms:
       autodiscover.example.com: 127.0.0.1
       autoconfig.example.org: 127.0.0.1
       autodiscover.example.org: 127.0.0.1
+      mta-sts.example.com: 127.0.0.1
+      mta-sts.example.org: 127.0.0.1
+      autoconfig.example.net: 127.0.0.1
+      autodiscover.example.net: 127.0.0.1
+      mta-sts.example.net: 127.0.0.1
   - name: mail-discovery-nginx-debian-trixie
     image: docker.io/geerlingguy/docker-debian13-ansible:latest
     pre_build_image: true
@@ -43,6 +48,11 @@ platforms:
       autodiscover.example.com: 127.0.0.1
       autoconfig.example.org: 127.0.0.1
       autodiscover.example.org: 127.0.0.1
+      mta-sts.example.com: 127.0.0.1
+      mta-sts.example.org: 127.0.0.1
+      autoconfig.example.net: 127.0.0.1
+      autodiscover.example.net: 127.0.0.1
+      mta-sts.example.net: 127.0.0.1
   - name: mail-discovery-nginx-rocky-9
     image: docker.io/geerlingguy/docker-rockylinux9-ansible:latest
     pre_build_image: true
@@ -60,6 +70,11 @@ platforms:
       autodiscover.example.com: 127.0.0.1
       autoconfig.example.org: 127.0.0.1
       autodiscover.example.org: 127.0.0.1
+      mta-sts.example.com: 127.0.0.1
+      mta-sts.example.org: 127.0.0.1
+      autoconfig.example.net: 127.0.0.1
+      autodiscover.example.net: 127.0.0.1
+      mta-sts.example.net: 127.0.0.1
   - name: mail-discovery-nginx-rocky-10
     image: docker.io/geerlingguy/docker-rockylinux10-ansible:latest
     pre_build_image: true
@@ -77,6 +92,11 @@ platforms:
       autodiscover.example.com: 127.0.0.1
       autoconfig.example.org: 127.0.0.1
       autodiscover.example.org: 127.0.0.1
+      mta-sts.example.com: 127.0.0.1
+      mta-sts.example.org: 127.0.0.1
+      autoconfig.example.net: 127.0.0.1
+      autodiscover.example.net: 127.0.0.1
+      mta-sts.example.net: 127.0.0.1
 provisioner:
   name: ansible
   playbooks:

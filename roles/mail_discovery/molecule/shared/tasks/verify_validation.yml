@@ -158,6 +158,184 @@
                'msg': ansible_failed_result.msg | default(''),
                'task': ansible_failed_task.name | default('')}}) }}
 
+- name: Verify | Run role with a bad MTA-STS mode
+  block:
+    - name: Verify | Include mail_discovery role with a bad MTA-STS mode  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_discovery_mta_sts_enabled: true
+        mail_discovery_mta_sts_mode: 'report'
+  rescue:
+    - name: Verify | Record the failure with a bad MTA-STS mode
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'mta_sts_mode': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with an empty MTA-STS MX list
+  block:
+    - name: Verify | Include mail_discovery role with an empty MTA-STS MX list  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_discovery_mta_sts_enabled: true
+        mail_discovery_mta_sts_mx: []
+  rescue:
+    - name: Verify | Record the failure with an empty MTA-STS MX list
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'mta_sts_mx_empty': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with a wildcard MTA-STS MX host for a TLD
+  block:
+    - name: Verify | Include mail_discovery role with a wildcard MTA-STS MX host for a TLD  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_discovery_mta_sts_enabled: true
+        mail_discovery_mta_sts_mx:
+          - 'mail.example.com'
+          - '*.com'
+  rescue:
+    - name: Verify | Record the failure with a wildcard MTA-STS MX host for a TLD
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'mta_sts_mx_invalid': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with an MTA-STS max age out of range
+  block:
+    - name: Verify | Include mail_discovery role with an MTA-STS max age out of range  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_discovery_mta_sts_enabled: true
+        mail_discovery_mta_sts_max_age: 31557601
+  rescue:
+    - name: Verify | Record the failure with an MTA-STS max age out of range
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'mta_sts_max_age': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with a TLS-RPT URI without an address
+  block:
+    - name: Verify | Include mail_discovery role with a TLS-RPT URI without an address  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_discovery_tls_rpt_rua:
+          - 'mailto:tls-reports'
+  rescue:
+    - name: Verify | Record the failure with a TLS-RPT URI without an address
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'tls_rpt_rua': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with an MX host with a trailing newline
+  block:
+    - name: Verify | Include mail_discovery role with an MX host with a trailing newline  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_discovery_mta_sts_enabled: true
+        mail_discovery_mta_sts_mx:
+          - "mail.example.com\n"
+  rescue:
+    - name: Verify | Record the failure with an MX host with a trailing newline
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'mta_sts_mx_newline': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with an MTA-STS max age of zero
+  block:
+    - name: Verify | Include mail_discovery role with an MTA-STS max age of zero  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_discovery_mta_sts_enabled: true
+        mail_discovery_mta_sts_max_age: 0
+  rescue:
+    - name: Verify | Record the failure with an MTA-STS max age of zero
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'mta_sts_max_age_zero': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with an MTA-STS max age that is not a number
+  block:
+    - name: Verify | Include mail_discovery role with an MTA-STS max age that is not a number  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_discovery_mta_sts_enabled: true
+        mail_discovery_mta_sts_max_age: 'one week'
+  rescue:
+    - name: Verify | Record the failure with an MTA-STS max age that is not a number
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'mta_sts_max_age_type': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with a single TLS-RPT URI instead of a list
+  block:
+    - name: Verify | Include mail_discovery role with a single TLS-RPT URI instead of a list  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_discovery_tls_rpt_rua: 'mailto:tls-reports@example.com'
+  rescue:
+    - name: Verify | Record the failure with a single TLS-RPT URI instead of a list
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'tls_rpt_rua_string': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with a TLS-RPT URI over plain HTTP
+  block:
+    - name: Verify | Include mail_discovery role with a TLS-RPT URI over plain HTTP  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_discovery_tls_rpt_rua:
+          - 'http://reports.example.net/tlsrpt'
+  rescue:
+    - name: Verify | Record the failure with a TLS-RPT URI over plain HTTP
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'tls_rpt_rua_http': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
+- name: Verify | Run role with a TLS-RPT URI with a quote
+  block:
+    - name: Verify | Include mail_discovery role with a TLS-RPT URI with a quote  # noqa: role-name[path]
+      ansible.builtin.include_role:
+        name: '{{ playbook_dir }}/../..'
+      vars:
+        mail_discovery_tls_rpt_rua:
+          - 'mailto:tls"reports@example.com'
+  rescue:
+    - name: Verify | Record the failure with a TLS-RPT URI with a quote
+      ansible.builtin.set_fact:
+        __verify_validation: >-
+          {{ __verify_validation | default({}) | combine({'tls_rpt_rua_quote': {
+               'msg': ansible_failed_result.msg | default(''),
+               'task': ansible_failed_task.name | default('')}}) }}
+
 # Existing web roots the role must refuse without touching them: writable by
 # the group, and owned by another user than root
 - name: Verify | Create web roots writable by others than root
@@ -288,3 +466,50 @@
       web_root_foreign_owner:
         task: 'Main | Assert web root permissions'
         msg: 'must be a directory owned by root and not writable by group or others'
+      mta_sts_mode:
+        task: 'Main | Assert MTA-STS mode'
+        msg: "mail_discovery_mta_sts_mode must be 'testing', 'enforce' or 'none'"
+      mta_sts_mx_empty:
+        task: 'Main | Assert MTA-STS MX hosts'
+        msg: 'mail_discovery_mta_sts_mx must be a non-empty list'
+      mta_sts_mx_invalid:
+        task: 'Main | Assert MTA-STS MX hosts'
+        msg: 'mail_discovery_mta_sts_mx must be a non-empty list'
+      mta_sts_max_age:
+        task: 'Main | Assert MTA-STS max age'
+        msg: 'mail_discovery_mta_sts_max_age must be an integer from 1 to 31557600'
+      tls_rpt_rua:
+        task: 'Main | Assert TLS-RPT report URIs'
+        msg: 'mail_discovery_tls_rpt_rua must be a list of report URIs'
+      mta_sts_mx_newline:
+        task: 'Main | Assert MTA-STS MX hosts'
+        msg: 'mail_discovery_mta_sts_mx must be a non-empty list'
+      mta_sts_max_age_zero:
+        task: 'Main | Assert MTA-STS max age'
+        msg: 'mail_discovery_mta_sts_max_age must be an integer from 1 to 31557600'
+      mta_sts_max_age_type:
+        task: 'Main | Assert MTA-STS max age'
+        msg: 'mail_discovery_mta_sts_max_age must be an integer from 1 to 31557600'
+      tls_rpt_rua_string:
+        task: 'Main | Assert TLS-RPT report URIs'
+        msg: 'mail_discovery_tls_rpt_rua must be a list of report URIs'
+      tls_rpt_rua_http:
+        task: 'Main | Assert TLS-RPT report URIs'
+        msg: 'mail_discovery_tls_rpt_rua must be a list of report URIs'
+      tls_rpt_rua_quote:
+        task: 'Main | Assert TLS-RPT report URIs'
+        msg: 'mail_discovery_tls_rpt_rua must be a list of report URIs'
+
+# Every case above that turns MTA-STS on stopped at its assert: on a
+# platform with MTA-STS off no policy was written
+- name: Verify | Check MTA-STS policy after the validation runs
+  ansible.builtin.stat:
+    path: /var/www/mail-discovery/.well-known/mta-sts.txt
+  register: __verify_mta_sts_after_validation
+  when: not mail_discovery_mta_sts_enabled | bool
+
+- name: Verify | Assert no MTA-STS policy was written by the refused runs
+  ansible.builtin.assert:
+    that:
+      - not __verify_mta_sts_after_validation.stat.exists
+  when: not mail_discovery_mta_sts_enabled | bool
