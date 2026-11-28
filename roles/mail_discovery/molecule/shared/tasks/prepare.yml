@@ -134,7 +134,7 @@
   loop: '{{ mail_discovery_domains }}'
   vars:
     __prepare_names: >-
-      {{ ['autoconfig.' ~ item, 'autodiscover.' ~ item]
+      {{ ['autoconfig.' ~ item, 'autodiscover.' ~ item, 'mta-sts.' ~ item]
          + ([mail_discovery_web_host] if item == mail_discovery_domains | first else []) }}
 
 # Both self-signed certificates in one file: the CA file of the HTTP check

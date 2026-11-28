@@ -134,6 +134,63 @@
           fqdn fact, is missing or not fully qualified on this host.
         quiet: true
 
+    - name: Main | Assert MTA-STS mode
+      ansible.builtin.assert:
+        that:
+          - mail_discovery_mta_sts_mode in ['testing', 'enforce', 'none']
+        fail_msg: >-
+          mail_discovery_mta_sts_mode must be 'testing', 'enforce' or 'none'.
+        quiet: true
+      when: mail_discovery_mta_sts_enabled | bool
+
+    # RFC 8461: an mx entry is a host name, optionally with a leading '*.'
+    # that matches one label
+    - name: Main | Assert MTA-STS MX hosts
+      ansible.builtin.assert:
+        that:
+          - mail_discovery_mta_sts_mx is sequence
+          - mail_discovery_mta_sts_mx is not string
+          - mail_discovery_mta_sts_mx is not mapping
+          - mail_discovery_mta_sts_mx | length > 0
+          - mail_discovery_mta_sts_mx | reject('string') | list | length == 0
+          - mail_discovery_mta_sts_mx | map('regex_replace', '^\*\.', '')
+            | reject('match', __mail_discovery_hostname_regex) | list | length == 0
+        fail_msg: >-
+          mail_discovery_mta_sts_mx must be a non-empty list of the MX host
+          names of the mail domains, optionally with a leading '*.' (e.g.
+          ['mail.example.com', '*.mx.example.net']).
+        quiet: true
+      when: mail_discovery_mta_sts_enabled | bool
+
+    # Digits only, like the ports
+    - name: Main | Assert MTA-STS max age
+      ansible.builtin.assert:
+        that:
+          - mail_discovery_mta_sts_max_age | string is match('^[0-9]+$')
+          - mail_discovery_mta_sts_max_age | int >= 1
+          - mail_discovery_mta_sts_max_age | int <= 31557600
+        fail_msg: >-
+          mail_discovery_mta_sts_max_age must be an integer from 1 to 31557600
+          seconds (one year, RFC 8461).
+        quiet: true
+      when: mail_discovery_mta_sts_enabled | bool
+
+    - name: Main | Assert TLS-RPT report URIs
+      ansible.builtin.assert:
+        that:
+          - mail_discovery_tls_rpt_rua is sequence
+          - mail_discovery_tls_rpt_rua is not string
+          - mail_discovery_tls_rpt_rua is not mapping
+          - mail_discovery_tls_rpt_rua | reject('string') | list | length == 0
+          - mail_discovery_tls_rpt_rua | reject('match', __mail_discovery_tls_rpt_uri_regex) | list | length == 0
+        fail_msg: >-
+          mail_discovery_tls_rpt_rua must be a list of report URIs, each
+          'mailto:' with an address or 'https://' with a host name (e.g.
+          ['mailto:tls-reports@example.com']), printable ASCII without
+          quotes or backslashes; commas and '!' inside a URI must be
+          percent-encoded.
+        quiet: true
+
 - name: Main | Import files tasks
   ansible.builtin.import_tasks: files.yml
   when: mail_discovery_enabled | bool

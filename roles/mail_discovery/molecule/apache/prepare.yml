@@ -11,10 +11,14 @@
     # web host name (target of the Autodiscover SRV records) in the first one
     apache_enabled: true
     apache_ssl_enabled: true
+    # Redirect of the example.net vhost below (not part of the README)
+    apache_modules_enabled:
+      - alias
     apache_vhosts_ssl:
       - server_name: 'autoconfig.example.com'
         server_alias:
           - 'autodiscover.example.com'
+          - 'mta-sts.example.com'
           - '{{ mail_discovery_web_host }}'
         document_root: '/var/www/mail-discovery'
         certificate_file: '/etc/letsencrypt/live/autoconfig.example.com/fullchain.pem'
@@ -25,12 +29,22 @@
       - server_name: 'autoconfig.example.org'
         server_alias:
           - 'autodiscover.example.org'
+          - 'mta-sts.example.org'
         document_root: '/var/www/mail-discovery'
         certificate_file: '/etc/letsencrypt/live/autoconfig.example.org/fullchain.pem'
         certificate_key_file: '/etc/letsencrypt/live/autoconfig.example.org/privkey.pem'
         certificate_chain_file: ''
         custom_config: |
           AddType application/x-apple-aspen-config .mobileconfig
+      # Not part of the README: redirects the MTA-STS policy of example.net,
+      # so verify.yml proves the HTTP check does not follow the redirect
+      - server_name: 'mta-sts.example.net'
+        document_root: '/var/www/mail-discovery'
+        certificate_file: '/etc/letsencrypt/live/autoconfig.example.com/fullchain.pem'
+        certificate_key_file: '/etc/letsencrypt/live/autoconfig.example.com/privkey.pem'
+        certificate_chain_file: ''
+        custom_config: |
+          Redirect 301 / https://mta-sts.example.com/
 
   tasks:
     - name: Prepare | Import shared environment tasks

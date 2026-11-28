@@ -84,6 +84,40 @@ mail_discovery_pop3_port: 995
 mail_discovery_apple_profile_enabled: false
 
 #
+# MTA-STS and TLS-RPT
+#
+# MTA-STS (RFC 8461) tells sending mail servers that the MX hosts of the
+# domains accept mail only over TLS with a valid certificate. TLS-RPT (RFC
+# 8460) names where they send daily reports about failed TLS connections.
+
+# Render the MTA-STS policy into <web_root>/.well-known/mta-sts.txt, served
+# at https://mta-sts.<domain>/.well-known/mta-sts.txt for every mail domain.
+# The policy id of the _mta-sts TXT record is derived from the policy, so it
+# changes whenever the policy changes. Turning it off removes the file.
+mail_discovery_mta_sts_enabled: false
+
+# Policy mode: 'testing' (senders deliver anyway and report failures),
+# 'enforce' (senders refuse to deliver without valid TLS) or 'none'
+# (withdraws a published policy)
+mail_discovery_mta_sts_mode: 'testing'
+
+# MX host names the policy allows, one policy for all mail domains (required
+# when MTA-STS is enabled). A leading '*.' matches one label (RFC 8461).
+# Example:
+#   - 'mail.example.com'
+#   - '*.mx.example.net'
+mail_discovery_mta_sts_mx: []
+
+# Seconds a sender caches the policy (1 to 31557600, one year)
+mail_discovery_mta_sts_max_age: 604800
+
+# Report URIs of the _smtp._tls TXT record ('mailto:' or 'https:'), also
+# without MTA-STS (the reports cover DANE as well). Empty: no record.
+# Example:
+#   - 'mailto:tls-reports@example.com'
+mail_discovery_tls_rpt_rua: []
+
+#
 # DNS
 #
 
@@ -101,8 +135,9 @@ mail_discovery_dns_resolver: ''
 mail_discovery_dns_resolver_port: 53
 
 # Host name of the web server that serves the files: the expected target of
-# the autoconfig.<domain> and autodiscover.<domain> records (CNAME, or A/AAAA
-# records with the addresses of this host)
+# the autoconfig.<domain>, autodiscover.<domain> and (with MTA-STS)
+# mta-sts.<domain> records (CNAME, or A/AAAA records with the addresses of
+# this host)
 mail_discovery_web_host: '{{ ansible_facts["fqdn"] }}'
 
 #
@@ -110,9 +145,9 @@ mail_discovery_web_host: '{{ ansible_facts["fqdn"] }}'
 #
 
 # Request every published file over HTTPS the way the clients do (GET on
-# the Mozilla files and the Apple profiles, POST on the Autodiscover file)
-# and report each one as reachable or unreachable. An unreachable file never
-# fails the run.
+# the Mozilla files, the Apple profiles and the MTA-STS policy, POST on the
+# Autodiscover file) and report each one as reachable or unreachable. An
+# unreachable file never fails the run.
 mail_discovery_http_check_enabled: true
 
 # Host the requests are sent from. Default: the controller, like the DNS

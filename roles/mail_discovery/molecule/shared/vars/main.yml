@@ -28,10 +28,21 @@ mail_discovery_pop3_enabled: '{{ __molecule_toggles.pop3 }}'
 mail_discovery_apple_profile_enabled: '{{ __molecule_toggles.apple }}'
 mail_discovery_dns_check_enabled: '{{ __molecule_toggles.dns_check }}'
 mail_discovery_http_check_enabled: '{{ __molecule_toggles.http_check }}'
+mail_discovery_mta_sts_enabled: '{{ __molecule_toggles.mta_sts }}'
+mail_discovery_tls_rpt_rua: '{{ __molecule_toggles.tls_rpt_rua }}'
+
+# MTA-STS policy of the platforms with MTA-STS on; the test zone
+# (molecule-dns.conf) publishes the id of the policy of 'full', which has
+# the DNS check on. Mode and max age per toggle set.
+mail_discovery_mta_sts_mode: '{{ __molecule_toggles.mta_sts_mode }}'
+mail_discovery_mta_sts_max_age: '{{ __molecule_toggles.mta_sts_max_age }}'
+mail_discovery_mta_sts_mx:
+  - 'mail.example.com'
+  - '*.mx.example.net'
 
 __molecule_toggles: '{{ __molecule_variants[molecule_variant] }}'
 __molecule_variants:
-  # Everything on, display name set
+  # Everything on, display name set, TLS-RPT with two URIs
   full:
     display_name: 'Example Mail'
     display_short_name: ''
@@ -41,8 +52,18 @@ __molecule_variants:
     apple: true
     dns_check: true
     http_check: true
+    mta_sts: true
+    # Mode testing, max age of the role default; verify compares the file
+    # with the policy, written out with YAML escapes for CRLF
+    mta_sts_mode: 'testing'
+    mta_sts_max_age: 604800
+    mta_sts_policy: "version: STSv1\r\nmode: testing\r\n\
+      mx: mail.example.com\r\nmx: *.mx.example.net\r\nmax_age: 604800\r\n"
+    tls_rpt_rua: &molecule_tls_rpt_rua
+      - 'mailto:tls-reports@example.com'
+      - 'https://reports.example.net/tlsrpt'
   # Implicit TLS only, no POP3, no Apple profile, names from the fallbacks
-  # except the short name
+  # except the short name, TLS-RPT without MTA-STS
   implicit_tls:
     display_name: ''
     display_short_name: 'Example'
@@ -52,9 +73,15 @@ __molecule_variants:
     apple: false
     dns_check: true
     http_check: true
+    mta_sts: false
+    mta_sts_mode: 'testing'
+    mta_sts_max_age: 604800
+    mta_sts_policy: ''
+    tls_rpt_rua: *molecule_tls_rpt_rua
   # STARTTLS only (one outgoing server on 587 in Autodiscover and the Apple
   # profile), DNS check off (the records are printed unchecked) and HTTP
-  # check off
+  # check off, MTA-STS in enforce mode with a shorter max age, without
+  # TLS-RPT
   starttls:
     display_name: 'Example Mail'
     display_short_name: 'Example'
@@ -64,6 +91,12 @@ __molecule_variants:
     apple: true
     dns_check: false
     http_check: false
+    mta_sts: true
+    mta_sts_mode: 'enforce'
+    mta_sts_max_age: 86400
+    mta_sts_policy: "version: STSv1\r\nmode: enforce\r\n\
+      mx: mail.example.com\r\nmx: *.mx.example.net\r\nmax_age: 86400\r\n"
+    tls_rpt_rua: []
   # Role defaults for every toggle except the Apple profile
   defaults:
     display_name: ''
@@ -74,3 +107,8 @@ __molecule_variants:
     apple: true
     dns_check: true
     http_check: true
+    mta_sts: false
+    mta_sts_mode: 'testing'
+    mta_sts_max_age: 604800
+    mta_sts_policy: ''
+    tls_rpt_rua: []

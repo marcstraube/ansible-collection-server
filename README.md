@@ -55,7 +55,7 @@ for the base system (podman, pki, firewalld, fail2ban).
 | **rspamd**          | rspamd mail filter: milter, DKIM/ARC signing, clamd, Valkey     |
 | **roundcube**       | Roundcube webmail with Sieve filters, sharing, password change  |
 | **sogo**            | SOGo groupware: webmail, CalDAV, CardDAV, optional ActiveSync   |
-| **mail_discovery**  | Client discovery data: Autoconfig, Autodiscover, Apple profile  |
+| **mail_discovery**  | Autoconfig, Autodiscover, Apple profile, MTA-STS, TLS-RPT       |
 
 ### Applications
 
