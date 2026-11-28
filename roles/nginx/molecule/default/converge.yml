@@ -157,6 +157,34 @@
       - path: '/var/www/writable.example.local/uploads'
     nginx_stub_status_enabled: true
     nginx_stub_status_path: '/nginx_status'
+    # TCP proxy on a port outside http_port_t to the static site on port
+    # 80 (the backup server is never used while the first one answers), and
+    # a UDP proxy. The role installs the dynamic module but its nginx.conf
+    # does not include the distribution's module snippets, so it is loaded
+    # here.
+    nginx_modules:
+      - 'stream'
+    nginx_extra_config: 'load_module {{ __converge_stream_module[ansible_facts["os_family"]] }};'
+    nginx_stream_enabled: true
+    nginx_stream_upstreams:
+      - name: 'test_stream_backend'
+        servers:
+          - address: '127.0.0.1:80'
+          - address: '127.0.0.1:8447'
+            weight: 2
+            backup: true
+    nginx_stream_servers:
+      - listen: '127.0.0.1:8446'
+        proxy_pass: 'test_stream_backend'
+        proxy_connect_timeout: '1s'
+      - listen: '127.0.0.1:10053'
+        udp: true
+        proxy_pass: '127.0.0.1:53'
+        proxy_timeout: '1s'
+    __converge_stream_module:
+      Archlinux: '/usr/lib/nginx/modules/ngx_stream_module.so'
+      Debian: '/usr/lib/nginx/modules/ngx_stream_module.so'
+      RedHat: '/usr/lib64/nginx/modules/ngx_stream_module.so'
 
   tasks:
     - name: Converge | Include nginx role  # noqa: role-name[path]

@@ -19,6 +19,8 @@ __nginx_config_file: '/etc/nginx/nginx.conf'
 __nginx_sites_dir: '/etc/nginx/sites-available'
 __nginx_sites_enabled_dir: '/etc/nginx/sites-enabled'
 __nginx_conf_d_dir: '/etc/nginx/conf.d'
+# Stream configuration, outside conf.d: the http block includes conf.d/*.conf
+__nginx_stream_config_file: '/etc/nginx/stream.conf'
 
 # Log and run directories
 __nginx_log_dir: '/var/log/nginx'

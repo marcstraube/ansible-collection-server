@@ -207,6 +207,20 @@
     group: root
     mode: '0755'
 
+# The stream block of nginx.conf includes this file, so it has to exist
+# before the check of nginx.conf, or the first run with stream enabled fails
+# on the missing file; a changed nginx.conf is then checked together with
+# the stream servers. Kept outside conf.d, which the http block includes.
+- name: Configure | Deploy stream configuration
+  ansible.builtin.template:
+    src: stream.conf.j2
+    dest: '{{ __nginx_stream_config_file }}'
+    owner: root
+    group: root
+    mode: '0644'
+  when: nginx_stream_enabled | bool
+  notify: Reload Nginx
+
 - name: Configure | Deploy main nginx.conf
   ansible.builtin.template:
     src: nginx.conf.j2
@@ -250,19 +264,11 @@
     label: '{{ item.name }}'
   notify: Reload Nginx
 
-- name: Configure | Deploy stream configuration
-  ansible.builtin.template:
-    src: stream.conf.j2
-    dest: '{{ __nginx_conf_d_dir }}/stream.conf'
-    owner: root
-    group: root
-    mode: '0644'
-  when: nginx_stream_enabled | bool
-  notify: Reload Nginx
-
+# Removed after nginx.conf, which no longer includes it once the stream
+# block is gone
 - name: Configure | Remove stream config if disabled
   ansible.builtin.file:
-    path: '{{ __nginx_conf_d_dir }}/stream.conf'
+    path: '{{ __nginx_stream_config_file }}'
     state: absent
   when: not (nginx_stream_enabled | bool)
   notify: Reload Nginx

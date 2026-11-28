@@ -797,6 +797,18 @@
       vars:
         nginx_enabled: true
 
+    # The run without the converge settings has stream disabled
+    - name: Side Effect | Stat the stream config with stream disabled
+      ansible.builtin.stat:
+        path: /etc/nginx/stream.conf
+      register: __side_effect_stream_stat
+
+    - name: Side Effect | Assert the stream config is removed when disabled
+      ansible.builtin.assert:
+        that: not __side_effect_stream_stat.stat.exists
+        fail_msg: '/etc/nginx/stream.conf is still present with nginx_stream_enabled: false'
+        success_msg: 'The stream config is removed when stream is disabled'
+
     - name: Side Effect | Remove the configuration with the relative include
       ansible.builtin.file:
         path: /etc/nginx/conf.d/zz-relative-include.conf
